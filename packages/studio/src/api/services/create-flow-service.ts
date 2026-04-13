@@ -6,7 +6,7 @@
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildStudioBookConfig } from "../book-create.js";
-import type { ConfirmCreateRequest } from "../schemas/create-flow-schema.js";
+import type { ConfirmCreateRequest, CreativeBrief } from "../schemas/create-flow-schema.js";
 import type { StudioBookConfigDraft } from "../book-create.js";
 
 export interface CreateFlowServiceDeps {
@@ -35,7 +35,7 @@ async function isBookAlreadyCreated(bookDir: string): Promise<boolean> {
  * Persists the brief as an external context file in the book directory so that
  * PipelineRunner can use it as `externalContext` during initBook.
  */
-async function persistBrief(bookDir: string, brief: unknown, mode: string): Promise<void> {
+async function persistBrief(bookDir: string, brief: CreativeBrief, mode: string): Promise<void> {
   const briefDir = join(bookDir, "story", "brief");
   await mkdir(briefDir, { recursive: true });
 
@@ -51,7 +51,7 @@ async function persistBrief(bookDir: string, brief: unknown, mode: string): Prom
 /**
  * Serializes a brief to a markdown-friendly string for use as externalContext.
  */
-export function briefToExternalContext(brief: unknown): string {
+export function briefToExternalContext(brief: CreativeBrief | string): string {
   return typeof brief === "string" ? brief : JSON.stringify(brief, null, 2);
 }
 
