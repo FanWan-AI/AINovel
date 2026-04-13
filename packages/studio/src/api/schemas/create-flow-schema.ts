@@ -29,6 +29,7 @@ export interface ConfirmCreateBookConfig {
 
 export interface ConfirmCreateRequest {
   readonly mode?: CreateMode;
+  /** Reserved for future brief-version tracking; currently informational only. */
   readonly briefId?: string;
   readonly brief?: CreativeBrief;
   readonly bookConfig: ConfirmCreateBookConfig;

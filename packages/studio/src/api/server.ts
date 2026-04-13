@@ -212,8 +212,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const externalContext = body.brief ? briefToExternalContext(body.brief) : undefined;
-    // Build pipeline config eagerly so the initBook callback stays synchronous
-    // (avoids additional async boundaries in the fire-and-forget chain).
     const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
 
     try {
