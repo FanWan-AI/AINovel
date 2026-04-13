@@ -1,0 +1,76 @@
+name: Agent Task
+description: Structured task for VS Code Copilot Agent / cloud agent execution
+labels: ["agent-task"]
+body:
+  - type: input
+    id: goal
+    attributes:
+      label: Goal
+      description: One-sentence target outcome.
+      placeholder: Add brief normalize + confirm flow to Studio create path
+    validations:
+      required: true
+
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In Scope
+      description: Files/modules allowed to change.
+      placeholder: |
+        - packages/studio/src/pages/BookCreate.tsx
+        - packages/studio/src/api/server.ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of Scope
+      description: Explicit non-goals to prevent agent drift.
+      placeholder: |
+        - No model provider changes
+        - No schema-breaking changes to book.json
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Measurable done conditions.
+      placeholder: |
+        1. /api/books/create/brief/normalize returns normalized brief.
+        2. UI can edit summary before create.
+        3. Existing /api/books/create remains backward compatible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Required Tests
+      description: Minimum verification expected from agent PR.
+      placeholder: |
+        - pnpm typecheck
+        - pnpm test
+        - Manual: create a book in Studio and verify it opens
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Time, risk, or design constraints.
+      placeholder: Keep API response shape stable where possible.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / Links
+      description: Link docs, prior PRs, screenshots, errors.
+    validations:
+      required: false
+

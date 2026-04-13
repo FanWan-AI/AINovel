@@ -1,0 +1,54 @@
+name: Agent PR Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [master, main]
+
+concurrency:
+  group: agent-pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-pr-body:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required PR sections
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          required=(
+            "## Agent Task Link"
+            "## Acceptance Criteria Mapping"
+            "## Risk & Rollback"
+            "## Evidence"
+          )
+          for heading in "${required[@]}"; do
+            if ! grep -Fq "$heading" <<< "$PR_BODY"; then
+              echo "Missing required PR section: $heading"
+              exit 1
+            fi
+          done
+
+  verify-build:
+    runs-on: ubuntu-latest
+    needs: validate-pr-body
+    strategy:
+      matrix:
+        node-version: [22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
