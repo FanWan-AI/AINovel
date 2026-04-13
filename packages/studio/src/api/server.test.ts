@@ -505,4 +505,155 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(pipelineConfigs.at(-1)).toMatchObject({ externalContext: "以师债线为准同步状态。" });
     expect(resyncChapterArtifactsMock).toHaveBeenCalledWith("demo-book", 3);
   });
+
+  it("POST /api/v2/books/create/confirm triggers book creation and returns creating status", async () => {
+    initBookMock.mockResolvedValueOnce(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "simple",
+        bookConfig: {
+          title: "New V2 Book",
+          genre: "xuanhuan",
+          platform: "qidian",
+          language: "zh",
+          chapterWordCount: 2500,
+          targetChapters: 100,
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "creating",
+      bookId: "new-v2-book",
+    });
+    expect(initBookMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST /api/v2/books/create/confirm returns 409 when book with same id already exists", async () => {
+    await mkdir(join(root, "books", "conflict-book", "story"), { recursive: true });
+    await writeFile(join(root, "books", "conflict-book", "book.json"), JSON.stringify({ id: "conflict-book" }), "utf-8");
+    await writeFile(join(root, "books", "conflict-book", "story", "story_bible.md"), "# existing", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookConfig: {
+          title: "Conflict Book",
+          genre: "xuanhuan",
+          platform: "qidian",
+          language: "zh",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining('Book "conflict-book" already exists'),
+    });
+    expect(initBookMock).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/v2/books/create/confirm passes brief as externalContext to pipeline", async () => {
+    initBookMock.mockResolvedValueOnce(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const brief = {
+      title: "科幻书",
+      coreGenres: ["科幻", "悬疑"],
+      protagonist: "机器人侦探",
+    };
+
+    const response = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "pro",
+        brief,
+        bookConfig: {
+          title: "科幻书",
+          genre: "scifi",
+          language: "zh",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(pipelineConfigs.at(-1)).toMatchObject({
+      externalContext: JSON.stringify(brief, null, 2),
+    });
+  });
+
+  it("POST /api/v2/books/create/confirm reports async failures through create-status endpoint", async () => {
+    initBookMock.mockRejectedValueOnce(new Error("INKOS_LLM_API_KEY not set"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookConfig: {
+          title: "Broken V2 Book",
+          genre: "xuanhuan",
+          language: "zh",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await Promise.resolve();
+
+    const status = await app.request("http://localhost/api/books/broken-v2-book/create-status");
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      status: "error",
+      error: "INKOS_LLM_API_KEY not set",
+    });
+  });
+
+  it("POST /api/v2/books/create/confirm is idempotent when book is already being created", async () => {
+    let resolveInit!: () => void;
+    initBookMock.mockReturnValueOnce(new Promise<void>((resolve) => { resolveInit = resolve; }));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const firstResponse = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookConfig: { title: "Idempotent Book", genre: "xuanhuan", language: "zh" },
+      }),
+    });
+    expect(firstResponse.status).toBe(200);
+    await expect(firstResponse.json()).resolves.toMatchObject({ status: "creating", bookId: "idempotent-book" });
+
+    // Second call while still in progress — should not call initBook again
+    const secondResponse = await app.request("http://localhost/api/v2/books/create/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookConfig: { title: "Idempotent Book", genre: "xuanhuan", language: "zh" },
+      }),
+    });
+    expect(secondResponse.status).toBe(200);
+    await expect(secondResponse.json()).resolves.toMatchObject({ status: "creating", bookId: "idempotent-book" });
+
+    expect(initBookMock).toHaveBeenCalledTimes(1);
+    resolveInit();
+  });
 });

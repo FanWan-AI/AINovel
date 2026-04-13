@@ -19,6 +19,8 @@ import { join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
+import { confirmCreateBook, briefToExternalContext } from "./services/create-flow-service.js";
+import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 
 // --- Event bus for SSE ---
 
@@ -195,6 +197,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     );
 
     return c.json({ status: "creating", bookId });
+  });
+
+  // --- Book Create v2 ---
+
+  app.post("/api/v2/books/create/confirm", async (c) => {
+    const body = await c.req.json<ConfirmCreateRequest>();
+
+    if (!body.bookConfig?.title) {
+      return c.json({ error: "bookConfig.title is required" }, 400);
+    }
+    if (!body.bookConfig?.genre) {
+      return c.json({ error: "bookConfig.genre is required" }, 400);
+    }
+
+    const externalContext = body.brief ? briefToExternalContext(body.brief) : undefined;
+    const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+
+    try {
+      const { bookId } = await confirmCreateBook(body, {
+        bookDir: (id) => state.bookDir(id),
+        broadcast,
+        bookCreateStatus,
+        initBook: (bookConfig) => pipeline.initBook(bookConfig),
+      });
+      return c.json({ status: "creating", bookId });
+    } catch (e) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === "BOOK_CREATE_CONFLICT") {
+        return c.json({ error: e.message }, 409);
+      }
+      return c.json({ error: String(e) }, 500);
+    }
   });
 
   app.get("/api/books/:id/create-status", async (c) => {
