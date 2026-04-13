@@ -141,3 +141,34 @@ export interface ApiErrorResponse {
     readonly message: string;
   };
 }
+
+// --- Brief (v2 CreateFlow) ---
+
+export type CreateMode = "simple" | "pro";
+
+export interface CreativeBrief {
+  readonly title: string;
+  readonly coreGenres: string[];
+  readonly positioning: string;
+  readonly worldSetting: string;
+  readonly protagonist: string;
+  readonly mainConflict: string;
+  readonly endingDirection?: string;
+  readonly styleRules: string[];
+  readonly forbiddenPatterns: string[];
+  readonly targetAudience?: string;
+  readonly platformIntent?: string;
+}
+
+export interface NormalizeBriefRequest {
+  readonly mode: CreateMode;
+  readonly title: string;
+  readonly rawInput: string;
+  readonly platform?: string;
+  readonly language?: "zh" | "en";
+}
+
+export interface NormalizeBriefResponse {
+  readonly briefId: string;
+  readonly normalizedBrief: CreativeBrief;
+}
