@@ -248,6 +248,29 @@ const strings = {
   // BookCreate extras
   "create.platform": { zh: "平台", en: "Platform" },
 
+  // BookCreateEntry
+  "entry.title": { zh: "创建新书籍", en: "Create a New Book" },
+  "entry.subtitle": { zh: "选择创作模式开始你的故事", en: "Choose a creation mode to start your story" },
+  "entry.quickTitle": { zh: "快速开始", en: "Quick Start" },
+  "entry.quickDesc": { zh: "用自然语言描述你的故事，AI 帮你整理成创作摘要", en: "Describe your story in natural language and let AI organize it into a creative brief" },
+  "entry.proTitle": { zh: "专业模式", en: "Professional Mode" },
+  "entry.proDesc": { zh: "逐步填写详细创作蓝图，精细把控每个设定（即将推出）", en: "Fill in a detailed creation blueprint step by step (Coming soon)" },
+  "entry.quickBtn": { zh: "快速开始", en: "Quick Start" },
+  "entry.proBtn": { zh: "敬请期待", en: "Coming Soon" },
+
+  // BookCreateSimple
+  "simple.title": { zh: "快速模式", en: "Quick Mode" },
+  "simple.bookTitleLabel": { zh: "书名", en: "Book Title" },
+  "simple.bookTitlePlaceholder": { zh: "请输入书名...", en: "Enter book title..." },
+  "simple.rawInputLabel": { zh: "创意描述", en: "Creative Description" },
+  "simple.rawInputPlaceholder": { zh: "用自然语言描述你的故事创意，包括世界观、主角、冲突、风格等...", en: "Describe your story idea in natural language — world setting, protagonist, conflict, style..." },
+  "simple.normalizeBtn": { zh: "整理成创作摘要", en: "Generate Brief" },
+  "simple.normalizing": { zh: "整理中...", en: "Generating..." },
+  "simple.briefResult": { zh: "创作摘要", en: "Creative Brief" },
+  "simple.titleRequired": { zh: "请输入书名", en: "Book title is required" },
+  "simple.inputRequired": { zh: "请输入创意描述", en: "Creative description is required" },
+  "simple.backToEntry": { zh: "返回模式选择", en: "Back to Mode Selection" },
+
   // Common
   "common.save": { zh: "保存", en: "Save" },
   "common.cancel": { zh: "取消", en: "Cancel" },

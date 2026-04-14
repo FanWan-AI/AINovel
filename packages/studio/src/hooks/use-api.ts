@@ -186,3 +186,28 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }
+
+export async function normalizeBrief(payload: {
+  readonly mode: "simple" | "pro";
+  readonly title: string;
+  readonly rawInput: string;
+  readonly platform?: string;
+  readonly language?: "zh" | "en";
+}): Promise<{
+  readonly briefId: string;
+  readonly normalizedBrief: {
+    readonly title: string;
+    readonly coreGenres: string[];
+    readonly positioning: string;
+    readonly worldSetting: string;
+    readonly protagonist: string;
+    readonly mainConflict: string;
+    readonly endingDirection?: string;
+    readonly styleRules: string[];
+    readonly forbiddenPatterns: string[];
+    readonly targetAudience?: string;
+    readonly platformIntent?: string;
+  };
+}> {
+  return postApi("/v2/books/create/brief/normalize", payload);
+}

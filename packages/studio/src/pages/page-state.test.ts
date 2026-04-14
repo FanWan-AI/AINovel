@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   defaultChapterWordsForLanguage,
   platformOptionsForLanguage,
   pickValidValue,
   waitForBookReady,
 } from "./BookCreate";
+import { callNormalizeBrief } from "./BookCreateSimple";
+import type { postApi } from "../hooks/use-api";
 
 describe("pickValidValue", () => {
   it("keeps the current value when it is still available", () => {
@@ -91,5 +93,54 @@ describe("waitForBookReady", () => {
       delayMs: 0,
       waitImpl: async () => undefined,
     })).rejects.toThrow("INKOS_LLM_API_KEY not set");
+  });
+});
+
+describe("callNormalizeBrief", () => {
+  const stubBrief = {
+    briefId: "brief_test_abc",
+    normalizedBrief: {
+      title: "My Story",
+      coreGenres: ["科幻"],
+      positioning: "A sci-fi adventure",
+      worldSetting: "Near-future earth",
+      protagonist: "Aria",
+      mainConflict: "Consciousness vs machine",
+      endingDirection: undefined,
+      styleRules: [],
+      forbiddenPatterns: [],
+      targetAudience: undefined,
+      platformIntent: undefined,
+    },
+  };
+
+  it("calls the normalize endpoint and returns normalizedBrief on success", async () => {
+    const postApiImpl = vi.fn(async () => stubBrief) as unknown as typeof postApi;
+
+    const result = await callNormalizeBrief(
+      { mode: "simple", title: "My Story", rawInput: "A sci-fi adventure set on near-future earth" },
+      { postApiImpl },
+    );
+
+    expect(postApiImpl).toHaveBeenCalledOnce();
+    expect(postApiImpl).toHaveBeenCalledWith(
+      "/v2/books/create/brief/normalize",
+      { mode: "simple", title: "My Story", rawInput: "A sci-fi adventure set on near-future earth" },
+    );
+    expect(result.briefId).toBe("brief_test_abc");
+    expect(result.normalizedBrief.title).toBe("My Story");
+  });
+
+  it("surfaces API errors as thrown exceptions", async () => {
+    const postApiImpl = vi.fn(async () => {
+      throw new Error("创意整理失败，请简化输入后重试");
+    }) as unknown as typeof postApi;
+
+    await expect(
+      callNormalizeBrief(
+        { mode: "simple", title: "My Story", rawInput: "..." },
+        { postApiImpl },
+      ),
+    ).rejects.toThrow("创意整理失败，请简化输入后重试");
   });
 });

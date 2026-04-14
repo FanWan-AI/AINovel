@@ -4,6 +4,8 @@ import { ChatPanel } from "./components/ChatBar";
 import { Dashboard } from "./pages/Dashboard";
 import { BookDetail } from "./pages/BookDetail";
 import { BookCreate } from "./pages/BookCreate";
+import { BookCreateEntry } from "./pages/BookCreateEntry";
+import { BookCreateSimple } from "./pages/BookCreateSimple";
 import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
 import { ConfigView } from "./pages/ConfigView";
@@ -26,6 +28,8 @@ export type Route =
   | { page: "dashboard" }
   | { page: "book"; bookId: string }
   | { page: "book-create" }
+  | { page: "book-create-entry" }
+  | { page: "book-create-simple" }
   | { page: "chapter"; bookId: string; chapterNumber: number }
   | { page: "analytics"; bookId: string }
   | { page: "config" }
@@ -72,7 +76,9 @@ export function App() {
   const nav = {
     toDashboard: () => setRoute({ page: "dashboard" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
-    toBookCreate: () => setRoute({ page: "book-create" }),
+    toBookCreate: () => setRoute({ page: "book-create-entry" }),
+    toBookCreateEntry: () => setRoute({ page: "book-create-entry" }),
+    toBookCreateSimple: () => setRoute({ page: "book-create-simple" }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
@@ -164,6 +170,8 @@ export function App() {
             {route.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
             {route.page === "book" && <BookDetail bookId={route.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
             {route.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}
+            {route.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
+            {route.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} />}
             {route.page === "chapter" && <ChapterReader bookId={route.bookId} chapterNumber={route.chapterNumber} nav={nav} theme={theme} t={t} />}
             {route.page === "analytics" && <Analytics bookId={route.bookId} nav={nav} theme={theme} t={t} />}
             {route.page === "config" && <ConfigView nav={nav} theme={theme} t={t} />}
