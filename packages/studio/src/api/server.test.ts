@@ -656,4 +656,57 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(initBookMock).toHaveBeenCalledTimes(1);
     resolveInit();
   });
+
+  it("normalizes a valid brief input and returns briefId + normalizedBrief", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v2/books/create/brief/normalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "simple",
+        title: "意识残留协议",
+        rawInput: "2045年，一名前脑机伦理工程师调查失控意识残留事件，揭开吞噬自我认同的阴谋。科幻题材，克制风格。",
+        platform: "tomato",
+        language: "zh",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { briefId: string; normalizedBrief: Record<string, unknown> };
+    expect(typeof data.briefId).toBe("string");
+    expect(data.briefId).toMatch(/^brief_/);
+    expect(data.normalizedBrief).toMatchObject({
+      title: "意识残留协议",
+      coreGenres: expect.any(Array),
+      positioning: expect.any(String),
+      worldSetting: expect.any(String),
+      protagonist: expect.any(String),
+      mainConflict: expect.any(String),
+      styleRules: expect.any(Array),
+      forbiddenPatterns: expect.any(Array),
+    });
+  });
+
+  it("returns 400 with structured error when required brief fields are missing", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v2/books/create/brief/normalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        // mode, title, and rawInput are all missing
+        platform: "tomato",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const data = await response.json() as { error: { code: string; message: string } };
+    expect(data.error.code).toBe("BRIEF_VALIDATION_FAILED");
+    expect(data.error.message).toContain("mode");
+    expect(data.error.message).toContain("title");
+    expect(data.error.message).toContain("rawInput");
+  });
 });

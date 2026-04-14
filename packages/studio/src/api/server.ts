@@ -21,6 +21,8 @@ import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import { confirmCreateBook, briefToExternalContext } from "./services/create-flow-service.js";
 import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
+import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
+import { normalizeBrief } from "./services/brief-service.js";
 
 // --- Event bus for SSE ---
 
@@ -197,6 +199,24 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     );
 
     return c.json({ status: "creating", bookId });
+  });
+
+  // --- V2: Brief Normalize ---
+
+  app.post("/api/v2/books/create/brief/normalize", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const validation = validateNormalizeBriefInput(body);
+
+    if (!validation.ok) {
+      throw new ApiError(
+        400,
+        "BRIEF_VALIDATION_FAILED",
+        validation.errors.map((e) => `${e.field}: ${e.message}`).join("; "),
+      );
+    }
+
+    const result = normalizeBrief(validation.value);
+    return c.json(result);
   });
 
   // --- Book Create v2 ---
