@@ -399,6 +399,7 @@ export const strings = {
   "writeNext.cancel": { zh: "取消", en: "Cancel" },
   "writeNext.submit": { zh: "开始写作", en: "Start Writing" },
   "writeNext.quickWrite": { zh: "快速写", en: "Quick Write" },
+  "writeNext.quickWriteTip": { zh: "速度快，但可控性低，适合快速推进剧情。", en: "Fast, but with reduced control — best for quickly advancing the plot." },
 
   // Dual-button planning panel
   "book.planNextAndWrite": { zh: "规划下章并写作", en: "Plan Next Chapter" },
@@ -408,6 +409,10 @@ export const strings = {
   "writeNext.applyPlan": { zh: "按此建议写作", en: "Write with This Plan" },
   "writeNext.planHint": { zh: "点击「生成建议」获取 AI 规划，或切换到「手动规划」自定义。", en: "Click \"Generate Plan\" to get an AI plan, or switch to \"Manual Plan\" to customise." },
   "writeNext.planError": { zh: "生成失败，请重试", en: "Failed to generate plan. Please try again." },
+
+  // Quality-gate error shown when AI output is too generic
+  "book.planLowConfidence": { zh: "建议生成失败，请补充关键冲突后再试", en: "Suggestion failed — please add more conflict context and try again." },
+  "book.planLowConfidenceRetry": { zh: "重试", en: "Retry" },
 } as const;
 
 export type StringKey = keyof typeof strings;

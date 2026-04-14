@@ -24,7 +24,7 @@ import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
 import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
-import { previewNextPlan } from "./services/next-plan-service.js";
+import { previewNextPlan, PlanLowConfidenceError } from "./services/next-plan-service.js";
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
@@ -373,6 +373,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
       return c.json({ plan });
     } catch (e) {
+      if (e instanceof PlanLowConfidenceError) {
+        return c.json({ code: "PLAN_LOW_CONFIDENCE", message: e.message }, 409);
+      }
       return c.json({ error: { code: "PLAN_FAILED", message: e instanceof Error ? e.message : String(e) } }, 500);
     }
   });

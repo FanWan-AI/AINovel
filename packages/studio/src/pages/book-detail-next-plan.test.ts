@@ -23,6 +23,10 @@ describe("classifyNextPlanError", () => {
     expect(classifyNextPlanError(500)).toBe("serverError");
   });
 
+  it("maps HTTP 409 to the lowConfidence error kind", () => {
+    expect(classifyNextPlanError(409)).toBe("lowConfidence");
+  });
+
   it("maps any other status to the unknown error kind", () => {
     expect(classifyNextPlanError(400)).toBe("unknown");
     expect(classifyNextPlanError(502)).toBe("unknown");
@@ -117,6 +121,22 @@ describe("fetchNextPlan", () => {
     const error = await fetchNextPlan("book-3", { fetchImpl }).catch((e) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as InstanceType<typeof ApiError>).status).toBe(404);
+  });
+
+  it("throws ApiError with status 409 when the server returns PLAN_LOW_CONFIDENCE", async () => {
+    const { ApiError } = await import("../hooks/use-api");
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ code: "PLAN_LOW_CONFIDENCE", message: "建议质量不足，请补充关键冲突后再试。" }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const error = await fetchNextPlan("book-4", { fetchImpl }).catch((e) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as InstanceType<typeof ApiError>).status).toBe(409);
+    // classifyNextPlanError should map 409 → lowConfidence
+    expect(classifyNextPlanError((error as InstanceType<typeof ApiError>).status)).toBe("lowConfidence");
   });
 });
 
