@@ -49,6 +49,11 @@ interface BookData {
   readonly nextChapter: number;
 }
 
+interface BookCreateStatusData {
+  readonly status: "creating" | "error" | "missing";
+  readonly error?: string;
+}
+
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
@@ -94,6 +99,10 @@ export function BookDetail({
 }) {
   const c = useColors(theme);
   const { data, loading, error, refetch } = useApi<BookData>(`/books/${bookId}`);
+  const {
+    data: createStatus,
+    refetch: refetchCreateStatus,
+  } = useApi<BookCreateStatusData>(`/books/${bookId}/create-status`);
   const [writeRequestPending, setWriteRequestPending] = useState(false);
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -135,6 +144,22 @@ export function BookDetail({
       refetch();
     }
   }, [bookId, refetch, sse.messages]);
+
+  useEffect(() => {
+    const isNotFound = typeof error === "string" && /not found/i.test(error);
+    if (!isNotFound || createStatus?.status !== "creating") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refetch();
+      void refetchCreateStatus();
+    }, 1500);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [createStatus?.status, error, refetch, refetchCreateStatus]);
 
   const handleWriteNext = async () => {
     setWriteRequestPending(true);
@@ -279,7 +304,32 @@ export function BookDetail({
     </div>
   );
 
-  if (error) return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
+  if (error) {
+    const isNotFound = /not found/i.test(error);
+    if (isNotFound && createStatus?.status === "creating") {
+      return (
+        <div className="rounded-xl border border-primary/20 bg-primary/[0.04] p-8 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+            <div className="text-base font-semibold">{t("book.pipelineWriting")}</div>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {t("common.loading")}
+          </p>
+        </div>
+      );
+    }
+
+    if (createStatus?.status === "error" && createStatus.error) {
+      return (
+        <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">
+          Error: {createStatus.error}
+        </div>
+      );
+    }
+
+    return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
+  }
   if (!data) return null;
 
   const { book, chapters } = data;

@@ -34,18 +34,20 @@ export function normalizeBrief(input: NormalizeBriefInput): NormalizeBriefRespon
   // Apply normalizeBriefText to the title as well to ensure consistent output.
   const normalizedTitle = normalizeBriefText(input.title);
 
+  const parsed = parseStructuredInput(input.rawInput);
+
   const normalizedBrief: CreativeBrief = {
     title: normalizedTitle,
-    coreGenres: extractGenres(input.rawInput),
-    positioning: extractPositioning(input.rawInput),
-    worldSetting: extractWorldSetting(input.rawInput),
-    protagonist: extractProtagonist(input.rawInput),
-    mainConflict: extractMainConflict(input.rawInput),
+    coreGenres: extractGenres(parsed),
+    positioning: extractPositioning(parsed),
+    worldSetting: extractWorldSetting(parsed),
+    protagonist: extractProtagonist(parsed),
+    mainConflict: extractMainConflict(parsed),
     endingDirection: undefined,
-    styleRules: extractStyleRules(input.rawInput),
+    styleRules: extractStyleRules(parsed),
     forbiddenPatterns: [],
-    targetAudience: undefined,
-    platformIntent: input.platform,
+    targetAudience: parsed.targetAudience || undefined,
+    platformIntent: input.platform ?? parsed.platformIntent ?? undefined,
   };
 
   return { briefId, normalizedBrief };
@@ -54,6 +56,95 @@ export function normalizeBrief(input: NormalizeBriefInput): NormalizeBriefRespon
 // --- Extraction helpers (heuristic, LLM-agnostic) ---
 
 const PENDING = "待定";
+
+interface ParsedStructuredInput {
+  readonly seedText: string;
+  readonly genreHint: string;
+  readonly positioning: string;
+  readonly worldSetting: string;
+  readonly protagonist: string;
+  readonly mainConflict: string;
+  readonly targetAudience: string;
+  readonly styleHint: string;
+  readonly platformIntent: string;
+}
+
+function parseStructuredInput(rawInput: string): ParsedStructuredInput {
+  const lines = rawInput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const seedParts: string[] = [];
+  let genreHint = "";
+  let positioning = "";
+  let worldSetting = "";
+  let protagonist = "";
+  let mainConflict = "";
+  let targetAudience = "";
+  let styleHint = "";
+  let platformIntent = "";
+
+  for (const line of lines) {
+    const match = /^([^:]{1,20}):\s*(.+)$/u.exec(line);
+    if (!match) {
+      seedParts.push(line);
+      continue;
+    }
+
+    const label = match[1]!.replace(/\s+/g, "");
+    const value = match[2]!.trim();
+    if (!value) continue;
+
+    if (/(核心题材|题材|类型|创意描述)/u.test(label)) {
+      if (!genreHint) genreHint = value;
+      continue;
+    }
+    if (/(一句话定位|故事定位|定位)/u.test(label)) {
+      if (!positioning) positioning = value;
+      continue;
+    }
+    if (/(世界观|背景)/u.test(label)) {
+      if (!worldSetting) worldSetting = value;
+      continue;
+    }
+    if (/(主角|主人公|男主|女主)/u.test(label)) {
+      if (!protagonist) protagonist = value;
+      continue;
+    }
+    if (/(主冲突|冲突|矛盾)/u.test(label)) {
+      if (!mainConflict) mainConflict = value;
+      continue;
+    }
+    if (/(目标读者|受众)/u.test(label)) {
+      if (!targetAudience) targetAudience = value;
+      continue;
+    }
+    if (/(风格偏好|文风|风格)/u.test(label)) {
+      if (!styleHint) styleHint = value;
+      continue;
+    }
+    if (/(目标平台|平台)/u.test(label)) {
+      if (!platformIntent) platformIntent = value;
+      continue;
+    }
+
+    seedParts.push(line);
+  }
+
+  const seedText = seedParts.join("\n").trim();
+  return {
+    seedText,
+    genreHint,
+    positioning,
+    worldSetting,
+    protagonist,
+    mainConflict,
+    targetAudience,
+    styleHint,
+    platformIntent,
+  };
+}
 
 const GENRE_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
   ["科幻", "科幻"],
@@ -70,9 +161,23 @@ const GENRE_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
   ["romance", "言情"],
 ].map(([kw, genre]) => [kw.toLowerCase(), genre] as const);
 
-function extractGenres(rawInput: string): string[] {
+function looksLikeTagList(text: string): boolean {
+  const clean = text.trim();
+  if (!clean) return false;
+  const commaCount = (clean.match(/[，,、]/g) ?? []).length;
+  const hasSentencePunc = /[。！？.!?]/u.test(clean);
+  return commaCount >= 2 && !hasSentencePunc && clean.length <= 80;
+}
+
+function summarizeSentence(text: string, max = 200): string {
+  const first = text.split(/[。！？.!?]/u)[0] ?? text;
+  return first.trim().slice(0, max);
+}
+
+function extractGenres(input: ParsedStructuredInput): string[] {
   const found: string[] = [];
-  const lower = rawInput.toLowerCase();
+  const source = [input.genreHint, input.seedText, input.positioning].filter(Boolean).join("\n");
+  const lower = source.toLowerCase();
   for (const [keyword, genre] of GENRE_KEYWORDS) {
     if (lower.includes(keyword) && !found.includes(genre)) {
       found.push(genre);
@@ -81,30 +186,49 @@ function extractGenres(rawInput: string): string[] {
   return found.length > 0 ? found : [PENDING];
 }
 
-function extractPositioning(rawInput: string): string {
-  // Use the first sentence as positioning summary, capped at 200 chars
-  const firstSentence = rawInput.split(/[。！？.!?]/)[0] ?? rawInput;
-  return firstSentence.trim().slice(0, 200);
+function extractPositioning(input: ParsedStructuredInput): string {
+  if (input.positioning) return input.positioning.slice(0, 260);
+  if (input.seedText) return summarizeSentence(input.seedText, 200);
+  if (input.genreHint) return input.genreHint.slice(0, 160);
+  return PENDING;
 }
 
-function extractWorldSetting(rawInput: string): string {
-  // Return the raw input truncated as a placeholder world-setting
-  return rawInput.trim().slice(0, 300);
+function extractWorldSetting(input: ParsedStructuredInput): string {
+  if (input.worldSetting) return input.worldSetting.slice(0, 300);
+  if (!input.seedText) return PENDING;
+  if (looksLikeTagList(input.seedText)) {
+    return input.positioning ? input.positioning.slice(0, 220) : PENDING;
+  }
+  return input.seedText.slice(0, 300);
 }
 
-function extractProtagonist(rawInput: string): string {
+function extractProtagonist(input: ParsedStructuredInput): string {
+  if (input.protagonist) return input.protagonist.slice(0, 80);
+  const rawInput = [input.seedText, input.positioning].filter(Boolean).join("\n");
   // Simple heuristic: look for "主角" or "主人公" patterns
   const match = /(?:主角|主人公|男主|女主)[是：:为]?([^，。,.\n]{1,50})/u.exec(rawInput);
   return match ? match[1]!.trim() : PENDING;
 }
 
-function extractMainConflict(rawInput: string): string {
+function extractMainConflict(input: ParsedStructuredInput): string {
+  if (input.mainConflict) return input.mainConflict.slice(0, 180);
+  const rawInput = [input.seedText, input.positioning].filter(Boolean).join("\n");
   // Heuristic: look for conflict-related keywords
   const match = /(?:冲突|矛盾|对抗|反派|危机)[是：:为]?([^，。,.\n]{1,100})/u.exec(rawInput);
-  return match ? match[1]!.trim() : rawInput.trim().slice(0, 150);
+  if (match) return match[1]!.trim();
+  if (looksLikeTagList(rawInput)) return PENDING;
+  return summarizeSentence(rawInput, 160) || PENDING;
 }
 
-function extractStyleRules(rawInput: string): string[] {
+function extractStyleRules(input: ParsedStructuredInput): string[] {
   const styleKeywords = ["克制", "幽默", "慢热", "快节奏", "热血", "阴暗", "唯美", "写实", "诙谐"];
-  return styleKeywords.filter((kw) => rawInput.includes(kw));
+  const fromHint = input.styleHint
+    .split(/[，,、；;。]/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2 && part.length <= 20);
+  const fromKeywords = styleKeywords.filter((kw) =>
+    [input.seedText, input.positioning, input.styleHint].some((txt) => txt.includes(kw)),
+  );
+  const merged = [...fromHint, ...fromKeywords];
+  return [...new Set(merged)].slice(0, 8);
 }

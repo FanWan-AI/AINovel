@@ -145,11 +145,15 @@ export function validateNormalizeBriefInput(body: unknown): NormalizeBriefValida
   }
 
   const raw = body as Record<string, unknown>;
+  const modeValue =
+    raw["mode"] === "simple" || raw["mode"] === "pro"
+      ? (raw["mode"] as "simple" | "pro")
+      : undefined;
 
   // mode: required, must be "simple" or "pro"
   if (raw["mode"] === undefined || raw["mode"] === null) {
     errors.push({ field: "mode", message: "mode is required" });
-  } else if (raw["mode"] !== "simple" && raw["mode"] !== "pro") {
+  } else if (!modeValue) {
     errors.push({ field: "mode", message: 'mode must be "simple" or "pro"' });
   }
 
@@ -168,15 +172,19 @@ export function validateNormalizeBriefInput(body: unknown): NormalizeBriefValida
     }
   }
 
-  // rawInput: required, non-empty string
+  // rawInput:
+  // - simple mode: optional (falls back to title seed when empty)
+  // - pro mode: required, non-empty string
   let normalizedRawInput = "";
   if (raw["rawInput"] === undefined || raw["rawInput"] === null) {
-    errors.push({ field: "rawInput", message: "rawInput is required" });
+    if (modeValue === "pro" || modeValue === undefined) {
+      errors.push({ field: "rawInput", message: "rawInput is required" });
+    }
   } else if (typeof raw["rawInput"] !== "string") {
     errors.push({ field: "rawInput", message: "rawInput must be a non-empty string" });
   } else {
     normalizedRawInput = normalizeRawInput(raw["rawInput"]);
-    if (normalizedRawInput.length === 0) {
+    if (normalizedRawInput.length === 0 && modeValue === "pro") {
       errors.push({ field: "rawInput", message: "rawInput must be a non-empty string" });
     }
     // Note: normalizeRawInput already enforces RAW_INPUT_MAX_LENGTH, so no
@@ -195,6 +203,10 @@ export function validateNormalizeBriefInput(body: unknown): NormalizeBriefValida
     }
   }
 
+  if (modeValue === "simple" && normalizedRawInput.length === 0 && normalizedTitle.length > 0) {
+    normalizedRawInput = normalizedTitle;
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -202,7 +214,7 @@ export function validateNormalizeBriefInput(body: unknown): NormalizeBriefValida
   return {
     ok: true,
     value: {
-      mode: raw["mode"] as "simple" | "pro",
+      mode: modeValue as "simple" | "pro",
       title: normalizedTitle,
       rawInput: normalizedRawInput,
       platform: raw["platform"] as string | undefined,

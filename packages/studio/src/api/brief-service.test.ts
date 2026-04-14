@@ -229,6 +229,30 @@ describe("validateNormalizeBriefInput — structured error responses", () => {
     }
   });
 
+  it("accepts empty rawInput in simple mode by falling back to title seed", () => {
+    const result = validateNormalizeBriefInput({
+      mode: "simple",
+      title: "仅书名开书",
+      rawInput: "   ",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.rawInput).toBe("仅书名开书");
+    }
+  });
+
+  it("keeps rawInput required in pro mode", () => {
+    const result = validateNormalizeBriefInput({
+      mode: "pro",
+      title: "高级建书",
+      rawInput: "   ",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.field === "rawInput")).toBe(true);
+    }
+  });
+
   it("accepts rawInput that slightly exceeds RAW_INPUT_MAX_LENGTH by truncating it", () => {
     // Overly-long input should be silently truncated, not rejected
     const oversized = "有效内容。".repeat(3000); // well over 12000 chars
@@ -286,5 +310,29 @@ describe("normalizeBrief", () => {
     });
     expect(result.normalizedBrief).toBeDefined();
     expect(typeof result.normalizedBrief.positioning).toBe("string");
+  });
+
+  it("parses structured quick-start fields without flooding world/conflict with duplicated text", () => {
+    const input = [
+      "都市爽文，系统流，多女主，多子多福，逆袭打脸，短剧向",
+      "定位:短剧高燃爽文，男主开局落魄，绑定多子多福系统，一路逆袭打脸。",
+      "目标读者:18-30岁男频爽文读者",
+      "风格:温柔克制，快节奏，强刺激",
+      "目标平台:番茄小说，七猫小说",
+    ].join("\n");
+
+    const result = normalizeBrief({
+      mode: "simple",
+      title: "多子多福:我靠系统躺赢人生",
+      rawInput: input,
+    });
+
+    expect(result.normalizedBrief.positioning).toContain("短剧高燃爽文");
+    expect(result.normalizedBrief.worldSetting).not.toContain("目标读者:");
+    expect(result.normalizedBrief.worldSetting).not.toContain("风格:");
+    expect(result.normalizedBrief.mainConflict).not.toContain("目标读者:");
+    expect(result.normalizedBrief.targetAudience).toContain("18-30");
+    expect(result.normalizedBrief.platformIntent).toContain("番茄小说");
+    expect(result.normalizedBrief.styleRules.length).toBeGreaterThan(0);
   });
 });

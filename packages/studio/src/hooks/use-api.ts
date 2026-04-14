@@ -14,6 +14,11 @@ interface ApiInvalidateDetail {
   readonly paths: ReadonlyArray<string>;
 }
 
+interface FieldErrorShape {
+  readonly field?: unknown;
+  readonly message?: unknown;
+}
+
 export function buildApiUrl(path: string): string | null {
   const normalized = String(path ?? "").trim();
   if (!normalized) return null;
@@ -86,6 +91,22 @@ async function readErrorMessage(res: Response): Promise<string> {
         (json.error as { message: string }).message.trim()
       ) {
         return (json.error as { message: string }).message;
+      }
+      if (
+        "errors" in json &&
+        Array.isArray((json as { errors?: unknown }).errors)
+      ) {
+        const parsed = ((json as { errors: FieldErrorShape[] }).errors)
+          .map((err) => {
+            const field = typeof err.field === "string" ? err.field : "";
+            const message = typeof err.message === "string" ? err.message : "";
+            if (!message) return "";
+            return field ? `${field}: ${message}` : message;
+          })
+          .filter((line) => line.length > 0);
+        if (parsed.length > 0) {
+          return parsed.join("; ");
+        }
       }
     } catch {
       // fall through
