@@ -1,11 +1,13 @@
 import { useApi, postApi } from "../hooks/use-api";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import type { SSEMessage } from "../hooks/use-sse";
 import { shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 import type { DaemonSessionState, DaemonSessionSummary } from "../shared/contracts";
+import { BookScopePicker } from "../components/daemon/BookScopePicker";
+import { PlanBudgetCard } from "../components/daemon/PlanBudgetCard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,6 +49,12 @@ export interface RuntimeControlState {
   readonly showPause: boolean;
   readonly showResume: boolean;
   readonly stopDisabled: boolean;
+}
+
+interface BookSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
 }
 
 const COMPLETED_STATUSES = ["done", "complete", "completed", "success"];
@@ -222,6 +230,7 @@ export function RuntimeCenter({
 }) {
   const c = useColors(theme);
   const { data: daemonSession, refetch: refetchDaemon } = useApi<DaemonSessionSummary>("/daemon/session");
+  const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const [loading, setLoading] = useState(false);
   const [streamPaused, setStreamPaused] = useState(false);
   const [mode, setMode] = useState<RuntimeSchedulerMode>("default");
@@ -255,6 +264,15 @@ export function RuntimeCenter({
   const isRunning = daemonSession?.running ?? false;
   const controls = deriveRuntimeControlState(sessionState, loading);
   const sessionView = deriveRuntimeSessionViewModel(daemonSession ?? null, sse.messages);
+  const activeBooks = useMemo(
+    () => (booksData?.books ?? []).filter((book) => book.status === "active"),
+    [booksData?.books],
+  );
+  const selectedBookIds = useMemo(
+    () => parseBookIds(advancedForm.bookIdsText),
+    [advancedForm.bookIdsText],
+  );
+  const budgetTargetBookCount = advancedForm.scopeType === "all-active" ? activeBooks.length : selectedBookIds.length;
 
   const hasFilter = Boolean(filter.level || filter.source || filter.bookId);
   const visible = filterEvents(sse.messages, filter);
@@ -442,23 +460,15 @@ export function RuntimeCenter({
               <div className="text-xs text-muted-foreground">{t("rc.modeDefaultHint")}</div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <select
-                  value={advancedForm.scopeType}
-                  onChange={(e) => setAdvancedForm((f) => ({ ...f, scopeType: e.target.value as RuntimeAdvancedForm["scopeType"] }))}
-                  className={`text-xs px-2 py-2 rounded-md border border-border bg-background text-foreground ${c.input ?? ""}`}
-                >
-                  <option value="all-active">{t("rc.scopeAllActive")}</option>
-                  <option value="book-list">{t("rc.scopeBookList")}</option>
-                </select>
-                {advancedForm.scopeType === "book-list" && (
-                  <input
-                    type="text"
-                    value={advancedForm.bookIdsText}
-                    onChange={(e) => setAdvancedForm((f) => ({ ...f, bookIdsText: e.target.value }))}
-                    placeholder={t("rc.scopeBookIdsPlaceholder")}
-                    className="text-xs px-2 py-2 rounded-md border border-border bg-background text-foreground"
-                  />
-                )}
+                <BookScopePicker
+                  t={t}
+                  scopeType={advancedForm.scopeType}
+                  books={activeBooks}
+                  selectedBookIds={selectedBookIds}
+                  onScopeTypeChange={(scopeType) => setAdvancedForm((f) => ({ ...f, scopeType }))}
+                  onSelectedBookIdsChange={(bookIds) =>
+                    setAdvancedForm((f) => ({ ...f, bookIdsText: bookIds.join(",") }))}
+                />
                 <input
                   type="number"
                   min={1}
@@ -498,6 +508,13 @@ export function RuntimeCenter({
                   onChange={(e) => setAdvancedForm((f) => ({ ...f, concurrency: e.target.value }))}
                   placeholder={t("rc.maxConcurrency")}
                   className="text-xs px-2 py-2 rounded-md border border-border bg-background text-foreground"
+                />
+                <PlanBudgetCard
+                  t={t}
+                  perBookChapterCap={advancedForm.perBookChapterCap}
+                  globalChapterCap={advancedForm.globalChapterCap}
+                  concurrency={advancedForm.concurrency}
+                  targetBookCount={budgetTargetBookCount}
                 />
               </div>
             )}

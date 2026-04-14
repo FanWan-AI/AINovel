@@ -10,6 +10,8 @@ import {
   parseBookIds,
   validateAdvancedForm,
 } from "./RuntimeCenter";
+import { derivePlanBudgetPreview } from "../components/daemon/PlanBudgetCard";
+import { toggleBookSelection } from "../components/daemon/BookScopePicker";
 import type { SSEMessage } from "../hooks/use-sse";
 import type { DaemonSessionSummary } from "../shared/contracts";
 
@@ -164,6 +166,20 @@ describe("validateAdvancedForm", () => {
       "rc.error.concurrencyRequired",
     ]);
   });
+
+  it("allows all-active scope without book ids", () => {
+    const errors = validateAdvancedForm({
+      scopeType: "all-active",
+      bookIdsText: "",
+      perBookChapterCap: "2",
+      globalChapterCap: "20",
+      frequencyMinutes: "5",
+      cooldownSeconds: "30",
+      concurrency: "2",
+    });
+
+    expect(errors).toEqual([]);
+  });
 });
 
 describe("buildAdvancedPlanPayload", () => {
@@ -233,5 +249,46 @@ describe("deriveRuntimeControlState", () => {
       showResume: true,
       stopDisabled: true,
     });
+  });
+});
+
+describe("toggleBookSelection", () => {
+  it("adds and removes selected ids immutably", () => {
+    expect(toggleBookSelection([], "book-1", true)).toEqual(["book-1"]);
+    expect(toggleBookSelection(["book-1"], "book-1", true)).toEqual(["book-1"]);
+    expect(toggleBookSelection(["book-1", "book-2"], "book-1", false)).toEqual(["book-2"]);
+  });
+});
+
+describe("derivePlanBudgetPreview", () => {
+  it("computes estimated chapters and rounds from valid inputs", () => {
+    expect(derivePlanBudgetPreview({
+      perBookChapterCap: "3",
+      globalChapterCap: "20",
+      concurrency: "4",
+      targetBookCount: 5,
+    })).toEqual({
+      perBookCap: 3,
+      globalCap: 20,
+      concurrency: 4,
+      targetBookCount: 5,
+      estimatedTotalChapters: 15,
+      estimatedRounds: 4,
+    });
+  });
+
+  it("returns pending estimate when inputs are incomplete or no targets", () => {
+    expect(derivePlanBudgetPreview({
+      perBookChapterCap: "3",
+      globalChapterCap: "",
+      concurrency: "2",
+      targetBookCount: 2,
+    }).estimatedRounds).toBeNull();
+    expect(derivePlanBudgetPreview({
+      perBookChapterCap: "3",
+      globalChapterCap: "6",
+      concurrency: "2",
+      targetBookCount: 0,
+    }).estimatedTotalChapters).toBeNull();
   });
 });
