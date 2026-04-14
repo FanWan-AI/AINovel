@@ -6,6 +6,8 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
+import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import {
   ChevronLeft,
   Zap,
@@ -107,6 +109,7 @@ export function BookDetail({
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [writeNextDialogOpen, setWriteNextDialogOpen] = useState(false);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
   const [revisingChapters, setRevisingChapters] = useState<ReadonlyArray<number>>([]);
   const [syncingChapters, setSyncingChapters] = useState<ReadonlyArray<number>>([]);
@@ -161,7 +164,22 @@ export function BookDetail({
     };
   }, [createStatus?.status, error, refetch, refetchCreateStatus]);
 
-  const handleWriteNext = async () => {
+  const handleWriteNext = () => {
+    setWriteNextDialogOpen(true);
+  };
+
+  const handleWriteNextWithPayload = async (payload: WriteNextPayload) => {
+    setWriteNextDialogOpen(false);
+    setWriteRequestPending(true);
+    try {
+      await postApi(`/books/${bookId}/write-next`, Object.keys(payload).length > 0 ? payload : undefined);
+    } catch (e) {
+      setWriteRequestPending(false);
+      alert(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleQuickWrite = async () => {
     setWriteRequestPending(true);
     try {
       await postApi(`/books/${bookId}/write-next`);
@@ -393,6 +411,15 @@ export function BookDetail({
           >
             {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Zap size={16} />}
             {writing ? t("dash.writing") : t("book.writeNext")}
+          </button>
+          <button
+            onClick={handleQuickWrite}
+            disabled={writing || drafting}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
+            title={t("writeNext.quickWrite")}
+          >
+            <Zap size={14} />
+            {t("writeNext.quickWrite")}
           </button>
           <button
             onClick={handleDraft}
@@ -677,6 +704,14 @@ export function BookDetail({
         variant="danger"
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
+      />
+
+      <WriteNextDialog
+        open={writeNextDialogOpen}
+        defaultWordCount={data?.book.chapterWordCount}
+        t={t}
+        onSubmit={handleWriteNextWithPayload}
+        onCancel={() => setWriteNextDialogOpen(false)}
       />
     </div>
   );
