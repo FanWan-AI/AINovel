@@ -6,6 +6,10 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { NextPlanPanel } from "../components/write-next/NextPlanPanel";
+import type { NextPlanResult } from "../hooks/use-api";
+import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
+import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import {
   ChevronLeft,
   Zap,
@@ -107,6 +111,7 @@ export function BookDetail({
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [writeNextDialogOpen, setWriteNextDialogOpen] = useState(false);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
   const [revisingChapters, setRevisingChapters] = useState<ReadonlyArray<number>>([]);
   const [syncingChapters, setSyncingChapters] = useState<ReadonlyArray<number>>([]);
@@ -116,6 +121,7 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const [pendingNextPlan, setPendingNextPlan] = useState<NextPlanResult | null>(null);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -161,7 +167,22 @@ export function BookDetail({
     };
   }, [createStatus?.status, error, refetch, refetchCreateStatus]);
 
-  const handleWriteNext = async () => {
+  const handleWriteNext = () => {
+    setWriteNextDialogOpen(true);
+  };
+
+  const handleWriteNextWithPayload = async (payload: WriteNextPayload) => {
+    setWriteNextDialogOpen(false);
+    setWriteRequestPending(true);
+    try {
+      await postApi(`/books/${bookId}/write-next`, Object.keys(payload).length > 0 ? payload : undefined);
+    } catch (e) {
+      setWriteRequestPending(false);
+      alert(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleQuickWrite = async () => {
     setWriteRequestPending(true);
     try {
       await postApi(`/books/${bookId}/write-next`);
@@ -169,6 +190,11 @@ export function BookDetail({
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
     }
+  };
+
+  const handleWriteNextWithPlan = (plan: NextPlanResult) => {
+    setPendingNextPlan(plan);
+    setWriteNextDialogOpen(true);
   };
 
   const handleDraft = async () => {
@@ -395,6 +421,15 @@ export function BookDetail({
             {writing ? t("dash.writing") : t("book.writeNext")}
           </button>
           <button
+            onClick={handleQuickWrite}
+            disabled={writing || drafting}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
+            title={t("writeNext.quickWrite")}
+          >
+            <Zap size={14} />
+            {t("writeNext.quickWrite")}
+          </button>
+          <button
             onClick={handleDraft}
             disabled={writing || drafting}
             className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
@@ -545,6 +580,13 @@ export function BookDetail({
         </div>
       </div>
 
+      {/* Next Chapter Suggestion Panel */}
+      <NextPlanPanel
+        bookId={bookId}
+        onApply={(plan) => setPendingNextPlan(plan)}
+        t={t}
+      />
+
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
         <div className="overflow-x-auto">
@@ -677,6 +719,21 @@ export function BookDetail({
         variant="danger"
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
+      />
+
+      <WriteNextDialog
+        open={writeNextDialogOpen}
+        defaultWordCount={data?.book.chapterWordCount}
+        initialForm={pendingNextPlan ? {
+          chapterGoal: pendingNextPlan.goal,
+          mustInclude: pendingNextPlan.conflicts,
+        } : undefined}
+        t={t}
+        onSubmit={(payload) => {
+          setPendingNextPlan(null);
+          return handleWriteNextWithPayload(payload);
+        }}
+        onCancel={() => { setPendingNextPlan(null); setWriteNextDialogOpen(false); }}
       />
     </div>
   );

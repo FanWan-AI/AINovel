@@ -115,6 +115,15 @@ const strings = {
   "book.statusCompleted": { zh: "已完成", en: "Completed" },
   "book.statusDropped": { zh: "已放弃", en: "Dropped" },
   "book.truthFiles": { zh: "真相文件", en: "Truth Files" },
+  "book.nextPlan": { zh: "下一章建议", en: "Next Chapter Suggestion" },
+  "book.generateNextPlan": { zh: "生成下一章建议", en: "Generate Suggestion" },
+  "book.nextPlanHint": { zh: '点击「生成下一章建议」获取 AI 规划。', en: 'Click "Generate Suggestion" to get an AI plan for the next chapter.' },
+  "book.planGoal": { zh: "章节目标", en: "Goal" },
+  "book.planConflicts": { zh: "核心冲突", en: "Conflicts" },
+  "book.applyNextPlan": { zh: "按此建议写下一章", en: "Write Next with This Plan" },
+  "book.nextPlanDialogTitle": { zh: "按建议写下一章", en: "Write Next with Plan" },
+  "book.nextPlanDialogBody": { zh: "以下 AI 建议将作为本次写作的引导：", en: "The following AI suggestion will guide this writing run:" },
+  "book.confirmWrite": { zh: "确认写作", en: "Confirm Write" },
 
   // Style
   "style.title": { zh: "文风分析", en: "Style Analyzer" },
@@ -372,6 +381,22 @@ const strings = {
   "logs.title": { zh: "日志", en: "Logs" },
   "logs.empty": { zh: "暂无日志", en: "No log entries yet" },
   "logs.showingRecent": { zh: "当前展示最近日志记录。", en: "Showing recent log entries." },
+
+  // WriteNextDialog
+  "writeNext.dialogTitle": { zh: "写下一章", en: "Write Next Chapter" },
+  "writeNext.chapterGoal": { zh: "本章目标", en: "Chapter Goal" },
+  "writeNext.chapterGoalPlaceholder": { zh: "本章要达成的剧情目标...", en: "Plot goal for this chapter..." },
+  "writeNext.mustInclude": { zh: "必须包含", en: "Must Include" },
+  "writeNext.mustIncludePlaceholder": { zh: "必须出现的角色、事件或情节...", en: "Characters, events, or scenes that must appear..." },
+  "writeNext.avoidElements": { zh: "避免元素", en: "Avoid Elements" },
+  "writeNext.avoidElementsPlaceholder": { zh: "本章应避免的情节或写法...", en: "Plot elements or writing patterns to avoid..." },
+  "writeNext.pacing": { zh: "节奏", en: "Pacing" },
+  "writeNext.pacingPlaceholder": { zh: "如：紧张、舒缓", en: "e.g. Tense, Relaxed" },
+  "writeNext.wordCount": { zh: "字数", en: "Word Count" },
+  "writeNext.wordCountPlaceholder": { zh: "默认", en: "Default" },
+  "writeNext.cancel": { zh: "取消", en: "Cancel" },
+  "writeNext.submit": { zh: "开始写作", en: "Start Writing" },
+  "writeNext.quickWrite": { zh: "快速写", en: "Quick Write" },
 } as const;
 
 export type StringKey = keyof typeof strings;

@@ -10,6 +10,7 @@ const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
 const writeDraftMock = vi.fn();
+const planChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const saveChapterIndexMock = vi.fn();
 const loadChapterIndexMock = vi.fn();
@@ -69,6 +70,7 @@ vi.mock("@actalk/inkos-core", () => {
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
     writeDraft = writeDraftMock;
+    planChapter = planChapterMock;
   }
 
   class MockScheduler {
@@ -148,6 +150,7 @@ describe("createStudioServer daemon lifecycle", () => {
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
     writeDraftMock.mockReset();
+    planChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
     saveChapterIndexMock.mockReset();
     loadChapterIndexMock.mockReset();
@@ -183,6 +186,13 @@ describe("createStudioServer daemon lifecycle", () => {
       title: "Draft Chapter",
       wordCount: 1800,
       status: "drafted",
+    });
+    planChapterMock.mockResolvedValue({
+      bookId: "demo-book",
+      chapterNumber: 5,
+      intentPath: "chapters/intent/0005_intent.json",
+      goal: "主角发现线索，局势骤然紧张",
+      conflicts: ["外部冲突: 追杀与逃亡", "内部冲突: 信任危机"],
     });
     createLLMClientMock.mockReset();
     createLLMClientMock.mockReturnValue({});
@@ -747,12 +757,75 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("POST write-next invokes pipeline.writeNextChapter with the given wordCount", async () => {
+=======
+  it("POST /api/books/:id/next-plan returns plan with goal, conflicts, and chapterNumber", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "聚焦师债主线，节奏加快。" }),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { plan: { goal: string; conflicts: string[]; chapterNumber: number } };
+    expect(data.plan).toMatchObject({
+      goal: expect.any(String),
+      conflicts: expect.any(Array),
+      chapterNumber: expect.any(Number),
+    });
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", "聚焦师债主线，节奏加快。");
+  });
+
+  it("POST /api/books/:id/next-plan accepts empty payload without error", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { plan: { goal: string; conflicts: string[]; chapterNumber: number } };
+    expect(data.plan).toMatchObject({
+      goal: expect.any(String),
+      conflicts: expect.any(Array),
+      chapterNumber: expect.any(Number),
+    });
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", undefined);
+  });
+
+  it("POST /api/books/:id/next-plan returns 422 when brief is not a string", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: 12345 }),
+    });
+
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("NEXT_PLAN_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e: { field: string }) => e.field);
+    expect(fields).toContain("brief");
+    expect(planChapterMock).not.toHaveBeenCalled();
+  });
+
+  it("write-next accepts a full steering payload and injects externalContext into pipeline", async () => {
+>>>>>>> origin/main
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/write-next", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+<<<<<<< HEAD
       body: JSON.stringify({ wordCount: 3000 }),
     });
 
@@ -762,11 +835,40 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("POST write-next works with no body and passes undefined wordCount to pipeline", async () => {
+=======
+      body: JSON.stringify({
+        wordCount: 3000,
+        brief: "以师债线为核心，刻画师徒情感。",
+        chapterGoal: "本章完成拜师契约签署。",
+        mustInclude: ["白玉令", "血誓仪式"],
+        mustAvoid: ["现代用语", "突破境界"],
+        pace: "slow",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    const injectedContext = (pipelineConfigs.at(-1) as Record<string, unknown>)["externalContext"] as string;
+    expect(typeof injectedContext).toBe("string");
+    expect(injectedContext).toContain("以师债线为核心，刻画师徒情感。");
+    expect(injectedContext).toContain("本章完成拜师契约签署。");
+    expect(injectedContext).toContain("白玉令");
+    expect(injectedContext).toContain("血誓仪式");
+    expect(injectedContext).toContain("现代用语");
+    expect(injectedContext).toContain("slow");
+
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 3000);
+  });
+
+  it("write-next with only wordCount does not inject externalContext (backward compat)", async () => {
+>>>>>>> origin/main
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/write-next", {
       method: "POST",
+<<<<<<< HEAD
     });
 
     expect(response.status).toBe(200);
@@ -854,5 +956,55 @@ describe("createStudioServer daemon lifecycle", () => {
     // Let the rejection propagate
     await Promise.resolve();
     expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
+=======
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 2000 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    const config = pipelineConfigs.at(-1) as Record<string, unknown>;
+    expect(config["externalContext"]).toBeUndefined();
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2000);
+  });
+
+  it("write-next with no body also succeeds (backward compat)", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", undefined);
+  });
+
+  it("write-next with invalid payload returns 422 with structured errors", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wordCount: -5,
+        pace: "turbo",
+        mustInclude: "not-an-array",
+      }),
+    });
+
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("WRITE_NEXT_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e) => e.field);
+    expect(fields).toContain("wordCount");
+    expect(fields).toContain("pace");
+    expect(fields).toContain("mustInclude");
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+>>>>>>> origin/main
   });
 });
