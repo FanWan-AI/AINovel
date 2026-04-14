@@ -293,6 +293,7 @@ const strings = {
   "pro.briefTitle": { zh: "创作摘要", en: "Creative Brief" },
   "pro.editAgain": { zh: "重新编辑", en: "Edit Again" },
   "pro.done": { zh: "完成", en: "Done" },
+  "pro.clearDraft": { zh: "清空草稿", en: "Clear draft" },
 
   // BookCreatePro — Step 1: Blueprint
   "pro.step1.label": { zh: "创作蓝图", en: "Blueprint" },
