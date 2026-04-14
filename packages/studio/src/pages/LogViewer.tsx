@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -12,6 +13,7 @@ interface LogEntry {
 
 interface Nav {
   toDashboard: () => void;
+  toRuntimeCenter: () => void;
 }
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -21,9 +23,18 @@ const LEVEL_COLORS: Record<string, string> = {
   debug: "text-muted-foreground/50",
 };
 
+export const LOG_VIEWER_COMPAT_MESSAGE_KEY = "compat.logsMoved" as const;
+
 export function LogViewer({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const { data, refetch } = useApi<{ entries: ReadonlyArray<LogEntry> }>("/logs");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      nav.toRuntimeCenter();
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [nav]);
 
   return (
     <div className="space-y-6">
@@ -41,6 +52,19 @@ export function LogViewer({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunct
         >
           {t("common.refresh")}
         </button>
+      </div>
+
+      <div className={`rounded-lg border ${c.cardStatic} px-4 py-3`}>
+        <p className="text-sm text-foreground">{t(LOG_VIEWER_COMPAT_MESSAGE_KEY)}</p>
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            onClick={nav.toRuntimeCenter}
+            className={`px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}
+          >
+            {t("compat.openRuntimeCenter")}
+          </button>
+          <span className="text-xs text-muted-foreground">{t("compat.redirecting")}</span>
+        </div>
       </div>
 
       <div className={`border ${c.cardStatic} rounded-lg overflow-hidden`}>

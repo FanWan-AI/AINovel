@@ -20,7 +20,7 @@
 
 AI Agent 自主写小说——写、审、改，全程接管。覆盖玄幻、仙侠、都市、科幻等多种风格，支持续写、番外、同人、仿写等创作形式。人工审核门控确保你始终掌控全局。已发布为 [OpenClaw](https://clawhub.ai/narcooo/inkos) skill。
 
-**InkOS Studio 正式发布！** — `inkos studio` 启动本地 Web 工作台。书籍管理、章节审阅编辑、实时写作进度、市场雷达、数据分析、AI 检测、文风分析、题材管理、守护进程控制、真相文件编辑——CLI 能做的，Studio 全部可视化。
+**InkOS Studio 正式发布！** — `inkos studio` 启动本地 Web 工作台。书籍管理、章节审阅编辑、实时写作进度、市场雷达、数据分析、AI 检测、文风分析、题材管理、运行中心（已合并守护进程与日志）、真相文件编辑——CLI 能做的，Studio 全部可视化。
 
 **Native English novel writing now supported！** Set `--lang en` to write in English. See [English README](README.en.md) for details.
 
@@ -111,7 +111,7 @@ inkos config show-models        # 查看当前路由
 
 **InkOS Studio + 写作管线全面升级**
 
-- **InkOS Studio**（v1.0）：`inkos studio` 启动本地 Web 工作台（Vite + React + Hono）。书籍管理、章节审阅编辑、实时写作进度、市场雷达、数据分析、AI 检测、文风分析、题材管理、守护进程控制、真相文件编辑——CLI 能做的，Studio 全部可视化
+- **InkOS Studio**（v1.0）：`inkos studio` 启动本地 Web 工作台（Vite + React + Hono）。书籍管理、章节审阅编辑、实时写作进度、市场雷达、数据分析、AI 检测、文风分析、题材管理、运行中心（替代旧「守护进程 / 日志」页，旧入口会自动跳转）、真相文件编辑——CLI 能做的，Studio 全部可视化
 - **Foundation Reviewer**（v1.1）：建书时新增独立审核 Agent，5 维度百分制打分，不达 80 分自动驳回重新生成
 - **Hook Seed Excerpt**（v1.1）：伏笔回收时提取原始种子场景原文片段注入上下文，Writer 基于具体素材写回收场景
 - **Review Reject 回滚**（v1.1）：`inkos review reject` 回滚 state 到被拒章节之前的快照，防止坏草稿污染后续生成

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatBar";
 import { Dashboard } from "./pages/Dashboard";
@@ -49,6 +49,17 @@ export type Route =
   | { page: "radar" }
   | { page: "doctor" };
 
+export type LegacyRuntimePage = "daemon" | "logs";
+
+const LEGACY_RUNTIME_ROUTE_TARGET: Record<LegacyRuntimePage, Route["page"]> = {
+  daemon: "runtime-center",
+  logs: "runtime-center",
+};
+
+export function routeToRuntimeCenterFromLegacy(page: LegacyRuntimePage): Route {
+  return { page: LEGACY_RUNTIME_ROUTE_TARGET[page] };
+}
+
 export function deriveActiveBookId(route: Route): string | undefined {
   return route.page === "book" || route.page === "chapter" || route.page === "truth" || route.page === "analytics"
     ? route.bookId
@@ -81,7 +92,7 @@ export function App() {
     }
   }, [project]);
 
-  const nav = {
+  const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookCreate: () => setRoute({ page: "book-create-entry" }),
@@ -94,15 +105,15 @@ export function App() {
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
     toConfig: () => setRoute({ page: "config" }),
     toTruth: (bookId: string) => setRoute({ page: "truth", bookId }),
-    toDaemon: () => setRoute({ page: "daemon" }),
-    toLogs: () => setRoute({ page: "logs" }),
+    toDaemon: () => setRoute(routeToRuntimeCenterFromLegacy("daemon")),
+    toLogs: () => setRoute(routeToRuntimeCenterFromLegacy("logs")),
     toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
     toGenres: () => setRoute({ page: "genres" }),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
-  };
+  }), [setRoute]);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage =

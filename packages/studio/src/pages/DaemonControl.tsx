@@ -8,12 +8,22 @@ import { shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 
 interface Nav {
   toDashboard: () => void;
+  toRuntimeCenter: () => void;
 }
+
+export const DAEMON_COMPAT_MESSAGE_KEY = "compat.daemonMoved" as const;
 
 export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: { messages: ReadonlyArray<SSEMessage> } }) {
   const c = useColors(theme);
   const { data, refetch } = useApi<{ running: boolean }>("/daemon");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      nav.toRuntimeCenter();
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [nav]);
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
@@ -82,6 +92,19 @@ export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; 
               {loading ? t("daemon.starting") : t("daemon.start")}
             </button>
           )}
+        </div>
+      </div>
+
+      <div className={`rounded-lg border ${c.cardStatic} px-4 py-3`}>
+        <p className="text-sm text-foreground">{t(DAEMON_COMPAT_MESSAGE_KEY)}</p>
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            onClick={nav.toRuntimeCenter}
+            className={`px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}
+          >
+            {t("compat.openRuntimeCenter")}
+          </button>
+          <span className="text-xs text-muted-foreground">{t("compat.redirecting")}</span>
         </div>
       </div>
 
