@@ -138,7 +138,9 @@ export const studioCommand = new Command("studio")
     browser.on("error", () => {
       // Best effort only — server startup should not fail just because browser open failed.
     });
-    browser.unref();
+    if (typeof browser.unref === "function") {
+      browser.unref();
+    }
 
     child.on("exit", (code) => {
       process.exit(code ?? 0);

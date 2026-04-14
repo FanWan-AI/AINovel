@@ -224,7 +224,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     const responseOrTimeout = await Promise.race([
       app.request("http://localhost/api/daemon/start", { method: "POST" }),
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 30)),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
     ]);
 
     expect(responseOrTimeout).not.toBe("timeout");

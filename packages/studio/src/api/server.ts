@@ -1006,7 +1006,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
       }));
-      const result = await pipeline.resyncChapterArtifacts(id, chapterNum);
+      const resyncChapterArtifacts = (
+        pipeline as PipelineRunner & {
+          resyncChapterArtifacts?: (bookId: string, chapterNumber?: number) => Promise<unknown>;
+        }
+      ).resyncChapterArtifacts;
+
+      if (typeof resyncChapterArtifacts !== "function") {
+        return c.json({ error: "Current @actalk/inkos-core build does not support chapter resync." }, 501);
+      }
+
+      const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
       return c.json(result);
     } catch (e) {
       return c.json({ error: String(e) }, 500);

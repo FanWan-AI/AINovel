@@ -21,3 +21,6 @@ autoresearch/
 .playwright-cli/
 .superpowers/
 _*.md
+eval "$(ssh-agent -s)"
+.gitignore
+eval "$(ssh-agent -s)".pub

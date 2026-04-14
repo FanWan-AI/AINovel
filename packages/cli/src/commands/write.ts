@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { PipelineRunner, StateManager } from "@actalk/inkos-core";
+import type { ChapterPipelineResult } from "@actalk/inkos-core";
 import { readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -233,7 +234,17 @@ writeCommand
       const pipeline = new PipelineRunner(buildPipelineConfig(config, root, {
         externalContext: opts.brief,
       }));
-      const result = await pipeline.resyncChapterArtifacts(bookId, chapter);
+      const resyncChapterArtifacts = (
+        pipeline as PipelineRunner & {
+          resyncChapterArtifacts?: (bookId: string, chapterNumber?: number) => Promise<ChapterPipelineResult>;
+        }
+      ).resyncChapterArtifacts;
+
+      if (typeof resyncChapterArtifacts !== "function") {
+        throw new Error("Current @actalk/inkos-core build does not support `inkos write sync`. Please upgrade core package.");
+      }
+
+      const result = await resyncChapterArtifacts.call(pipeline, bookId, chapter);
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));
