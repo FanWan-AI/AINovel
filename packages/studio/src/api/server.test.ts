@@ -689,7 +689,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
-  it("returns 400 with structured error when required brief fields are missing", async () => {
+  it("returns 422 with structured field errors when required brief fields are missing", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -702,11 +702,13 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(400);
-    const data = await response.json() as { error: { code: string; message: string } };
-    expect(data.error.code).toBe("BRIEF_VALIDATION_FAILED");
-    expect(data.error.message).toContain("mode");
-    expect(data.error.message).toContain("title");
-    expect(data.error.message).toContain("rawInput");
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("BRIEF_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e) => e.field);
+    expect(fields).toContain("mode");
+    expect(fields).toContain("title");
+    expect(fields).toContain("rawInput");
   });
 });

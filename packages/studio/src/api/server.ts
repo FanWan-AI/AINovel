@@ -208,10 +208,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const validation = validateNormalizeBriefInput(body);
 
     if (!validation.ok) {
-      throw new ApiError(
-        400,
-        "BRIEF_VALIDATION_FAILED",
-        validation.errors.map((e) => `${e.field}: ${e.message}`).join("; "),
+      return c.json(
+        { code: "BRIEF_VALIDATION_FAILED", errors: validation.errors },
+        422,
       );
     }
 
