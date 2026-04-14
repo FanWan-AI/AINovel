@@ -49,6 +49,8 @@ export interface RuntimeControlState {
   readonly stopDisabled: boolean;
 }
 
+const COMPLETED_STATUSES = ["done", "complete", "completed", "success"];
+
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for testing)
 // ---------------------------------------------------------------------------
@@ -168,14 +170,13 @@ export function deriveRuntimeSessionViewModel(
   const currentBook = typeof latestChapter?.bookId === "string" ? latestChapter.bookId : "—";
   const currentChapter = typeof latestChapter?.chapter === "number" ? String(latestChapter.chapter) : "—";
   const completedCount = chapterEvents.filter(
-    (data) => typeof data.status === "string" && ["done", "complete", "completed", "success"].includes(data.status),
+    (data) => typeof data.status === "string" && COMPLETED_STATUSES.includes(data.status),
   ).length;
   const failedCount = messages.filter((msg) => deriveEventLevel(msg) === "error").length;
   const latestErrorMessage = [...messages].reverse().find((msg) => deriveEventLevel(msg) === "error");
   const latestData = latestErrorMessage?.data as Record<string, unknown> | undefined;
   const recentError = session?.lastError?.message
-    ?? (typeof latestData?.error === "string" ? latestData.error : "")
-    ?? "";
+    ?? (typeof latestData?.error === "string" ? latestData.error : "");
   return {
     state: session?.state ?? "idle",
     currentBook,
