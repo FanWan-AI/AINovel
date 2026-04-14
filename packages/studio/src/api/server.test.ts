@@ -756,8 +756,6 @@ describe("createStudioServer daemon lifecycle", () => {
     resolve({ chapterNumber: 3, title: "Chapter 3", wordCount: 1800, status: "ready-for-review" });
   });
 
-  it("POST write-next invokes pipeline.writeNextChapter with the given wordCount", async () => {
-=======
   it("POST /api/books/:id/next-plan returns plan with goal, conflicts, and chapterNumber", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -818,24 +816,12 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("write-next accepts a full steering payload and injects externalContext into pipeline", async () => {
->>>>>>> origin/main
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/write-next", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-<<<<<<< HEAD
-      body: JSON.stringify({ wordCount: 3000 }),
-    });
-
-    expect(response.status).toBe(200);
-    await Promise.resolve();
-    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 3000);
-  });
-
-  it("POST write-next works with no body and passes undefined wordCount to pipeline", async () => {
-=======
       body: JSON.stringify({
         wordCount: 3000,
         brief: "以师债线为核心，刻画师徒情感。",
@@ -862,18 +848,59 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("write-next with only wordCount does not inject externalContext (backward compat)", async () => {
->>>>>>> origin/main
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/write-next", {
       method: "POST",
-<<<<<<< HEAD
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 2000 }),
     });
 
     expect(response.status).toBe(200);
-    await Promise.resolve();
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    const config = pipelineConfigs.at(-1) as Record<string, unknown>;
+    expect(config["externalContext"]).toBeUndefined();
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2000);
+  });
+
+  it("write-next with no body also succeeds (backward compat)", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
     expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", undefined);
+  });
+
+  it("write-next with invalid payload returns 422 with structured errors", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wordCount: -5,
+        pace: "turbo",
+        mustInclude: "not-an-array",
+      }),
+    });
+
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("WRITE_NEXT_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e) => e.field);
+    expect(fields).toContain("wordCount");
+    expect(fields).toContain("pace");
+    expect(fields).toContain("mustInclude");
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
   });
 
   it("POST draft (plan preview) returns drafting status immediately", async () => {
@@ -956,55 +983,5 @@ describe("createStudioServer daemon lifecycle", () => {
     // Let the rejection propagate
     await Promise.resolve();
     expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
-=======
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wordCount: 2000 }),
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
-
-    const config = pipelineConfigs.at(-1) as Record<string, unknown>;
-    expect(config["externalContext"]).toBeUndefined();
-    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2000);
-  });
-
-  it("write-next with no body also succeeds (backward compat)", async () => {
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
-      method: "POST",
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
-    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", undefined);
-  });
-
-  it("write-next with invalid payload returns 422 with structured errors", async () => {
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        wordCount: -5,
-        pace: "turbo",
-        mustInclude: "not-an-array",
-      }),
-    });
-
-    expect(response.status).toBe(422);
-    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
-    expect(data.code).toBe("WRITE_NEXT_VALIDATION_FAILED");
-    expect(Array.isArray(data.errors)).toBe(true);
-    const fields = data.errors.map((e) => e.field);
-    expect(fields).toContain("wordCount");
-    expect(fields).toContain("pace");
-    expect(fields).toContain("mustInclude");
-    expect(writeNextChapterMock).not.toHaveBeenCalled();
->>>>>>> origin/main
   });
 });
