@@ -1268,9 +1268,8 @@ describe("runtimeEventStore integration via server broadcast", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("write-next broadcasts are captured in the runtime event store", async () => {
+  it("write-next emits semantic start/success sequence with action payload fields", async () => {
     const { createStudioServer } = await import("./server.js");
-    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/write-next", {
@@ -1282,29 +1281,144 @@ describe("runtimeEventStore integration via server broadcast", () => {
     expect(response.status).toBe(200);
     await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
 
-    const events = runtimeEventStore.query();
-    expect(events.length).toBeGreaterThan(0);
-    const eventTypes = events.map((e) => e.eventType);
-    expect(eventTypes).toEqual(expect.arrayContaining(["write:start"]));
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=50");
+    expect(runtimeResponse.status).toBe(200);
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event: string; data: unknown }>;
+    };
+    const semanticEvents = runtimeData.entries.filter((entry) =>
+      entry.event.startsWith("write-next:") || entry.event.startsWith("compose:")
+    );
+    expect(semanticEvents.map((entry) => entry.event)).toEqual([
+      "write-next:start",
+      "compose:start",
+      "compose:success",
+      "write-next:success",
+    ]);
+    expect(semanticEvents[0]?.data).toMatchObject({
+      action: "write-next",
+      chapterNumber: 1,
+      briefUsed: false,
+      bookId: "demo-book",
+    });
+    expect(semanticEvents[2]?.data).toMatchObject({
+      action: "compose",
+      chapterNumber: 1,
+      briefUsed: false,
+      bookId: "demo-book",
+    });
   });
 
-  it("revise broadcasts are captured in the runtime event store", async () => {
+  it("revise emits semantic start/success events with chapter number and brief-used", async () => {
     const { createStudioServer } = await import("./server.js");
-    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
     const response = await app.request("http://localhost/api/books/demo-book/revise/3", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "rewrite" }),
+      body: JSON.stringify({ mode: "rewrite", brief: "聚焦债务冲突" }),
     });
 
     expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(reviseDraftMock).toHaveBeenCalled());
 
-    const events = runtimeEventStore.query();
-    expect(events.length).toBeGreaterThan(0);
-    const eventTypes = events.map((e) => e.eventType);
-    expect(eventTypes).toEqual(expect.arrayContaining(["revise:start"]));
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=50");
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event: string; data: unknown }>;
+    };
+    const reviseEvents = runtimeData.entries.filter((entry) => entry.event.startsWith("revise:"));
+    expect(reviseEvents.map((entry) => entry.event)).toEqual(["revise:start", "revise:success"]);
+    expect(reviseEvents[0]?.data).toMatchObject({
+      action: "revise",
+      chapterNumber: 3,
+      briefUsed: true,
+      bookId: "demo-book",
+    });
+  });
+
+  it("plan and write-next in ai-plan mode emit plan/compose/write-next lifecycle events", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "ai-plan", planInput: "聚焦师债", wordCount: 1000 }),
+    });
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event: string; data: unknown }>;
+    };
+    const lifecycle = runtimeData.entries.filter((entry) =>
+      entry.event.startsWith("plan:")
+      || entry.event.startsWith("compose:")
+      || entry.event.startsWith("write-next:")
+    );
+    expect(lifecycle.map((entry) => entry.event)).toEqual([
+      "write-next:start",
+      "plan:start",
+      "plan:success",
+      "compose:start",
+      "compose:success",
+      "write-next:success",
+    ]);
+    expect(lifecycle.find((entry) => entry.event === "plan:start")?.data).toMatchObject({
+      action: "plan",
+      briefUsed: true,
+      bookId: "demo-book",
+      chapterNumber: 1,
+    });
+    expect(lifecycle.map((entry) => entry.event)).toEqual(
+      expect.arrayContaining([
+        "plan:start",
+        "plan:success",
+        "compose:start",
+        "compose:success",
+        "write-next:start",
+        "write-next:success",
+      ]),
+    );
+  });
+
+  it("rewrite and resync emit success/fail events without silent failures", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    writeNextChapterMock.mockRejectedValueOnce(new Error("rewrite failed"));
+    const rewriteResponse = await app.request("http://localhost/api/books/demo-book/rewrite/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "保持人物弧线" }),
+    });
+    expect(rewriteResponse.status).toBe(200);
+    await vi.waitFor(async () => {
+      const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const runtimeData = await runtimeResponse.json() as { entries: Array<{ event: string }> };
+      expect(runtimeData.entries.map((entry) => entry.event)).toContain("rewrite:fail");
+    });
+
+    const resyncResponse = await app.request("http://localhost/api/books/demo-book/resync/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "同步章节事实" }),
+    });
+    expect(resyncResponse.status).toBe(200);
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event: string; data: unknown }>;
+    };
+    const resyncEvents = runtimeData.entries.filter((entry) => entry.event.startsWith("resync:"));
+    expect(resyncEvents.map((entry) => entry.event)).toEqual(["resync:start", "resync:success"]);
+    expect(resyncEvents[0]?.data).toMatchObject({
+      action: "resync",
+      chapterNumber: 3,
+      briefUsed: true,
+      bookId: "demo-book",
+    });
   });
 
   it("all stored events have the required fields", async () => {
@@ -1327,6 +1441,10 @@ describe("runtimeEventStore integration via server broadcast", () => {
       expect(typeof e.message).toBe("string");
       expect(typeof e.timestamp).toBe("string");
       expect(typeof e.source).toBe("string");
+      if (["write-next", "compose", "plan", "revise", "rewrite", "resync"].includes(e.source)) {
+        const data = e as { chapter?: number; message: string };
+        expect(typeof data.message).toBe("string");
+      }
     }
   });
 });

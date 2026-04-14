@@ -48,12 +48,20 @@ import type { RuntimeEvent, RuntimeOverview, RuntimeEventsResponse, RuntimeClear
 type EventHandler = (event: string, data: unknown) => void;
 const subscribers = new Set<EventHandler>();
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
+type RuntimeAction = "revise" | "rewrite" | "resync" | "plan" | "compose" | "write-next";
+type RuntimeActionStage = "start" | "success" | "fail";
 
 function broadcast(event: string, data: unknown): void {
   runtimeEventStore.append(deriveRuntimeEvent(event, data));
   for (const handler of subscribers) {
     handler(event, data);
   }
+}
+
+function normalizeBriefValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 // --- V2 confirm run-state store ---
@@ -80,12 +88,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   function deriveEventLevel(event: string, data: unknown): RuntimeEventLevel {
-    if (event.endsWith(":error")) return "error";
-    if (event === "log" && typeof data === "object" && data !== null) {
+    if (typeof data === "object" && data !== null) {
       const lvl = (data as Record<string, unknown>)["level"];
+      if (lvl === "info") return "info";
       if (lvl === "error") return "error";
       if (lvl === "warn") return "warn";
     }
+    if (event.endsWith(":error")) return "error";
     return "info";
   }
 
@@ -240,6 +249,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       conflicts,
       chapterNumber,
     };
+  }
+
+  async function resolveNextChapterNumber(bookId: string): Promise<number | undefined> {
+    try {
+      const chapterNumber = await state.getNextChapterNumber(bookId);
+      return Number.isFinite(chapterNumber) ? chapterNumber : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function emitActionEvent(
+    action: RuntimeAction,
+    stage: RuntimeActionStage,
+    payload: {
+      readonly bookId: string;
+      readonly chapterNumber?: number;
+      readonly briefUsed: boolean;
+      readonly error?: string;
+      readonly details?: Record<string, unknown>;
+    },
+  ): void {
+    const eventPayload: Record<string, unknown> = {
+      action,
+      bookId: payload.bookId,
+      chapterNumber: payload.chapterNumber,
+      briefUsed: payload.briefUsed,
+      level: stage === "fail" ? "error" : "info",
+      ...payload.details,
+    };
+    if (payload.error) {
+      eventPayload.error = payload.error;
+      eventPayload.message = payload.error;
+    }
+    broadcast(`${action}:${stage}`, eventPayload);
   }
 
   // --- Books ---
@@ -480,22 +524,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ code: "NEXT_PLAN_VALIDATION_FAILED", errors: validation.errors }, 422);
     }
 
+    const appliedBrief = normalizeBriefValue(validation.value.brief);
+    const briefUsed = appliedBrief !== undefined;
+    emitActionEvent("plan", "start", { bookId: id, briefUsed });
+
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig({
-        externalContext: validation.value.brief,
+        externalContext: appliedBrief,
       }));
       const plan = await previewNextPlan(id, validation.value, {
         planChapter: (bookId, context) => pipeline.planChapter(bookId, context),
       });
+      emitActionEvent("plan", "success", {
+        bookId: id,
+        chapterNumber: typeof plan.chapterNumber === "number" ? plan.chapterNumber : undefined,
+        briefUsed,
+      });
       return c.json({ plan });
     } catch (e) {
       if (e instanceof PlanLowConfidenceError) {
-        const fallbackPlan = await buildFallbackNextPlan(id, validation.value.brief);
+        const fallbackPlan = await buildFallbackNextPlan(id, appliedBrief);
+        emitActionEvent("plan", "success", {
+          bookId: id,
+          chapterNumber: fallbackPlan.chapterNumber,
+          briefUsed,
+          details: { fallback: true },
+        });
         return c.json({
           plan: fallbackPlan,
           warning: { code: "PLAN_LOW_CONFIDENCE_FALLBACK", message: e.message },
         });
       }
+      emitActionEvent("plan", "fail", {
+        bookId: id,
+        briefUsed,
+        error: e instanceof Error ? e.message : String(e),
+      });
       return c.json({ error: { code: "PLAN_FAILED", message: e instanceof Error ? e.message : String(e) } }, 500);
     }
   });
@@ -510,16 +574,46 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const { wordCount, mode, planInput, ...steeringInput } = validation.value;
-
-    broadcast("write:start", { bookId: id });
+    const directBrief = normalizeBriefValue((steeringInput as { brief?: unknown }).brief);
+    const planBrief = normalizeBriefValue(planInput);
+    const briefUsed = directBrief !== undefined || planBrief !== undefined;
+    const chapterNumber = await resolveNextChapterNumber(id);
+    emitActionEvent("write-next", "start", {
+      bookId: id,
+      chapterNumber,
+      briefUsed,
+    });
 
     // Shared SSE callbacks used by all mode branches.
     type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
     const onWriteComplete = (result: WriteResult): void => {
-      broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
+      emitActionEvent("compose", "success", {
+        bookId: id,
+        chapterNumber: result.chapterNumber,
+        briefUsed,
+        details: { status: result.status, title: result.title, wordCount: result.wordCount },
+      });
+      emitActionEvent("write-next", "success", {
+        bookId: id,
+        chapterNumber: result.chapterNumber,
+        briefUsed,
+        details: { status: result.status, title: result.title, wordCount: result.wordCount },
+      });
     };
     const onWriteError = (e: unknown): void => {
-      broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
+      const error = e instanceof Error ? e.message : String(e);
+      emitActionEvent("compose", "fail", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+        error,
+      });
+      emitActionEvent("write-next", "fail", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+        error,
+      });
     };
 
     if (mode === "ai-plan") {
@@ -527,21 +621,54 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // planInput (optional) is passed to planChapter as additional planning context.
       // Both steps are fire-and-forget; progress is pushed via SSE.
       const planPipeline = new PipelineRunner(await buildPipelineConfig());
+      emitActionEvent("plan", "start", {
+        bookId: id,
+        chapterNumber,
+        briefUsed: planBrief !== undefined,
+      });
       planPipeline.planChapter(id, planInput)
         .then(async (plan) => {
+          emitActionEvent("plan", "success", {
+            bookId: id,
+            chapterNumber: typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber,
+            briefUsed: planBrief !== undefined,
+          });
           const externalContext = buildWriteNextContextFromPlan(plan, steeringInput);
+          emitActionEvent("compose", "start", {
+            bookId: id,
+            chapterNumber: typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber,
+            briefUsed,
+          });
           const writePipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
           return writePipeline.writeNextChapter(id, wordCount);
+        }, (e) => {
+          emitActionEvent("plan", "fail", {
+            bookId: id,
+            chapterNumber,
+            briefUsed: planBrief !== undefined,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          throw e;
         })
         .then(onWriteComplete, onWriteError);
     } else if (mode === "quick") {
       // Quick mode: write directly without any context injection.
       const pipeline = new PipelineRunner(await buildPipelineConfig());
+      emitActionEvent("compose", "start", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+      });
       pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
     } else {
       // manual-plan or legacy (no mode): build externalContext from steering fields.
       const externalContext = buildWriteNextExternalContext(steeringInput);
       const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+      emitActionEvent("compose", "start", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+      });
       pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
     }
 
@@ -922,9 +1049,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       .json<{ mode?: string; brief?: string }>()
       .catch(() => ({ mode: "spot-fix" }));
 
-    broadcast("revise:start", { bookId: id, chapter: chapterNum });
+    const appliedBrief = normalizeBriefValue(body.brief);
+    const briefUsed = appliedBrief !== undefined;
+    emitActionEvent("revise", "start", {
+      bookId: id,
+      chapterNumber: chapterNum,
+      briefUsed,
+    });
     try {
-      const appliedBrief = body.brief?.trim() || undefined;
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
@@ -933,13 +1065,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         chapterNum,
         (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect",
       ).then(
-        (result) => broadcast("revise:complete", {
+        (result) => emitActionEvent("revise", "success", {
           bookId: id,
-          chapter: chapterNum,
-          fixedCount: result.fixedIssues.length,
-          status: result.status,
+          chapterNumber: chapterNum,
+          briefUsed,
+          details: {
+            fixedCount: result.fixedIssues.length,
+            status: result.status,
+          },
         }),
-        (e) => broadcast("revise:error", { bookId: id, chapter: chapterNum, error: String(e) }),
+        (e) => emitActionEvent("revise", "fail", {
+          bookId: id,
+          chapterNumber: chapterNum,
+          briefUsed,
+          error: e instanceof Error ? e.message : String(e),
+        }),
       );
       return c.json({
         status: "revising",
@@ -949,7 +1089,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         appliedBrief: appliedBrief ?? null,
       });
     } catch (e) {
-      broadcast("revise:error", { bookId: id, error: String(e) });
+      emitActionEvent("revise", "fail", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+        error: e instanceof Error ? e.message : String(e),
+      });
       return c.json({ error: String(e) }, 500);
     }
   });
@@ -1262,21 +1407,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       .json<{ brief?: string }>()
       .catch(() => ({}));
 
-    broadcast("rewrite:start", { bookId: id, chapter: chapterNum });
+    const appliedBrief = normalizeBriefValue(body.brief);
+    const briefUsed = appliedBrief !== undefined;
+    emitActionEvent("rewrite", "start", {
+      bookId: id,
+      chapterNumber: chapterNum,
+      briefUsed,
+    });
     try {
-      const appliedBrief = body.brief?.trim() || undefined;
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(id, rollbackTarget);
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
       pipeline.writeNextChapter(id).then(
-        (result) => broadcast("rewrite:complete", { bookId: id, chapterNumber: result.chapterNumber, title: result.title, wordCount: result.wordCount }),
-        (e) => broadcast("rewrite:error", { bookId: id, error: e instanceof Error ? e.message : String(e) }),
+        (result) => emitActionEvent("rewrite", "success", {
+          bookId: id,
+          chapterNumber: result.chapterNumber,
+          briefUsed,
+          details: { title: result.title, wordCount: result.wordCount },
+        }),
+        (e) => emitActionEvent("rewrite", "fail", {
+          bookId: id,
+          chapterNumber: chapterNum,
+          briefUsed,
+          error: e instanceof Error ? e.message : String(e),
+        }),
       );
       return c.json({ status: "rewriting", bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
     } catch (e) {
-      broadcast("rewrite:error", { bookId: id, error: String(e) });
+      emitActionEvent("rewrite", "fail", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+        error: e instanceof Error ? e.message : String(e),
+      });
       return c.json({ error: String(e) }, 500);
     }
   });
@@ -1287,10 +1452,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const body: { brief?: string } = await c.req
       .json<{ brief?: string }>()
       .catch(() => ({}));
+    const appliedBrief = normalizeBriefValue(body.brief);
+    const briefUsed = appliedBrief !== undefined;
 
     try {
-      const appliedBrief = body.brief?.trim() || undefined;
-      broadcast("resync:start", { bookId: id, chapter: chapterNum });
+      emitActionEvent("resync", "start", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
@@ -1301,17 +1471,32 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ).resyncChapterArtifacts;
 
       if (typeof resyncChapterArtifacts !== "function") {
+        emitActionEvent("resync", "fail", {
+          bookId: id,
+          chapterNumber: chapterNum,
+          briefUsed,
+          error: "Current @actalk/inkos-core build does not support chapter resync.",
+        });
         return c.json({ error: "Current @actalk/inkos-core build does not support chapter resync." }, 501);
       }
 
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
-      broadcast("resync:complete", { bookId: id, chapter: chapterNum });
+      emitActionEvent("resync", "success", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       if (result && typeof result === "object") {
         return c.json({ ...(result as Record<string, unknown>), appliedBrief: appliedBrief ?? null });
       }
       return c.json({ ok: true, result, appliedBrief: appliedBrief ?? null });
     } catch (e) {
-      broadcast("resync:error", { bookId: id, chapter: chapterNum, error: String(e) });
+      emitActionEvent("resync", "fail", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+        error: e instanceof Error ? e.message : String(e),
+      });
       return c.json({ error: String(e) }, 500);
     }
   });
