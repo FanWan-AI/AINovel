@@ -14,4 +14,8 @@ describe("deriveActiveBookId", () => {
     expect(deriveActiveBookId({ page: "config" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "style" })).toBeUndefined();
   });
+
+  it("returns undefined for runtime-center route", () => {
+    expect(deriveActiveBookId({ page: "runtime-center" })).toBeUndefined();
+  });
 });

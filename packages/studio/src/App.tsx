@@ -14,6 +14,7 @@ import { ConfigView } from "./pages/ConfigView";
 import { TruthFiles } from "./pages/TruthFiles";
 import { DaemonControl } from "./pages/DaemonControl";
 import { LogViewer } from "./pages/LogViewer";
+import { RuntimeCenter } from "./pages/RuntimeCenter";
 import { GenreManager } from "./pages/GenreManager";
 import { StyleManager } from "./pages/StyleManager";
 import { ImportManager } from "./pages/ImportManager";
@@ -41,6 +42,7 @@ export type Route =
   | { page: "truth"; bookId: string }
   | { page: "daemon" }
   | { page: "logs" }
+  | { page: "runtime-center" }
   | { page: "genres" }
   | { page: "style" }
   | { page: "import" }
@@ -94,6 +96,7 @@ export function App() {
     toTruth: (bookId: string) => setRoute({ page: "truth", bookId }),
     toDaemon: () => setRoute({ page: "daemon" }),
     toLogs: () => setRoute({ page: "logs" }),
+    toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
     toGenres: () => setRoute({ page: "genres" }),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
@@ -188,6 +191,7 @@ export function App() {
             {route.page === "truth" && <TruthFiles bookId={route.bookId} nav={nav} theme={theme} t={t} />}
             {route.page === "daemon" && <DaemonControl nav={nav} theme={theme} t={t} sse={sse} />}
             {route.page === "logs" && <LogViewer nav={nav} theme={theme} t={t} />}
+            {route.page === "runtime-center" && <RuntimeCenter nav={nav} theme={theme} t={t} sse={sse} />}
             {route.page === "genres" && <GenreManager nav={nav} theme={theme} t={t} />}
             {route.page === "style" && <StyleManager nav={nav} theme={theme} t={t} />}
             {route.page === "import" && <ImportManager nav={nav} theme={theme} t={t} />}

@@ -440,6 +440,22 @@ export const strings = {
   // Quality-gate error shown when AI output is too generic
   "book.planLowConfidence": { zh: "建议生成失败，请补充关键冲突后再试", en: "Suggestion failed — please add more conflict context and try again." },
   "book.planLowConfidenceRetry": { zh: "重试", en: "Retry" },
+
+  // Runtime Center (merged Daemon + Logs)
+  "nav.runtimeCenter": { zh: "运行中心", en: "Runtime Center" },
+  "rc.title": { zh: "运行中心", en: "Runtime Center" },
+  "rc.daemonCard": { zh: "守护进程状态", en: "Daemon Status" },
+  "rc.eventStream": { zh: "实时事件流", en: "Live Event Stream" },
+  "rc.filterLevel": { zh: "级别", en: "Level" },
+  "rc.filterSource": { zh: "来源", en: "Source" },
+  "rc.filterBook": { zh: "书籍 ID", en: "Book ID" },
+  "rc.filterAll": { zh: "全部", en: "All" },
+  "rc.pauseScroll": { zh: "暂停滚动", en: "Pause" },
+  "rc.resumeScroll": { zh: "恢复滚动", en: "Resume" },
+  "rc.clear": { zh: "清空", en: "Clear" },
+  "rc.emptyIdle": { zh: "守护进程尚未启动。点击「启动」开始接收事件。", en: "Daemon is not running. Click Start to begin receiving events." },
+  "rc.emptyRunning": { zh: "守护进程运行中，等待事件到来…", en: "Daemon is running — waiting for events…" },
+  "rc.emptyFiltered": { zh: "当前过滤条件下无匹配事件。", en: "No events match the current filter." },
 } as const;
 
 export type StringKey = keyof typeof strings;

@@ -6,7 +6,6 @@ import type { TFunction } from "../hooks/use-i18n";
 import {
   Book,
   Settings,
-  Terminal,
   Plus,
   ScrollText,
   Boxes,
@@ -32,6 +31,7 @@ interface Nav {
   toConfig: () => void;
   toDaemon: () => void;
   toLogs: () => void;
+  toRuntimeCenter: () => void;
   toGenres: () => void;
   toStyle: () => void;
   toImport: () => void;
@@ -144,18 +144,12 @@ export function Sidebar({ nav, activePage, sse, t }: {
               onClick={nav.toConfig}
             />
             <SidebarItem
-              label={t("nav.daemon")}
+              label={t("nav.runtimeCenter")}
               icon={<Zap size={16} />}
-              active={activePage === "daemon"}
-              onClick={nav.toDaemon}
+              active={activePage === "runtime-center"}
+              onClick={nav.toRuntimeCenter}
               badge={daemon?.running ? t("nav.running") : undefined}
               badgeColor={daemon?.running ? "bg-emerald-500/10 text-emerald-500" : "bg-muted text-muted-foreground"}
-            />
-            <SidebarItem
-              label={t("nav.logs")}
-              icon={<Terminal size={16} />}
-              active={activePage === "logs"}
-              onClick={nav.toLogs}
             />
           </div>
         </div>
