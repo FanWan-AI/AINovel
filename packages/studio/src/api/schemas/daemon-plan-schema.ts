@@ -74,7 +74,7 @@ function parseBookScope(
       errors.push({ field: "plan.bookScope.bookIds", message: "bookIds contains invalid book id" });
       return undefined;
     }
-    const normalizedBookIds = Array.from(new Set(rawBookIds as string[]));
+    const normalizedBookIds = Array.from(new Set(rawBookIds.map((bookId) => String(bookId))));
     return { type: "book-list", bookIds: normalizedBookIds };
   }
 

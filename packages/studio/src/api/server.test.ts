@@ -330,10 +330,14 @@ describe("createStudioServer daemon lifecycle", () => {
       ok: boolean;
       planId: string;
       updated: boolean;
+      plan: { bookScope: { type: string; bookIds?: string[] } };
     };
     expect(planned.ok).toBe(true);
     expect(planned.updated).toBe(false);
     expect(planned.planId.length).toBeGreaterThan(0);
+    expect(planned.plan.bookScope.type).toBe("book-list");
+    expect(planned.plan.bookScope.bookIds).toEqual(["demo-book"]);
+    expect(planned.plan.bookScope.bookIds).toHaveLength(1);
 
     const startResponse = await app.request("http://localhost/api/daemon/start", {
       method: "POST",
