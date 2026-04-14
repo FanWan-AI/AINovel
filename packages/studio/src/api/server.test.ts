@@ -781,6 +781,70 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(planChapterMock).not.toHaveBeenCalled();
   });
 
+  it("POST /api/books/:id/next-plan returns 409 PLAN_LOW_CONFIDENCE when AI output is always placeholder", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Both attempts return the fallback placeholder (low-quality output)
+    planChapterMock.mockResolvedValue({
+      bookId: "demo-book",
+      chapterNumber: 3,
+      intentPath: "chapters/intent/0003_intent.json",
+      goal: "推进本章核心事件，并让主角做出一个带代价的关键选择。",
+      conflicts: ["请补充本章冲突：主角想达成什么、被谁阻拦、失败代价是什么。"],
+    });
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(409);
+    const data = await response.json() as { code: string; message: string };
+    expect(data.code).toBe("PLAN_LOW_CONFIDENCE");
+    expect(typeof data.message).toBe("string");
+    // Should have retried once (2 total calls)
+    expect(planChapterMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("POST /api/books/:id/next-plan succeeds on the retry when the first attempt is low quality", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    let callCount = 0;
+    planChapterMock.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          bookId: "demo-book",
+          chapterNumber: 4,
+          intentPath: "chapters/intent/0004_intent.json",
+          goal: "推进本章核心事件，并让主角做出一个带代价的关键选择。",
+          conflicts: ["请补充本章冲突：主角想达成什么、被谁阻拦、失败代价是什么。"],
+        };
+      }
+      return {
+        bookId: "demo-book",
+        chapterNumber: 4,
+        intentPath: "chapters/intent/0004_intent.json",
+        goal: "主角揭露幕后黑手并面临生死抉择",
+        conflicts: ["外部冲突: 债主逼迫主角违约"],
+      };
+    });
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { plan: { goal: string; conflicts: string[] } };
+    expect(data.plan.goal).toBe("主角揭露幕后黑手并面临生死抉择");
+    expect(planChapterMock).toHaveBeenCalledTimes(2);
+  });
+
   it("write-next accepts a full steering payload and injects externalContext into pipeline", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

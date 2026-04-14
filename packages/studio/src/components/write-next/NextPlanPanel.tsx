@@ -10,11 +10,12 @@ export type { NextPlanResult };
 // Pure helpers (exported for testability)
 // ---------------------------------------------------------------------------
 
-export type NextPlanErrorKind = "forbidden" | "rateLimit" | "serverError" | "unknown";
+export type NextPlanErrorKind = "forbidden" | "rateLimit" | "serverError" | "lowConfidence" | "unknown";
 
 export function classifyNextPlanError(status: number | null): NextPlanErrorKind {
   if (status === 403) return "forbidden";
   if (status === 429) return "rateLimit";
+  if (status === 409) return "lowConfidence";
   if (status === 500) return "serverError";
   return "unknown";
 }
@@ -52,7 +53,9 @@ export function NextPlanPanel({ bookId, onApply, t }: NextPlanPanelProps) {
     } catch (e) {
       const status = e instanceof ApiError ? e.status : null;
       const kind = classifyNextPlanError(status);
-      if (e instanceof Error && kind === "unknown") {
+      if (kind === "lowConfidence") {
+        setError("lowConfidence");
+      } else if (e instanceof Error && kind === "unknown") {
         setError(e.message);
       } else {
         const kindMessages: Record<string, string> = {
@@ -86,7 +89,23 @@ export function NextPlanPanel({ bookId, onApply, t }: NextPlanPanelProps) {
         </button>
       </div>
 
-      {error && (
+      {error && error === "lowConfidence" && (
+        <div className="flex flex-col gap-3 text-sm bg-destructive/5 rounded-xl px-4 py-3 border border-destructive/20">
+          <div className="flex items-center gap-2 text-destructive">
+            <AlertCircle size={14} className="shrink-0" />
+            {t("book.planLowConfidence")}
+          </div>
+          <button
+            onClick={handleGenerate}
+            disabled={loading}
+            className="self-start flex items-center gap-2 px-3 py-1.5 text-xs font-bold bg-secondary text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
+          >
+            {t("book.planLowConfidenceRetry")}
+          </button>
+        </div>
+      )}
+
+      {error && error !== "lowConfidence" && (
         <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/5 rounded-xl px-4 py-3 border border-destructive/20">
           <AlertCircle size={14} className="shrink-0" />
           {error}
