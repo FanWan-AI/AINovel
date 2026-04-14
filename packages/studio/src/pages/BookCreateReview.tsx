@@ -33,9 +33,9 @@ export function buildReviewDraft(brief: CreativeBrief): ReviewDraft {
   };
 }
 
-export function validateReviewDraft(draft: ReviewDraft): string | null {
+export function validateReviewDraft(draft: ReviewDraft): "review.titleRequired" | null {
   if (!draft.title.trim()) {
-    return "title_required";
+    return "review.titleRequired";
   }
   return null;
 }
@@ -95,7 +95,7 @@ export function BookCreateReview({
   const handleContinue = () => {
     const validationError = validateReviewDraft(draft);
     if (validationError) {
-      setError(t("review.titleRequired"));
+      setError(t(validationError));
       return;
     }
     // TODO: navigate to confirm/create page (next task)

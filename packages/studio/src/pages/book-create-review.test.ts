@@ -43,12 +43,12 @@ describe("validateReviewDraft", () => {
 
   it("returns an error key when title is empty", () => {
     const draft = buildReviewDraft(stubBrief);
-    expect(validateReviewDraft({ ...draft, title: "" })).toBe("title_required");
+    expect(validateReviewDraft({ ...draft, title: "" })).toBe("review.titleRequired");
   });
 
   it("returns an error key when title is only whitespace", () => {
     const draft = buildReviewDraft(stubBrief);
-    expect(validateReviewDraft({ ...draft, title: "   " })).toBe("title_required");
+    expect(validateReviewDraft({ ...draft, title: "   " })).toBe("review.titleRequired");
   });
 
   it("accepts a title with leading/trailing whitespace as valid", () => {
