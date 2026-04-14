@@ -23,6 +23,8 @@ import { confirmCreateBook, briefToExternalContext } from "./services/create-flo
 import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
+import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
+import { previewNextPlan } from "./services/next-plan-service.js";
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
@@ -347,6 +349,28 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   // --- Actions ---
+
+  app.post("/api/books/:id/next-plan", async (c) => {
+    const id = c.req.param("id");
+    const rawBody = await c.req.json<unknown>().catch(() => ({}));
+    const validation = validateNextPlanInput(rawBody);
+
+    if (!validation.ok) {
+      return c.json({ code: "NEXT_PLAN_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    try {
+      const pipeline = new PipelineRunner(await buildPipelineConfig({
+        externalContext: validation.value.brief,
+      }));
+      const plan = await previewNextPlan(id, validation.value, {
+        planChapter: (bookId, context) => pipeline.planChapter(bookId, context),
+      });
+      return c.json({ plan });
+    } catch (e) {
+      return c.json({ error: { code: "PLAN_FAILED", message: e instanceof Error ? e.message : String(e) } }, 500);
+    }
+  });
 
   app.post("/api/books/:id/write-next", async (c) => {
     const id = c.req.param("id");

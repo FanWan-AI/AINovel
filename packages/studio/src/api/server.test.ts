@@ -9,6 +9,7 @@ const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
+const planChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const saveChapterIndexMock = vi.fn();
 const loadChapterIndexMock = vi.fn();
@@ -67,6 +68,7 @@ vi.mock("@actalk/inkos-core", () => {
     reviseDraft = reviseDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
+    planChapter = planChapterMock;
   }
 
   class MockScheduler {
@@ -145,6 +147,7 @@ describe("createStudioServer daemon lifecycle", () => {
     reviseDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
+    planChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
     saveChapterIndexMock.mockReset();
     loadChapterIndexMock.mockReset();
@@ -174,6 +177,13 @@ describe("createStudioServer daemon lifecycle", () => {
       revised: false,
       status: "ready-for-review",
       auditResult: { passed: true, issues: [], summary: "rewritten" },
+    });
+    planChapterMock.mockResolvedValue({
+      bookId: "demo-book",
+      chapterNumber: 5,
+      intentPath: "chapters/intent/0005_intent.json",
+      goal: "主角发现线索，局势骤然紧张",
+      conflicts: ["外部冲突: 追杀与逃亡", "内部冲突: 信任危机"],
     });
     createLLMClientMock.mockReset();
     createLLMClientMock.mockReturnValue({});
@@ -710,6 +720,65 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(fields).toContain("mode");
     expect(fields).toContain("title");
     expect(fields).toContain("rawInput");
+  });
+
+  it("POST /api/books/:id/next-plan returns plan with goal, conflicts, and chapterNumber", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "聚焦师债主线，节奏加快。" }),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { plan: { goal: string; conflicts: string[]; chapterNumber: number } };
+    expect(data.plan).toMatchObject({
+      goal: expect.any(String),
+      conflicts: expect.any(Array),
+      chapterNumber: expect.any(Number),
+    });
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", "聚焦师债主线，节奏加快。");
+  });
+
+  it("POST /api/books/:id/next-plan accepts empty payload without error", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { plan: { goal: string; conflicts: string[]; chapterNumber: number } };
+    expect(data.plan).toMatchObject({
+      goal: expect.any(String),
+      conflicts: expect.any(Array),
+      chapterNumber: expect.any(Number),
+    });
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", undefined);
+  });
+
+  it("POST /api/books/:id/next-plan returns 422 when brief is not a string", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/next-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: 12345 }),
+    });
+
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("NEXT_PLAN_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e: { field: string }) => e.field);
+    expect(fields).toContain("brief");
+    expect(planChapterMock).not.toHaveBeenCalled();
   });
 
   it("write-next accepts a full steering payload and injects externalContext into pipeline", async () => {
