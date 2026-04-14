@@ -3,6 +3,13 @@ import { useState, useEffect, useCallback } from "react";
 const BASE = "/api";
 const API_INVALIDATE_EVENT = "inkos:api-invalidate";
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 interface ApiInvalidateDetail {
   readonly paths: ReadonlyArray<string>;
 }
@@ -101,7 +108,7 @@ export async function fetchJson<T>(
   const res = await fetchImpl(url, init);
 
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res));
+    throw new ApiError(await readErrorMessage(res), res.status);
   }
 
   if (res.status === 204) {
