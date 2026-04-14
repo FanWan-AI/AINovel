@@ -25,6 +25,8 @@ import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
 import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
 import { previewNextPlan } from "./services/next-plan-service.js";
+import { validateWriteNextInput } from "./schemas/write-next-schema.js";
+import { buildWriteNextExternalContext } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
 
 // --- Event bus for SSE ---
@@ -372,13 +374,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.post("/api/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const rawBody = await c.req.json().catch(() => null);
+
+    const validation = validateWriteNextInput(rawBody);
+    if (!validation.ok) {
+      return c.json({ code: "WRITE_NEXT_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    const { wordCount, ...steeringInput } = validation.value;
+    const externalContext = buildWriteNextExternalContext(steeringInput);
 
     broadcast("write:start", { bookId: id });
 
     // Fire and forget — progress/completion/errors pushed via SSE
-    const pipeline = new PipelineRunner(await buildPipelineConfig());
-    pipeline.writeNextChapter(id, body.wordCount).then(
+    const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+    pipeline.writeNextChapter(id, wordCount).then(
       (result) => {
         broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
       },
