@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import type { DaemonSessionSummary } from "../shared/contracts.js";
 
 const schedulerStartMock = vi.fn<() => Promise<void>>();
+const schedulerStartPlans: unknown[] = [];
 const initBookMock = vi.fn();
 const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
@@ -77,8 +78,9 @@ vi.mock("@actalk/inkos-core", () => {
 
     constructor(_config: unknown) {}
 
-    async start(): Promise<void> {
+    async start(plan?: unknown): Promise<void> {
       this.running = true;
+      schedulerStartPlans.push(plan);
       await schedulerStartMock();
     }
 
@@ -143,6 +145,7 @@ describe("createStudioServer daemon lifecycle", () => {
     root = await mkdtemp(join(tmpdir(), "inkos-studio-server-"));
     await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
     schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
     initBookMock.mockReset();
     runRadarMock.mockReset();
     reviseDraftMock.mockReset();
@@ -304,6 +307,127 @@ describe("createStudioServer daemon lifecycle", () => {
       entries: Array<{ event: string }>;
     };
     expect(daemonEventsBody.entries.map((entry) => entry.event)).toContain("daemon:error");
+  });
+
+  it("creates daemon plan, starts with planId, and passes plan to scheduler", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const planResponse = await app.request("http://localhost/api/daemon/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        plan: {
+          mode: "custom-plan",
+          bookScope: { type: "book-list", bookIds: ["demo-book", "demo-book"] },
+          perBookChapterCap: 2,
+          globalChapterCap: 5,
+        },
+      }),
+    });
+    expect(planResponse.status).toBe(200);
+    const planned = await planResponse.json() as {
+      ok: boolean;
+      planId: string;
+      updated: boolean;
+      plan: { bookScope: { type: string; bookIds?: string[] } };
+    };
+    expect(planned.ok).toBe(true);
+    expect(planned.updated).toBe(false);
+    expect(planned.planId.length).toBeGreaterThan(0);
+    expect(planned.plan.bookScope.type).toBe("book-list");
+    expect(planned.plan.bookScope.bookIds).toEqual(["demo-book"]);
+    expect(planned.plan.bookScope.bookIds).toHaveLength(1);
+
+    const startResponse = await app.request("http://localhost/api/daemon/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId: planned.planId }),
+    });
+    expect(startResponse.status).toBe(200);
+    await expect(startResponse.json()).resolves.toMatchObject({
+      ok: true,
+      running: true,
+      planId: planned.planId,
+      mode: "custom-plan",
+    });
+
+    expect(schedulerStartPlans).toHaveLength(1);
+    expect(schedulerStartPlans[0]).toEqual({
+      mode: "custom-plan",
+      bookScope: { type: "book-list", bookIds: ["demo-book"] },
+      perBookChapterCap: 2,
+      globalChapterCap: 5,
+    });
+  });
+
+  it("rejects duplicate daemon start with 409 business error", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const firstStart = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(firstStart.status).toBe(200);
+
+    const secondStart = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(secondStart.status).toBe(409);
+    await expect(secondStart.json()).resolves.toEqual({
+      error: {
+        code: "DAEMON_ALREADY_RUNNING",
+        message: "Daemon already running.",
+      },
+    });
+  });
+
+  it("validates daemon plan/start inputs with 422 responses", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const invalidPlan = await app.request("http://localhost/api/daemon/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan: { mode: "custom-plan", bookScope: { type: "book-list", bookIds: [] } } }),
+    });
+    expect(invalidPlan.status).toBe(422);
+    await expect(invalidPlan.json()).resolves.toMatchObject({
+      code: "DAEMON_PLAN_VALIDATION_FAILED",
+      errors: [{ field: "plan.bookScope.bookIds" }],
+    });
+
+    const invalidStart = await app.request("http://localhost/api/daemon/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId: "x", default: true }),
+    });
+    expect(invalidStart.status).toBe(422);
+    await expect(invalidStart.json()).resolves.toMatchObject({
+      code: "DAEMON_START_VALIDATION_FAILED",
+      errors: [{ field: "planId" }],
+    });
+  });
+
+  it("daemon session and events expose pause/resume transitions", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const start = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(start.status).toBe(200);
+
+    const pause = await app.request("http://localhost/api/daemon/pause", { method: "POST" });
+    expect(pause.status).toBe(200);
+    await expect(pause.json()).resolves.toMatchObject({ ok: true, state: "paused", running: true });
+
+    const pausedSession = await app.request("http://localhost/api/daemon/session");
+    await expect(pausedSession.json()).resolves.toMatchObject({ state: "paused", running: true });
+
+    const resume = await app.request("http://localhost/api/daemon/resume", { method: "POST" });
+    expect(resume.status).toBe(200);
+    await expect(resume.json()).resolves.toMatchObject({ ok: true, state: "running", running: true });
+
+    const daemonEvents = await app.request("http://localhost/api/runtime/events?source=daemon&limit=10");
+    expect(daemonEvents.status).toBe(200);
+    const daemonEventsBody = await daemonEvents.json() as { entries: Array<{ event: string }> };
+    expect(daemonEventsBody.entries.map((entry) => entry.event)).toContain("daemon:paused");
+    expect(daemonEventsBody.entries.map((entry) => entry.event)).toContain("daemon:resumed");
   });
 
   it("runtime center status/events reflect daemon lifecycle and support history query", async () => {

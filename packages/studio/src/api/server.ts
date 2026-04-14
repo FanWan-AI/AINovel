@@ -11,6 +11,7 @@ import {
   loadProjectConfig,
   type PipelineConfig,
   type ProjectConfig,
+  type RunPlan,
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
@@ -41,6 +42,7 @@ import {
   type RuntimeEventSource,
   type RuntimeEventLevel,
 } from "./schemas/runtime-schema.js";
+import { validateDaemonPlanRequest, validateDaemonStartRequest } from "./schemas/daemon-plan-schema.js";
 import type {
   RuntimeEvent,
   RuntimeOverview,
@@ -850,6 +852,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   // --- Daemon control ---
 
   let schedulerInstance: import("@actalk/inkos-core").Scheduler | null = null;
+  let activeRunPlan: RunPlan | undefined;
+  let activePlanId: string | undefined;
+  const daemonPlans = new Map<string, RunPlan>();
   const activeDaemonStates = new Set<DaemonSessionState>(["planning", "running", "paused"]);
   let daemonSession: DaemonSessionSummary = {
     state: "idle",
@@ -882,61 +887,135 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   });
 
-  app.post("/api/daemon/start", async (c) => {
-    if (daemonSession.running) {
-      return c.json({ error: "Daemon already running" }, 400);
-    }
-    updateDaemonSession("planning");
-    try {
-      const { Scheduler } = await import("@actalk/inkos-core");
-      const currentConfig = await loadCurrentProjectConfig();
-      const scheduler = new Scheduler({
-        ...(await buildPipelineConfig()),
-        radarCron: currentConfig.daemon.schedule.radarCron,
-        writeCron: currentConfig.daemon.schedule.writeCron,
-        maxConcurrentBooks: currentConfig.daemon.maxConcurrentBooks,
-        chaptersPerCycle: currentConfig.daemon.chaptersPerCycle,
-        retryDelayMs: currentConfig.daemon.retryDelayMs,
-        cooldownAfterChapterMs: currentConfig.daemon.cooldownAfterChapterMs,
-        maxChaptersPerDay: currentConfig.daemon.maxChaptersPerDay,
-        onChapterComplete: (bookId, chapter, status) => {
-          broadcast("daemon:chapter", { bookId, chapter, status });
-        },
-        onError: (bookId, error) => {
-          updateDaemonSession("error", {
-            lastError: { message: error.message, timestamp: new Date().toISOString() },
-          });
-          broadcast("daemon:error", { bookId, error: error.message });
-        },
-      });
-      schedulerInstance = scheduler;
-      updateDaemonSession("running");
-      broadcast("daemon:started", {});
-      void scheduler.start().catch((e) => {
-        const error = e instanceof Error ? e : new Error(String(e));
-        if (schedulerInstance === scheduler) {
-          scheduler.stop();
-          schedulerInstance = null;
-          broadcast("daemon:stopped", {});
-        }
+  const daemonError = (code: string, message: string) =>
+    ({ error: { code, message } }) as const;
+
+  const buildSchedulerConfig = async () => {
+    const currentConfig = await loadCurrentProjectConfig();
+    return {
+      ...(await buildPipelineConfig()),
+      radarCron: currentConfig.daemon.schedule.radarCron,
+      writeCron: currentConfig.daemon.schedule.writeCron,
+      maxConcurrentBooks: currentConfig.daemon.maxConcurrentBooks,
+      chaptersPerCycle: currentConfig.daemon.chaptersPerCycle,
+      retryDelayMs: currentConfig.daemon.retryDelayMs,
+      cooldownAfterChapterMs: currentConfig.daemon.cooldownAfterChapterMs,
+      maxChaptersPerDay: currentConfig.daemon.maxChaptersPerDay,
+      onChapterComplete: (bookId: string, chapter: number, status: string) => {
+        broadcast("daemon:chapter", { bookId, chapter, status });
+      },
+      onError: (bookId: string, error: Error) => {
         updateDaemonSession("error", {
           lastError: { message: error.message, timestamp: new Date().toISOString() },
         });
-        broadcast("daemon:error", { bookId: "scheduler", error: error.message });
+        broadcast("daemon:error", { bookId, error: error.message });
+      },
+    };
+  };
+
+  const startDaemonWithPlan = async (plan: RunPlan | undefined, planId: string | undefined) => {
+    const { Scheduler } = await import("@actalk/inkos-core");
+    const scheduler = new Scheduler(await buildSchedulerConfig());
+    schedulerInstance = scheduler;
+    activeRunPlan = plan;
+    activePlanId = planId;
+    updateDaemonSession("running");
+    broadcast("daemon:started", { ...(planId !== undefined ? { planId } : {}), mode: plan?.mode ?? "managed-default" });
+    void scheduler.start(plan).catch((e) => {
+      const error = e instanceof Error ? e : new Error(String(e));
+      if (schedulerInstance === scheduler) {
+        scheduler.stop();
+        schedulerInstance = null;
+        broadcast("daemon:stopped", {});
+      }
+      updateDaemonSession("error", {
+        lastError: { message: error.message, timestamp: new Date().toISOString() },
       });
-      return c.json({ ok: true, running: true });
+      broadcast("daemon:error", { bookId: "scheduler", error: error.message });
+    });
+  };
+
+  app.post("/api/daemon/plan", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    const validation = validateDaemonPlanRequest(rawBody);
+    if (!validation.ok) {
+      return c.json({ code: "DAEMON_PLAN_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    const incomingPlan = validation.value.plan;
+    const planId = validation.value.planId ?? `plan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const updated = daemonPlans.has(planId);
+    daemonPlans.set(planId, incomingPlan);
+    return c.json({ ok: true, planId, updated, plan: incomingPlan });
+  });
+
+  app.post("/api/daemon/start", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    const validation = validateDaemonStartRequest(rawBody);
+    if (!validation.ok) {
+      return c.json({ code: "DAEMON_START_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    if (daemonSession.running) {
+      return c.json(daemonError("DAEMON_ALREADY_RUNNING", "Daemon already running."), 409);
+    }
+
+    const requestedPlanId = validation.value.planId;
+    const requestedPlan = requestedPlanId !== undefined ? daemonPlans.get(requestedPlanId) : undefined;
+    if (requestedPlanId !== undefined && requestedPlan === undefined) {
+      return c.json(daemonError("DAEMON_PLAN_NOT_FOUND", `Daemon plan "${requestedPlanId}" not found.`), 404);
+    }
+
+    updateDaemonSession("planning");
+    try {
+      await startDaemonWithPlan(requestedPlan, requestedPlanId);
+      return c.json({
+        ok: true,
+        running: true,
+        ...(requestedPlanId !== undefined ? { planId: requestedPlanId } : {}),
+        ...(requestedPlan !== undefined ? { mode: requestedPlan.mode } : { mode: "managed-default" }),
+      });
     } catch (e) {
       const error = e instanceof Error ? e : new Error(String(e));
       updateDaemonSession("error", {
         lastError: { message: error.message, timestamp: new Date().toISOString() },
       });
-      return c.json({ error: String(e) }, 500);
+      return c.json(daemonError("DAEMON_START_FAILED", error.message), 500);
+    }
+  });
+
+  app.post("/api/daemon/pause", (c) => {
+    if (daemonSession.state !== "running") {
+      return c.json(daemonError("DAEMON_NOT_RUNNING", "Daemon is not running."), 409);
+    }
+    schedulerInstance?.stop();
+    schedulerInstance = null;
+    updateDaemonSession("paused");
+    broadcast("daemon:paused", { ...(activePlanId !== undefined ? { planId: activePlanId } : {}) });
+    return c.json({ ok: true, running: daemonSession.running, state: "paused" });
+  });
+
+  app.post("/api/daemon/resume", async (c) => {
+    if (daemonSession.state !== "paused") {
+      return c.json(daemonError("DAEMON_NOT_PAUSED", "Daemon is not paused."), 409);
+    }
+    updateDaemonSession("planning");
+    try {
+      await startDaemonWithPlan(activeRunPlan, activePlanId);
+      broadcast("daemon:resumed", { ...(activePlanId !== undefined ? { planId: activePlanId } : {}) });
+      return c.json({ ok: true, running: true, state: "running", ...(activePlanId !== undefined ? { planId: activePlanId } : {}) });
+    } catch (e) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      updateDaemonSession("error", {
+        lastError: { message: error.message, timestamp: new Date().toISOString() },
+      });
+      return c.json(daemonError("DAEMON_RESUME_FAILED", error.message), 500);
     }
   });
 
   app.post("/api/daemon/stop", (c) => {
-    if (!daemonSession.running) {
-      return c.json({ error: "Daemon not running" }, 400);
+    if (daemonSession.state === "idle" || daemonSession.state === "stopped" || daemonSession.state === "error") {
+      return c.json(daemonError("DAEMON_NOT_ACTIVE", "Daemon is not active."), 409);
     }
     schedulerInstance?.stop();
     schedulerInstance = null;
