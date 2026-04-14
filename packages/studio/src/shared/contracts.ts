@@ -183,6 +183,20 @@ export interface ConfirmCreateResponse {
 export type RuntimeEventSource = "daemon" | "pipeline" | "system" | "agent" | "user-action";
 export type RuntimeEventLevel = "info" | "warn" | "error";
 
+export type DaemonSessionState = "idle" | "planning" | "running" | "paused" | "error" | "stopped";
+
+export interface DaemonSessionErrorSummary {
+  readonly message: string;
+  readonly timestamp: string;
+}
+
+export interface DaemonSessionSummary {
+  readonly state: DaemonSessionState;
+  readonly running: boolean;
+  readonly updatedAt: string;
+  readonly lastError?: DaemonSessionErrorSummary;
+}
+
 export interface RuntimeEvent {
   readonly id: string;
   readonly timestamp: string;
