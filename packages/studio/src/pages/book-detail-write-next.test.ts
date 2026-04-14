@@ -18,22 +18,22 @@ describe("buildWriteNextPayload", () => {
 
   it("includes goal when chapterGoal is filled", () => {
     const form: WriteNextFormState = { ...INITIAL_WRITE_NEXT_FORM, chapterGoal: "主角获得新武器" };
-    expect(buildWriteNextPayload(form).goal).toBe("主角获得新武器");
+    expect(buildWriteNextPayload(form).chapterGoal).toBe("主角获得新武器");
   });
 
   it("includes mustInclude when filled", () => {
     const form: WriteNextFormState = { ...INITIAL_WRITE_NEXT_FORM, mustInclude: "出现反派" };
-    expect(buildWriteNextPayload(form).mustInclude).toBe("出现反派");
+    expect(buildWriteNextPayload(form).mustInclude).toEqual(["出现反派"]);
   });
 
   it("includes avoidElements when filled", () => {
     const form: WriteNextFormState = { ...INITIAL_WRITE_NEXT_FORM, avoidElements: "无谓打斗" };
-    expect(buildWriteNextPayload(form).avoidElements).toBe("无谓打斗");
+    expect(buildWriteNextPayload(form).mustAvoid).toEqual(["无谓打斗"]);
   });
 
   it("includes pacing when filled", () => {
     const form: WriteNextFormState = { ...INITIAL_WRITE_NEXT_FORM, pacing: "紧张" };
-    expect(buildWriteNextPayload(form).pacing).toBe("紧张");
+    expect(buildWriteNextPayload(form).pace).toBe("fast");
   });
 
   it("includes wordCount as a number when filled with a valid integer", () => {
@@ -60,10 +60,10 @@ describe("buildWriteNextPayload", () => {
       pacing: "  缓慢  ",
     };
     const payload = buildWriteNextPayload(form);
-    expect(payload.goal).toBe("目标");
-    expect(payload.mustInclude).toBe("必须");
-    expect(payload.avoidElements).toBe("避免");
-    expect(payload.pacing).toBe("缓慢");
+    expect(payload.chapterGoal).toBe("目标");
+    expect(payload.mustInclude).toEqual(["必须"]);
+    expect(payload.mustAvoid).toEqual(["避免"]);
+    expect(payload.pace).toBe("slow");
   });
 
   it("omits blank string fields from the payload", () => {
@@ -75,10 +75,10 @@ describe("buildWriteNextPayload", () => {
       wordCount: "",
     };
     const payload = buildWriteNextPayload(form);
-    expect(payload.goal).toBe("目标");
+    expect(payload.chapterGoal).toBe("目标");
     expect(payload.mustInclude).toBeUndefined();
-    expect(payload.avoidElements).toBeUndefined();
-    expect(payload.pacing).toBeUndefined();
+    expect(payload.mustAvoid).toBeUndefined();
+    expect(payload.pace).toBeUndefined();
     expect(payload.wordCount).toBeUndefined();
   });
 
@@ -92,10 +92,10 @@ describe("buildWriteNextPayload", () => {
     };
     const payload = buildWriteNextPayload(form);
     expect(payload).toEqual<WriteNextPayload>({
-      goal: "获得神器",
-      mustInclude: "导师出现",
-      avoidElements: "冗长内心独白",
-      pacing: "快节奏",
+      chapterGoal: "获得神器",
+      mustInclude: ["导师出现"],
+      mustAvoid: ["冗长内心独白"],
+      pace: "fast",
       wordCount: 4000,
     });
   });
@@ -166,7 +166,7 @@ describe("quick-write fallback path", () => {
     expect(mockPost).toHaveBeenCalledOnce();
     const [path, body] = (mockPost as ReturnType<typeof vi.fn>).mock.calls[0] as [string, WriteNextPayload];
     expect(path).toBe("/books/book-123/write-next");
-    expect(body).toEqual({ goal: "关键战斗", wordCount: 3000 });
+    expect(body).toEqual({ chapterGoal: "关键战斗", wordCount: 3000 });
   });
 
   it("passes undefined body to postApi when payload is empty (dialog submitted with all blank fields)", async () => {

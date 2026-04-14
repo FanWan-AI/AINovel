@@ -38,7 +38,7 @@ describe("buildApplyBrief", () => {
   const plan: NextPlanResult = {
     chapterNumber: 5,
     goal: "主角发现真相",
-    conflicts: "知道真相的代价是失去最亲近的人",
+    conflicts: ["知道真相的代价是失去最亲近的人"],
   };
 
   it("joins goal and conflicts with a newline", () => {
@@ -52,15 +52,15 @@ describe("buildApplyBrief", () => {
   });
 
   it("omits conflicts when empty", () => {
-    expect(buildApplyBrief({ ...plan, conflicts: "" })).toBe("主角发现真相");
+    expect(buildApplyBrief({ ...plan, conflicts: [] })).toBe("主角发现真相");
   });
 
   it("returns empty string when both fields are empty", () => {
-    expect(buildApplyBrief({ ...plan, goal: "", conflicts: "" })).toBe("");
+    expect(buildApplyBrief({ ...plan, goal: "", conflicts: [] })).toBe("");
   });
 
   it("renders chapterNumber in the plan without throwing", () => {
-    const result = buildApplyBrief({ chapterNumber: 12, goal: "G", conflicts: "C" });
+    const result = buildApplyBrief({ chapterNumber: 12, goal: "G", conflicts: ["C"] });
     expect(result).toBe("G\nC");
   });
 });
@@ -74,10 +74,10 @@ describe("fetchNextPlan", () => {
     const payload: NextPlanResult = {
       chapterNumber: 3,
       goal: "Introduce the antagonist",
-      conflicts: "The protagonist's loyalties are tested",
+      conflicts: ["The protagonist's loyalties are tested"],
     };
     const fetchImpl = vi.fn(async () =>
-      new Response(JSON.stringify(payload), {
+      new Response(JSON.stringify({ plan: payload }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -88,7 +88,7 @@ describe("fetchNextPlan", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledWith(
       "/api/books/book-1/next-plan",
-      expect.any(Object),
+      expect.objectContaining({ method: "POST" }),
     );
   });
 
@@ -129,16 +129,16 @@ describe("apply next plan action", () => {
     const plan: NextPlanResult = {
       chapterNumber: 7,
       goal: "Climax showdown",
-      conflicts: "Hero vs villain — no going back",
+      conflicts: ["Hero vs villain — no going back"],
     };
     const brief = buildApplyBrief(plan);
     expect(brief.length).toBeGreaterThan(0);
     expect(brief).toContain(plan.goal);
-    expect(brief).toContain(plan.conflicts);
+    expect(brief).toContain(plan.conflicts[0]);
   });
 
   it("does not crash when plan has minimal data", () => {
-    const plan: NextPlanResult = { chapterNumber: 1, goal: "", conflicts: "" };
+    const plan: NextPlanResult = { chapterNumber: 1, goal: "", conflicts: [] };
     expect(() => buildApplyBrief(plan)).not.toThrow();
   });
 });

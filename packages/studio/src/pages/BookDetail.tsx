@@ -726,7 +726,7 @@ export function BookDetail({
         defaultWordCount={data?.book.chapterWordCount}
         initialForm={pendingNextPlan ? {
           chapterGoal: pendingNextPlan.goal,
-          mustInclude: pendingNextPlan.conflicts,
+          mustInclude: pendingNextPlan.conflicts.join("\n"),
         } : undefined}
         t={t}
         onSubmit={(payload) => {

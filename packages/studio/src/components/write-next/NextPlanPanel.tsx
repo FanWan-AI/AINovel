@@ -22,7 +22,9 @@ export function classifyNextPlanError(status: number | null): NextPlanErrorKind 
 export function buildApplyBrief(plan: NextPlanResult): string {
   const parts: string[] = [];
   if (plan.goal) parts.push(plan.goal);
-  if (plan.conflicts) parts.push(plan.conflicts);
+  if (plan.conflicts && plan.conflicts.length > 0) {
+    parts.push(plan.conflicts.join("\n"));
+  }
   return parts.join("\n");
 }
 
@@ -108,7 +110,15 @@ export function NextPlanPanel({ bookId, onApply, t }: NextPlanPanelProps) {
             <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
               {t("book.planConflicts")}
             </div>
-            <p className="text-sm leading-relaxed">{plan.conflicts}</p>
+            {plan.conflicts.length > 0 ? (
+              <ul className="text-sm leading-relaxed list-disc pl-5 space-y-1">
+                {plan.conflicts.map((item, index) => (
+                  <li key={`${item}-${index}`}>{item}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm leading-relaxed text-muted-foreground">{t("book.planConflictsFallback")}</p>
+            )}
           </div>
 
           <button

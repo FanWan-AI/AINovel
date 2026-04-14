@@ -222,14 +222,19 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
 export interface NextPlanResult {
   readonly chapterNumber: number;
   readonly goal: string;
-  readonly conflicts: string;
+  readonly conflicts: string[];
 }
 
 export async function fetchNextPlan(
   bookId: string,
   deps?: { readonly fetchImpl?: typeof fetch },
 ): Promise<NextPlanResult> {
-  return fetchJson<NextPlanResult>(`/books/${bookId}/next-plan`, {}, deps);
+  const response = await fetchJson<{ readonly plan: NextPlanResult }>(`/books/${bookId}/next-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }, deps);
+  return response.plan;
 }
 
 export async function normalizeBrief(payload: {

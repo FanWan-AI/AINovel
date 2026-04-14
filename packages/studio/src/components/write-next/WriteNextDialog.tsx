@@ -19,23 +19,48 @@ export const INITIAL_WRITE_NEXT_FORM: WriteNextFormState = {
 };
 
 export interface WriteNextPayload {
-  readonly goal?: string;
-  readonly mustInclude?: string;
-  readonly avoidElements?: string;
-  readonly pacing?: string;
+  readonly chapterGoal?: string;
+  readonly mustInclude?: string[];
+  readonly mustAvoid?: string[];
+  readonly pace?: "slow" | "balanced" | "fast";
   readonly wordCount?: number;
+}
+
+function splitLinesToArray(value: string): string[] {
+  return value
+    .split(/\r?\n|,|，|;/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function normalizePace(value: string): "slow" | "balanced" | "fast" | undefined {
+  const raw = value.trim().toLowerCase();
+  if (!raw) return undefined;
+  if (["slow", "慢", "慢节奏", "舒缓", "缓慢"].includes(raw)) return "slow";
+  if (["fast", "快", "快节奏", "紧张"].includes(raw)) return "fast";
+  if (["balanced", "中", "中等", "均衡", "平衡"].includes(raw)) return "balanced";
+  return undefined;
 }
 
 /** Assembles a lean API payload from raw form state; omits blank fields. */
 export function buildWriteNextPayload(form: WriteNextFormState): WriteNextPayload {
-  const payload: Record<string, string | number> = {};
-  if (form.chapterGoal.trim()) payload.goal = form.chapterGoal.trim();
-  if (form.mustInclude.trim()) payload.mustInclude = form.mustInclude.trim();
-  if (form.avoidElements.trim()) payload.avoidElements = form.avoidElements.trim();
-  if (form.pacing.trim()) payload.pacing = form.pacing.trim();
+  const payload: {
+    chapterGoal?: string;
+    mustInclude?: string[];
+    mustAvoid?: string[];
+    pace?: "slow" | "balanced" | "fast";
+    wordCount?: number;
+  } = {};
+  if (form.chapterGoal.trim()) payload.chapterGoal = form.chapterGoal.trim();
+  const mustInclude = splitLinesToArray(form.mustInclude);
+  if (mustInclude.length > 0) payload.mustInclude = mustInclude;
+  const mustAvoid = splitLinesToArray(form.avoidElements);
+  if (mustAvoid.length > 0) payload.mustAvoid = mustAvoid;
+  const pace = normalizePace(form.pacing);
+  if (pace) payload.pace = pace;
   const wc = parseInt(form.wordCount, 10);
   if (!isNaN(wc) && wc > 0) payload.wordCount = wc;
-  return payload;
+  return payload as WriteNextPayload;
 }
 
 interface WriteNextDialogProps {
