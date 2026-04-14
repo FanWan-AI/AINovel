@@ -2,7 +2,7 @@ import { useApi } from "./use-api";
 
 type Lang = "zh" | "en";
 
-const strings = {
+export const strings = {
   // Header
   "nav.books": { zh: "书籍", en: "Books" },
   "nav.newBook": { zh: "新建书籍", en: "New Book" },
@@ -22,11 +22,11 @@ const strings = {
   "dash.writingProgress": { zh: "写作进度", en: "Writing Progress" },
 
   // Book Detail
-  "book.writeNext": { zh: "写下一章", en: "Write Next" },
+  "book.writeNext": { zh: "规划下章并写作", en: "Plan & Write Next" },
   "book.draftOnly": { zh: "仅草稿", en: "Draft Only" },
   "book.approveAll": { zh: "全部通过", en: "Approve All" },
   "book.analytics": { zh: "数据分析", en: "Analytics" },
-  "book.noChapters": { zh: "暂无章节，点击「写下一章」开始", en: 'No chapters yet. Click "Write Next" to start.' },
+  "book.noChapters": { zh: "暂无章节，点击「规划下章并写作」开始", en: 'No chapters yet. Click "Plan & Write Next" to start.' },
   "book.approve": { zh: "通过", en: "Approve" },
   "book.reject": { zh: "驳回", en: "Reject" },
   "book.words": { zh: "字", en: "words" },
@@ -115,13 +115,14 @@ const strings = {
   "book.statusCompleted": { zh: "已完成", en: "Completed" },
   "book.statusDropped": { zh: "已放弃", en: "Dropped" },
   "book.truthFiles": { zh: "真相文件", en: "Truth Files" },
-  "book.nextPlan": { zh: "下一章建议", en: "Next Chapter Suggestion" },
-  "book.generateNextPlan": { zh: "生成下一章建议", en: "Generate Suggestion" },
-  "book.nextPlanHint": { zh: '点击「生成下一章建议」获取 AI 规划。', en: 'Click "Generate Suggestion" to get an AI plan for the next chapter.' },
+  "book.nextPlan": { zh: "AI 生成建议", en: "AI Suggestions" },
+  "book.generateNextPlan": { zh: "生成 AI 建议", en: "Generate AI Suggestions" },
+  "book.nextPlanHint": { zh: "AI 建议会参考你已写的章节，生成后可手动修改再写；「快速写」速度快但可控性低。点击「生成 AI 建议」开始。", en: 'AI suggestions are based on your written chapters. You can adjust them before writing. "Quick Write" is faster but less controllable. Click "Generate AI Suggestions" to start.' },
   "book.planGoal": { zh: "章节目标", en: "Goal" },
   "book.planConflicts": { zh: "核心冲突", en: "Conflicts" },
   "book.planConflictsFallback": { zh: "请补充本章冲突（目标受阻、阻拦方、失败代价）。", en: "Please add a chapter conflict (blocked goal, blocker, and failure cost)." },
   "book.applyNextPlan": { zh: "按此建议写下一章", en: "Write Next with This Plan" },
+  "book.manualPlanLabel": { zh: "手动规划", en: "Manual Planning" },
   "book.nextPlanDialogTitle": { zh: "按建议写下一章", en: "Write Next with Plan" },
   "book.nextPlanDialogBody": { zh: "以下 AI 建议将作为本次写作的引导：", en: "The following AI suggestion will guide this writing run:" },
   "book.confirmWrite": { zh: "确认写作", en: "Confirm Write" },
@@ -384,7 +385,7 @@ const strings = {
   "logs.showingRecent": { zh: "当前展示最近日志记录。", en: "Showing recent log entries." },
 
   // WriteNextDialog
-  "writeNext.dialogTitle": { zh: "写下一章", en: "Write Next Chapter" },
+  "writeNext.dialogTitle": { zh: "手动规划", en: "Manual Planning" },
   "writeNext.chapterGoal": { zh: "本章目标", en: "Chapter Goal" },
   "writeNext.chapterGoalPlaceholder": { zh: "本章要达成的剧情目标...", en: "Plot goal for this chapter..." },
   "writeNext.mustInclude": { zh: "必须包含", en: "Must Include" },
@@ -398,6 +399,7 @@ const strings = {
   "writeNext.cancel": { zh: "取消", en: "Cancel" },
   "writeNext.submit": { zh: "开始写作", en: "Start Writing" },
   "writeNext.quickWrite": { zh: "快速写", en: "Quick Write" },
+  "writeNext.quickWriteTip": { zh: "直接生成，速度快但可控性低", en: "Generate directly — fast but less controllable" },
 } as const;
 
 export type StringKey = keyof typeof strings;

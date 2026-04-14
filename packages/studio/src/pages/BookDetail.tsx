@@ -424,7 +424,7 @@ export function BookDetail({
             onClick={handleQuickWrite}
             disabled={writing || drafting}
             className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
-            title={t("writeNext.quickWrite")}
+            title={t("writeNext.quickWriteTip")}
           >
             <Zap size={14} />
             {t("writeNext.quickWrite")}
