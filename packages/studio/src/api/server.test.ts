@@ -727,7 +727,7 @@ describe("createStudioServer daemon lifecycle", () => {
   // ---------------------------------------------------------------------------
 
   it("POST write-next returns writing status immediately without waiting for pipeline to finish", async () => {
-    let resolve!: (value: unknown) => void;
+    let resolve: (value: unknown) => void = () => {};
     writeNextChapterMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
 
     const { createStudioServer } = await import("./server.js");
@@ -775,7 +775,7 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("POST draft (plan preview) returns drafting status immediately", async () => {
-    let resolve!: (value: unknown) => void;
+    let resolve: (value: unknown) => void = () => {};
     writeDraftMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
 
     const { createStudioServer } = await import("./server.js");
