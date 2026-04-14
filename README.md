@@ -511,6 +511,71 @@ pnpm --filter @actalk/inkos-studio test -- \
 
 ### 运行中心验收与运维（端到端）
 
+#### 守护进程两种模式（默认 / 高级）
+
+> 统一建议：**新手先用默认模式**，高级用户在需要“指定书籍 + 预算上限”时再切高级模式。
+
+| 模式 | Studio 实际调用 | 推荐场景 |
+|------|------------------|----------|
+| 默认模式（Default / `managed-default`） | `POST /api/daemon/start`（`{ "default": true }` 或空 body） | 一键托管，快速启动 |
+| 高级模式（Advanced / `custom-plan`） | 先 `POST /api/daemon/plan`，再 `POST /api/daemon/start` 携带 `planId` | 需要控制目标书籍、每本/全局章节预算 |
+
+**Studio daemon vs CLI daemon（区别与建议）**
+
+| 对比项 | Studio daemon（运行中心） | CLI daemon（`inkos up/down`） |
+|--------|----------------------------|-------------------------------|
+| 启停方式 | API：`/api/daemon/start|pause|resume|stop`，UI 可视化按钮 | 命令行：`inkos up` / `inkos down` |
+| 观测能力 | 运行中心实时状态 + `/api/runtime/events` 事件流 | 终端输出 + `inkos.log` |
+| 运行会话状态 | `idle / planning / running / paused / error / stopped` | 以进程/PID 存活为主（`inkos.pid`） |
+| 推荐场景 | 日常创作值守、可视化运维、联调 API | SSH/脚本化环境、纯命令行运维 |
+
+#### 默认模式（可直接复制）
+
+```bash
+# 0) 启动 Studio（前端 :4567，API :4569）
+INKOS_PROJECT_ROOT=/home/user/my-inkos-project pnpm --filter @actalk/inkos-studio dev
+
+# 1) 默认模式启动守护（等价于 UI 选择“默认模式”后点“启动”）
+curl -s -X POST http://localhost:4569/api/daemon/start \
+  -H "Content-Type: application/json" \
+  -d '{"default":true}' | jq .
+# 预期: { "ok": true, "running": true, "mode": "managed-default" }
+
+# 2) 查看会话状态 + 事件
+curl -s http://localhost:4569/api/daemon/session | jq .
+curl -s "http://localhost:4569/api/runtime/events?source=daemon&limit=20" | jq .
+
+# 3) 停止守护
+curl -s -X POST http://localhost:4569/api/daemon/stop | jq .
+```
+
+#### 高级模式（可直接复制）
+
+```bash
+# 0) 生成高级计划（指定书籍 + 预算）
+PLAN_ID=$(curl -s -X POST http://localhost:4569/api/daemon/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plan": {
+      "mode": "custom-plan",
+      "bookScope": { "type": "book-list", "bookIds": ["demo-book"] },
+      "perBookChapterCap": 2,
+      "globalChapterCap": 4
+    }
+  }' | jq -r '.planId')
+echo "PLAN_ID=$PLAN_ID"
+
+# 1) 用 planId 启动守护（等价于 UI 选择“高级模式”并填写参数后点“启动”）
+curl -s -X POST http://localhost:4569/api/daemon/start \
+  -H "Content-Type: application/json" \
+  -d "{\"planId\":\"$PLAN_ID\"}" | jq .
+# 预期: { "ok": true, "running": true, "planId": "...", "mode": "custom-plan" }
+
+# 2) 可选：暂停 / 恢复
+curl -s -X POST http://localhost:4569/api/daemon/pause | jq .
+curl -s -X POST http://localhost:4569/api/daemon/resume | jq .
+```
+
 最小验收命令（可直接复制）：
 
 ```bash
