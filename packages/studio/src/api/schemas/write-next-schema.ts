@@ -5,13 +5,20 @@
 
 export type WriteNextPace = "slow" | "balanced" | "fast";
 
+/** Controls which planning path is used before writing the next chapter. */
+export type WriteNextMode = "ai-plan" | "manual-plan" | "quick";
+
 export interface WriteNextInput {
+  /** Planning mode. Defaults to legacy steering-field behaviour when omitted. */
+  readonly mode?: WriteNextMode;
   readonly wordCount?: number;
   readonly brief?: string;
   readonly chapterGoal?: string;
   readonly mustInclude?: string[];
   readonly mustAvoid?: string[];
   readonly pace?: WriteNextPace;
+  /** Natural-language context fed to the AI planner when mode="ai-plan". */
+  readonly planInput?: string;
 }
 
 export interface WriteNextValidationError {
@@ -34,6 +41,7 @@ export type WriteNextValidation =
   | WriteNextValidationFailure;
 
 const VALID_PACES: ReadonlySet<string> = new Set(["slow", "balanced", "fast"]);
+const VALID_MODES: ReadonlySet<string> = new Set(["ai-plan", "manual-plan", "quick"]);
 
 function validateOptionalNonEmptyString(
   field: string,
@@ -92,6 +100,13 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
     }
   }
 
+  // mode: optional enum
+  if (raw["mode"] !== undefined && raw["mode"] !== null) {
+    if (typeof raw["mode"] !== "string" || !VALID_MODES.has(raw["mode"])) {
+      errors.push({ field: "mode", message: 'mode must be one of "ai-plan", "manual-plan", or "quick"' });
+    }
+  }
+
   // brief: optional non-empty string
   validateOptionalNonEmptyString("brief", raw["brief"], errors);
 
@@ -111,6 +126,9 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
     }
   }
 
+  // planInput: optional non-empty string (used when mode="ai-plan")
+  validateOptionalNonEmptyString("planInput", raw["planInput"], errors);
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -118,12 +136,14 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
   return {
     ok: true,
     value: {
+      mode: raw["mode"] as WriteNextMode | undefined,
       wordCount: raw["wordCount"] as number | undefined,
       brief: raw["brief"] as string | undefined,
       chapterGoal: raw["chapterGoal"] as string | undefined,
       mustInclude: raw["mustInclude"] as string[] | undefined,
       mustAvoid: raw["mustAvoid"] as string[] | undefined,
       pace: raw["pace"] as WriteNextPace | undefined,
+      planInput: raw["planInput"] as string | undefined,
     },
   };
 }
