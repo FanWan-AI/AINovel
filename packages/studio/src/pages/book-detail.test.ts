@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { translateChapterStatus } from "./BookDetail";
+import { translateChapterStatus, getTopActionIds } from "./BookDetail";
 import type { TFunction } from "../hooks/use-i18n";
 
 // Minimal stub that echoes the translation key so tests stay readable without
@@ -62,5 +62,32 @@ describe("translateChapterStatus", () => {
       expect(label).not.toBe(status);
       expect(label).toMatch(/^chapter\./);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dual-button rendering — verifies only 2 top actions are exposed
+// ---------------------------------------------------------------------------
+
+describe("getTopActionIds — dual-button contract", () => {
+  it("returns exactly two action IDs", () => {
+    const actions = getTopActionIds();
+    expect(actions).toHaveLength(2);
+  });
+
+  it("exposes planNextAndWrite as the first action", () => {
+    const [first] = getTopActionIds();
+    expect(first).toBe("planNextAndWrite");
+  });
+
+  it("exposes quickWrite as the second action", () => {
+    const [, second] = getTopActionIds();
+    expect(second).toBe("quickWrite");
+  });
+
+  it("does not expose the old draftOnly or writeNext action IDs", () => {
+    const actions = getTopActionIds() as ReadonlyArray<string>;
+    expect(actions).not.toContain("draftOnly");
+    expect(actions).not.toContain("writeNext");
   });
 });

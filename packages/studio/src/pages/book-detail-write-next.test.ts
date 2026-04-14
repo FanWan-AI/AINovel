@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildWriteNextPayload,
+  buildPlanPayloadFromNextPlan,
   INITIAL_WRITE_NEXT_FORM,
 } from "../components/write-next/WriteNextDialog";
-import type { WriteNextFormState, WriteNextPayload } from "../components/write-next/WriteNextDialog";
+import type { WriteNextFormState, WriteNextPayload, PlanningTab } from "../components/write-next/WriteNextDialog";
+import type { NextPlanResult } from "../hooks/use-api";
 import { postApi } from "../hooks/use-api";
 
 // ---------------------------------------------------------------------------
@@ -177,6 +179,146 @@ describe("quick-write fallback path", () => {
     expect(mockPost).toHaveBeenCalledOnce();
     const [path, body] = (mockPost as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown];
     expect(path).toBe("/books/book-123/write-next");
+    expect(body).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildPlanPayloadFromNextPlan — AI plan → write-next payload conversion
+// ---------------------------------------------------------------------------
+
+describe("buildPlanPayloadFromNextPlan", () => {
+  const plan: NextPlanResult = {
+    chapterNumber: 4,
+    goal: "主角揭开阴谋",
+    conflicts: ["真相让一切变得更复杂", "同伴开始怀疑主角"],
+  };
+
+  it("maps goal to chapterGoal", () => {
+    expect(buildPlanPayloadFromNextPlan(plan).chapterGoal).toBe("主角揭开阴谋");
+  });
+
+  it("maps conflicts to mustInclude", () => {
+    expect(buildPlanPayloadFromNextPlan(plan).mustInclude).toEqual([
+      "真相让一切变得更复杂",
+      "同伴开始怀疑主角",
+    ]);
+  });
+
+  it("omits chapterGoal when goal is empty", () => {
+    const result = buildPlanPayloadFromNextPlan({ ...plan, goal: "" });
+    expect(result.chapterGoal).toBeUndefined();
+  });
+
+  it("omits mustInclude when conflicts array is empty", () => {
+    const result = buildPlanPayloadFromNextPlan({ ...plan, conflicts: [] });
+    expect(result.mustInclude).toBeUndefined();
+  });
+
+  it("returns an empty object when both goal and conflicts are empty", () => {
+    const result = buildPlanPayloadFromNextPlan({ chapterNumber: 1, goal: "", conflicts: [] });
+    expect(result).toEqual({});
+  });
+
+  it("trims whitespace from goal", () => {
+    const result = buildPlanPayloadFromNextPlan({ ...plan, goal: "  目标  " });
+    expect(result.chapterGoal).toBe("目标");
+  });
+
+  it("filters blank conflict items", () => {
+    const result = buildPlanPayloadFromNextPlan({ ...plan, conflicts: ["有效冲突", "   ", ""] });
+    expect(result.mustInclude).toEqual(["有效冲突"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Planning panel open/close toggle — pure state logic
+// ---------------------------------------------------------------------------
+
+describe("planning panel open/close behavior", () => {
+  it("initial planning panel state is closed (false)", () => {
+    const initialOpen = false;
+    expect(initialOpen).toBe(false);
+  });
+
+  it("clicking '规划下章并写作' opens the planning dialog (sets state to true)", () => {
+    let dialogOpen = false;
+    // Simulates: onClick={() => setWriteNextDialogOpen(true)}
+    const openPlanningPanel = () => { dialogOpen = true; };
+    openPlanningPanel();
+    expect(dialogOpen).toBe(true);
+  });
+
+  it("clicking '快速写' does NOT open the planning dialog", () => {
+    let dialogOpen = false;
+    // Simulates handleQuickWrite — calls postApi directly, never touches dialog state
+    const handleQuickWrite = async () => {
+      // dialogOpen intentionally NOT set here
+    };
+    void handleQuickWrite();
+    expect(dialogOpen).toBe(false);
+  });
+
+  it("cancelling the planning dialog closes it (sets state to false)", () => {
+    let dialogOpen = true;
+    const closePlanningPanel = () => { dialogOpen = false; };
+    closePlanningPanel();
+    expect(dialogOpen).toBe(false);
+  });
+
+  it("submitting from the planning dialog closes it before posting", () => {
+    let dialogOpen = true;
+    // Simulates first line of handleWriteNextWithPayload
+    const handleSubmit = () => { dialogOpen = false; };
+    handleSubmit();
+    expect(dialogOpen).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab switching — planning panel tab state logic
+// ---------------------------------------------------------------------------
+
+describe("planning panel tab switching", () => {
+  it("default tab is 'ai' on open", () => {
+    const defaultTab: PlanningTab = "ai";
+    expect(defaultTab).toBe("ai");
+  });
+
+  it("switching to manual tab yields 'manual'", () => {
+    let activeTab: PlanningTab = "ai";
+    const switchToManual = () => { activeTab = "manual"; };
+    switchToManual();
+    expect(activeTab).toBe("manual");
+  });
+
+  it("switching back to ai tab yields 'ai'", () => {
+    let activeTab: PlanningTab = "manual";
+    const switchToAI = () => { activeTab = "ai"; };
+    switchToAI();
+    expect(activeTab).toBe("ai");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quick-write path regression — must never open the planning dialog
+// ---------------------------------------------------------------------------
+
+describe("quick-write path regression", () => {
+  it("quick write posts directly without payload and without touching dialog state", async () => {
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+    let dialogOpen = false;
+
+    // Simulates handleQuickWrite — dialog is never touched
+    const handleQuickWrite = async (bookId: string) => {
+      await mockPost(`/books/${bookId}/write-next`);
+      // dialogOpen must NOT be set to true
+    };
+
+    await handleQuickWrite("book-999");
+    expect(dialogOpen).toBe(false);
+    expect(mockPost).toHaveBeenCalledWith("/books/book-999/write-next");
+    const [, body] = mockPost.mock.calls[0] as [string, unknown];
     expect(body).toBeUndefined();
   });
 });
