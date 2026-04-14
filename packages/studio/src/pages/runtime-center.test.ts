@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAdvancedPlanPayload,
+  deriveRuntimeControlState,
   deriveEventLevel,
   deriveEventSource,
+  deriveRuntimeSessionViewModel,
   filterEvents,
   deriveEmptyHint,
+  parseBookIds,
+  validateAdvancedForm,
 } from "./RuntimeCenter";
 import type { SSEMessage } from "../hooks/use-sse";
+import type { DaemonSessionSummary } from "../shared/contracts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,5 +134,104 @@ describe("deriveEmptyHint", () => {
   it("shows the filtered hint when a filter is active regardless of daemon state", () => {
     expect(deriveEmptyHint(false, true)).toBe("rc.emptyFiltered");
     expect(deriveEmptyHint(true, true)).toBe("rc.emptyFiltered");
+  });
+});
+
+describe("parseBookIds", () => {
+  it("parses comma/newline-separated book ids and deduplicates", () => {
+    expect(parseBookIds("book-a, book-b\nbook-a")).toEqual(["book-a", "book-b"]);
+  });
+});
+
+describe("validateAdvancedForm", () => {
+  it("returns field errors for invalid advanced form", () => {
+    const errors = validateAdvancedForm({
+      scopeType: "book-list",
+      bookIdsText: " ",
+      perBookChapterCap: "0",
+      globalChapterCap: "x",
+      frequencyMinutes: "",
+      cooldownSeconds: "0",
+      concurrency: "-1",
+    });
+
+    expect(errors).toEqual([
+      "rc.error.bookIdsRequired",
+      "rc.error.perBookRequired",
+      "rc.error.globalRequired",
+      "rc.error.frequencyRequired",
+      "rc.error.cooldownRequired",
+      "rc.error.concurrencyRequired",
+    ]);
+  });
+});
+
+describe("buildAdvancedPlanPayload", () => {
+  it("assembles advanced plan payload with custom plan mode", () => {
+    expect(buildAdvancedPlanPayload({
+      scopeType: "book-list",
+      bookIdsText: "b1,b2,b1",
+      perBookChapterCap: "2",
+      globalChapterCap: "10",
+      frequencyMinutes: "5",
+      cooldownSeconds: "30",
+      concurrency: "3",
+    })).toEqual({
+      plan: {
+        mode: "custom-plan",
+        bookScope: { type: "book-list", bookIds: ["b1", "b2"] },
+        perBookChapterCap: 2,
+        globalChapterCap: 10,
+        schedule: { everyMinutes: 5, cooldownSeconds: 30 },
+        maxConcurrentBooks: 3,
+      },
+    });
+  });
+});
+
+describe("deriveRuntimeSessionViewModel", () => {
+  it("renders session summary from daemon session + runtime events", () => {
+    const session: DaemonSessionSummary = {
+      state: "running",
+      running: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastError: { message: "network timeout", timestamp: "2026-01-01T00:00:01.000Z" },
+    };
+    const model = deriveRuntimeSessionViewModel(session, [
+      makeMsg("daemon:chapter", { bookId: "book-1", chapter: 3, status: "success" }),
+      makeMsg("daemon:error", { error: "temporary issue" }),
+    ]);
+
+    expect(model).toEqual({
+      state: "running",
+      currentBook: "book-1",
+      currentChapter: "3",
+      completedCount: 1,
+      failedCount: 1,
+      recentError: "network timeout",
+    });
+  });
+});
+
+describe("deriveRuntimeControlState", () => {
+  it("exposes button states for mode transitions", () => {
+    expect(deriveRuntimeControlState("idle", false)).toEqual({
+      showStart: true,
+      showPause: false,
+      showResume: false,
+      stopDisabled: true,
+    });
+    expect(deriveRuntimeControlState("running", false)).toEqual({
+      showStart: false,
+      showPause: true,
+      showResume: false,
+      stopDisabled: false,
+    });
+    expect(deriveRuntimeControlState("paused", true)).toEqual({
+      showStart: false,
+      showPause: false,
+      showResume: true,
+      stopDisabled: true,
+    });
   });
 });
