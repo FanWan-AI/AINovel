@@ -1040,3 +1040,293 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(config["externalContext"]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// RuntimeEventStore — unit tests
+// ---------------------------------------------------------------------------
+
+describe("RuntimeEventStore unit tests", () => {
+  it("appends events and returns them in insertion order", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    store.append({ eventType: "write:start", level: "info", message: "write:start", timestamp: "2026-01-01T00:00:00.000Z", source: "write" });
+    store.append({ eventType: "write:complete", level: "info", message: "write:complete", timestamp: "2026-01-01T00:00:01.000Z", source: "write" });
+    store.append({ eventType: "revise:start", level: "info", message: "revise:start", timestamp: "2026-01-01T00:00:02.000Z", source: "revise" });
+
+    const events = store.query();
+    expect(events).toHaveLength(3);
+    expect(events[0].eventType).toBe("write:start");
+    expect(events[1].eventType).toBe("write:complete");
+    expect(events[2].eventType).toBe("revise:start");
+  });
+
+  it("enforces capacity and evicts oldest entries when full", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore(3);
+
+    for (let i = 0; i < 5; i++) {
+      store.append({
+        eventType: `evt:${i}`,
+        level: "info",
+        message: `event ${i}`,
+        timestamp: `2026-01-01T00:00:0${i}.000Z`,
+        source: "test",
+      });
+    }
+
+    // capacity is 3 → only the last 3 events should remain
+    expect(store.size).toBe(3);
+    const events = store.query();
+    expect(events).toHaveLength(3);
+    expect(events[0].eventType).toBe("evt:2");
+    expect(events[1].eventType).toBe("evt:3");
+    expect(events[2].eventType).toBe("evt:4");
+  });
+
+  it("query filters by bookId", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    store.append({ eventType: "write:start", level: "info", bookId: "book-a", message: "m", timestamp: "2026-01-01T00:00:00.000Z", source: "write" });
+    store.append({ eventType: "write:start", level: "info", bookId: "book-b", message: "m", timestamp: "2026-01-01T00:00:01.000Z", source: "write" });
+    store.append({ eventType: "write:complete", level: "info", bookId: "book-a", message: "m", timestamp: "2026-01-01T00:00:02.000Z", source: "write" });
+
+    const result = store.query({ bookId: "book-a" });
+    expect(result).toHaveLength(2);
+    expect(result.every((e) => e.bookId === "book-a")).toBe(true);
+  });
+
+  it("query filters by eventType", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    store.append({ eventType: "write:start", level: "info", message: "m", timestamp: "2026-01-01T00:00:00.000Z", source: "write" });
+    store.append({ eventType: "daemon:started", level: "info", message: "m", timestamp: "2026-01-01T00:00:01.000Z", source: "daemon" });
+    store.append({ eventType: "write:start", level: "info", message: "m", timestamp: "2026-01-01T00:00:02.000Z", source: "write" });
+
+    const result = store.query({ eventType: "write:start" });
+    expect(result).toHaveLength(2);
+    expect(result.every((e) => e.eventType === "write:start")).toBe(true);
+  });
+
+  it("query respects the limit option (most recent N)", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    for (let i = 0; i < 10; i++) {
+      store.append({
+        eventType: "log",
+        level: "info",
+        message: `msg ${i}`,
+        timestamp: `2026-01-01T00:00:0${i}.000Z`,
+        source: "log",
+      });
+    }
+
+    const result = store.query({ limit: 3 });
+    expect(result).toHaveLength(3);
+    expect(result[2].message).toBe("msg 9");
+  });
+
+  it("clear removes all events", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    store.append({ eventType: "write:start", level: "info", message: "m", timestamp: "2026-01-01T00:00:00.000Z", source: "write" });
+    store.append({ eventType: "write:complete", level: "info", message: "m", timestamp: "2026-01-01T00:00:01.000Z", source: "write" });
+
+    store.clear();
+
+    expect(store.size).toBe(0);
+    expect(store.query()).toHaveLength(0);
+  });
+
+  it("size reflects the number of stored events up to capacity", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore(5);
+
+    expect(store.size).toBe(0);
+
+    for (let i = 0; i < 8; i++) {
+      store.append({ eventType: "ping", level: "info", message: "m", timestamp: new Date().toISOString(), source: "ping" });
+    }
+
+    expect(store.size).toBe(5);
+  });
+
+  it("RuntimeEvent fields are complete and correctly typed", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    const store = new RuntimeEventStore();
+
+    const event = {
+      eventType: "daemon:error",
+      level: "error" as const,
+      bookId: "book-x",
+      chapter: 7,
+      message: "Daemon crashed",
+      timestamp: "2026-01-01T12:00:00.000Z",
+      source: "daemon",
+    };
+
+    store.append(event);
+
+    const [stored] = store.query();
+    expect(stored.eventType).toBe("daemon:error");
+    expect(stored.level).toBe("error");
+    expect(stored.bookId).toBe("book-x");
+    expect(stored.chapter).toBe(7);
+    expect(stored.message).toBe("Daemon crashed");
+    expect(stored.timestamp).toBe("2026-01-01T12:00:00.000Z");
+    expect(stored.source).toBe("daemon");
+  });
+
+  it("RangeError is thrown when capacity < 1", async () => {
+    const { RuntimeEventStore } = await import("./lib/runtime-event-store.js");
+    expect(() => new RuntimeEventStore(0)).toThrow(RangeError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deriveRuntimeEvent — unit tests
+// ---------------------------------------------------------------------------
+
+describe("deriveRuntimeEvent", () => {
+  it("infers level=error from event name suffix :error", async () => {
+    const { deriveRuntimeEvent } = await import("./lib/runtime-event-store.js");
+    const event = deriveRuntimeEvent("write:error", { message: "LLM timeout" });
+    expect(event.level).toBe("error");
+  });
+
+  it("prefers explicit level field from data over inferred level", async () => {
+    const { deriveRuntimeEvent } = await import("./lib/runtime-event-store.js");
+    const event = deriveRuntimeEvent("log", { level: "warn", message: "low memory" });
+    expect(event.level).toBe("warn");
+    expect(event.message).toBe("low memory");
+  });
+
+  it("falls back to event name as message when data has no message", async () => {
+    const { deriveRuntimeEvent } = await import("./lib/runtime-event-store.js");
+    const event = deriveRuntimeEvent("daemon:started", {});
+    expect(event.message).toBe("daemon:started");
+    expect(event.source).toBe("daemon");
+  });
+
+  it("extracts bookId and chapter from data", async () => {
+    const { deriveRuntimeEvent } = await import("./lib/runtime-event-store.js");
+    const event = deriveRuntimeEvent("write:complete", { bookId: "my-book", chapterNumber: 3, message: "done" });
+    expect(event.bookId).toBe("my-book");
+    expect(event.chapter).toBe(3);
+  });
+
+  it("handles non-object data gracefully", async () => {
+    const { deriveRuntimeEvent } = await import("./lib/runtime-event-store.js");
+    const event = deriveRuntimeEvent("ping", null);
+    expect(event.level).toBe("info");
+    expect(event.message).toBe("ping");
+    expect(event.bookId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: broadcast events land in runtimeEventStore
+// ---------------------------------------------------------------------------
+
+describe("runtimeEventStore integration via server broadcast", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-studio-store-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+
+    // reset mocks (shared with outer describe)
+    schedulerStartMock.mockReset();
+    initBookMock.mockReset();
+    writeNextChapterMock.mockResolvedValue({ chapterNumber: 1, wordCount: 1200, revised: false, status: "ready-for-review", auditResult: { passed: true, issues: [], summary: "ok" } });
+    reviseDraftMock.mockResolvedValue({ chapterNumber: 3, wordCount: 1800, fixedIssues: [], applied: true, status: "ready-for-review" });
+    loadProjectConfigMock.mockImplementation(async () => cloneProjectConfig());
+    loadChapterIndexMock.mockResolvedValue([]);
+    saveChapterIndexMock.mockResolvedValue(undefined);
+    rollbackToChapterMock.mockResolvedValue([]);
+    planChapterMock.mockResolvedValue({
+      bookId: "demo-book",
+      chapterNumber: 1,
+      intentPath: "chapters/intent/0001_intent.json",
+      goal: "主角发现线索",
+      conflicts: [],
+    });
+    createLLMClientMock.mockReturnValue({});
+    chatCompletionMock.mockResolvedValue({ content: "pong", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
+    pipelineConfigs.length = 0;
+
+    // clear the module-level store before each integration test
+    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
+    runtimeEventStore.clear();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("write-next broadcasts are captured in the runtime event store", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 1500 }),
+    });
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    const events = runtimeEventStore.query();
+    expect(events.length).toBeGreaterThan(0);
+    const eventTypes = events.map((e) => e.eventType);
+    expect(eventTypes).toEqual(expect.arrayContaining(["write:start"]));
+  });
+
+  it("revise broadcasts are captured in the runtime event store", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite" }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const events = runtimeEventStore.query();
+    expect(events.length).toBeGreaterThan(0);
+    const eventTypes = events.map((e) => e.eventType);
+    expect(eventTypes).toEqual(expect.arrayContaining(["revise:start"]));
+  });
+
+  it("all stored events have the required fields", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const { runtimeEventStore } = await import("./lib/runtime-event-store.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 1000 }),
+    });
+
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    const events = runtimeEventStore.query();
+    for (const e of events) {
+      expect(typeof e.eventType).toBe("string");
+      expect(["info", "warn", "error"]).toContain(e.level);
+      expect(typeof e.message).toBe("string");
+      expect(typeof e.timestamp).toBe("string");
+      expect(typeof e.source).toBe("string");
+    }
+  });
+});

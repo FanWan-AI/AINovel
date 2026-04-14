@@ -28,6 +28,7 @@ import { previewNextPlan, PlanLowConfidenceError } from "./services/next-plan-se
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
+import { runtimeEventStore, deriveRuntimeEvent } from "./lib/runtime-event-store.js";
 import {
   loadSteeringPrefs,
   saveSteeringPrefs,
@@ -41,6 +42,7 @@ const subscribers = new Set<EventHandler>();
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 
 function broadcast(event: string, data: unknown): void {
+  runtimeEventStore.append(deriveRuntimeEvent(event, data));
   for (const handler of subscribers) {
     handler(event, data);
   }
