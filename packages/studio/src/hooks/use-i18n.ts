@@ -406,7 +406,7 @@ export const strings = {
   "writeNext.tabAI": { zh: "AI 生成建议", en: "AI Suggestions" },
   "writeNext.tabManual": { zh: "手动规划", en: "Manual Plan" },
   "writeNext.generatePlan": { zh: "生成建议", en: "Generate Plan" },
-  "writeNext.applyPlan": { zh: "按此建议写作", en: "Write with This Plan" },
+  "writeNext.applyPlan": { zh: "采用建议", en: "Adopt Suggestion" },
   "writeNext.planHint": { zh: "点击「生成建议」获取 AI 规划，或切换到「手动规划」自定义。", en: "Click \"Generate Plan\" to get an AI plan, or switch to \"Manual Plan\" to customise." },
   "writeNext.planError": { zh: "生成失败，请重试", en: "Failed to generate plan. Please try again." },
 
