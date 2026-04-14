@@ -31,11 +31,33 @@ export async function callNormalizeBrief(
   return post<NormalizeBriefResponse>("/v2/books/create/brief/normalize", payload);
 }
 
+/**
+ * Assembles a combined raw-input string from the main textarea and the three
+ * optional lite-input fields.  Empty fields are silently omitted so they
+ * never produce dirty data.
+ */
+export function assembleBriefText(
+  rawInput: string,
+  positioning: string,
+  targetReaders: string,
+  stylePreference: string,
+): string {
+  const parts: string[] = [];
+  if (rawInput.trim()) parts.push(rawInput.trim());
+  if (positioning.trim()) parts.push(`定位：${positioning.trim()}`);
+  if (targetReaders.trim()) parts.push(`目标读者：${targetReaders.trim()}`);
+  if (stylePreference.trim()) parts.push(`风格：${stylePreference.trim()}`);
+  return parts.join("\n");
+}
+
 export function BookCreateSimple({ nav, theme, t, flow }: { nav: Nav; theme: Theme; t: TFunction; flow: CreateFlowActions }) {
   const c = useColors(theme);
 
   const [title, setTitle] = useState("");
   const [rawInput, setRawInput] = useState("");
+  const [positioning, setPositioning] = useState("");
+  const [targetReaders, setTargetReaders] = useState("");
+  const [stylePreference, setStylePreference] = useState("");
   const [normalizing, setNormalizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,16 +66,13 @@ export function BookCreateSimple({ nav, theme, t, flow }: { nav: Nav; theme: The
       setError(t("simple.titleRequired"));
       return;
     }
-    if (!rawInput.trim()) {
-      setError(t("simple.inputRequired"));
-      return;
-    }
 
     setNormalizing(true);
     setError(null);
 
     try {
-      const response = await callNormalizeBrief({ mode: "simple", title: title.trim(), rawInput: rawInput.trim() });
+      const combined = assembleBriefText(rawInput, positioning, targetReaders, stylePreference);
+      const response = await callNormalizeBrief({ mode: "simple", title: title.trim(), rawInput: combined });
       flow.setBrief(response.briefId, response.normalizedBrief);
       nav.toBookCreateReview();
     } catch (e) {
@@ -106,6 +125,40 @@ export function BookCreateSimple({ nav, theme, t, flow }: { nav: Nav; theme: The
             className={`w-full ${c.input} rounded-md px-4 py-3 focus:outline-none text-base resize-y`}
             placeholder={t("simple.rawInputPlaceholder")}
           />
+        </div>
+
+        {/* Lite expansion inputs (all optional) */}
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm text-muted-foreground mb-1">{t("simple.positioningLabel")}</label>
+            <input
+              type="text"
+              value={positioning}
+              onChange={(e) => setPositioning(e.target.value)}
+              className={`w-full ${c.input} rounded-md px-3 py-2 focus:outline-none text-sm`}
+              placeholder={t("simple.positioningPlaceholder")}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-muted-foreground mb-1">{t("simple.targetReadersLabel")}</label>
+            <input
+              type="text"
+              value={targetReaders}
+              onChange={(e) => setTargetReaders(e.target.value)}
+              className={`w-full ${c.input} rounded-md px-3 py-2 focus:outline-none text-sm`}
+              placeholder={t("simple.targetReadersPlaceholder")}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-muted-foreground mb-1">{t("simple.stylePreferenceLabel")}</label>
+            <input
+              type="text"
+              value={stylePreference}
+              onChange={(e) => setStylePreference(e.target.value)}
+              className={`w-full ${c.input} rounded-md px-3 py-2 focus:outline-none text-sm`}
+              placeholder={t("simple.stylePreferencePlaceholder")}
+            />
+          </div>
         </div>
       </div>
 
