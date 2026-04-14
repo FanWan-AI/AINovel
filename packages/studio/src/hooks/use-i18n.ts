@@ -282,7 +282,6 @@ const strings = {
   "simple.normalizing": { zh: "整理中...", en: "Generating..." },
   "simple.briefResult": { zh: "创作摘要", en: "Creative Brief" },
   "simple.titleRequired": { zh: "请输入书名", en: "Book title is required" },
-  "simple.inputRequired": { zh: "请输入创意描述", en: "Creative description is required" },
   "simple.backToEntry": { zh: "返回模式选择", en: "Back to Mode Selection" },
   "simple.positioningLabel": { zh: "一句话定位（可选）", en: "Tagline (optional)" },
   "simple.positioningPlaceholder": { zh: "例：都市女强人逆袭爽文", en: "e.g. Strong female lead urban revenge story" },
