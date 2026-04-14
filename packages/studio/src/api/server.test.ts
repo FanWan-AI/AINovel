@@ -9,7 +9,6 @@ const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
-const writeDraftMock = vi.fn();
 const planChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const saveChapterIndexMock = vi.fn();
@@ -69,7 +68,6 @@ vi.mock("@actalk/inkos-core", () => {
     reviseDraft = reviseDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
-    writeDraft = writeDraftMock;
     planChapter = planChapterMock;
   }
 
@@ -149,7 +147,6 @@ describe("createStudioServer daemon lifecycle", () => {
     reviseDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
-    writeDraftMock.mockReset();
     planChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
     saveChapterIndexMock.mockReset();
@@ -180,12 +177,6 @@ describe("createStudioServer daemon lifecycle", () => {
       revised: false,
       status: "ready-for-review",
       auditResult: { passed: true, issues: [], summary: "rewritten" },
-    });
-    writeDraftMock.mockResolvedValue({
-      chapterNumber: 3,
-      title: "Draft Chapter",
-      wordCount: 1800,
-      status: "drafted",
     });
     planChapterMock.mockResolvedValue({
       bookId: "demo-book",
@@ -731,31 +722,6 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(fields).toContain("rawInput");
   });
 
-  // ---------------------------------------------------------------------------
-  // Controlled write-next E2E flow
-  // 覆盖链路: 填干预 → 预览 plan (draft) → 写下一章 → SSE 完成
-  // ---------------------------------------------------------------------------
-
-  it("POST write-next returns writing status immediately without waiting for pipeline to finish", async () => {
-    let resolve: (value: unknown) => void = () => {};
-    writeNextChapterMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const responseOrTimeout = await Promise.race([
-      app.request("http://localhost/api/books/demo-book/write-next", { method: "POST" }),
-      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 300)),
-    ]);
-
-    expect(responseOrTimeout).not.toBe("timeout");
-    const response = responseOrTimeout as Response;
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
-
-    resolve({ chapterNumber: 3, title: "Chapter 3", wordCount: 1800, status: "ready-for-review" });
-  });
-
   it("POST /api/books/:id/next-plan returns plan with goal, conflicts, and chapterNumber", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -901,87 +867,5 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(fields).toContain("pace");
     expect(fields).toContain("mustInclude");
     expect(writeNextChapterMock).not.toHaveBeenCalled();
-  });
-
-  it("POST draft (plan preview) returns drafting status immediately", async () => {
-    let resolve: (value: unknown) => void = () => {};
-    writeDraftMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const responseOrTimeout = await Promise.race([
-      app.request("http://localhost/api/books/demo-book/draft", { method: "POST" }),
-      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 300)),
-    ]);
-
-    expect(responseOrTimeout).not.toBe("timeout");
-    const response = responseOrTimeout as Response;
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "drafting", bookId: "demo-book" });
-
-    resolve({ chapterNumber: 3, title: "Draft Chapter", wordCount: 1800, status: "drafted" });
-  });
-
-  it("POST draft passes context (intervention text) to pipeline.writeDraft", async () => {
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/books/demo-book/draft", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ context: "本章把注意力拉回师徒矛盾", wordCount: 2500 }),
-    });
-
-    expect(response.status).toBe(200);
-    await Promise.resolve();
-    expect(writeDraftMock).toHaveBeenCalledWith("demo-book", "本章把注意力拉回师徒矛盾", 2500);
-  });
-
-  it("full controlled write-next flow: draft preview then write-next completes via pipeline", async () => {
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    // Step 1: Preview plan with intervention context (draft endpoint)
-    const draftResponse = await app.request("http://localhost/api/books/demo-book/draft", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ context: "先把注意力拉回师债主线" }),
-    });
-    expect(draftResponse.status).toBe(200);
-    await expect(draftResponse.json()).resolves.toMatchObject({ status: "drafting", bookId: "demo-book" });
-
-    // Step 2: Write next chapter (triggers full pipeline)
-    const writeResponse = await app.request("http://localhost/api/books/demo-book/write-next", {
-      method: "POST",
-    });
-    expect(writeResponse.status).toBe(200);
-    await expect(writeResponse.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
-
-    // Wait for async pipeline to settle
-    await Promise.resolve();
-
-    // Verify both pipeline stages were called
-    expect(writeDraftMock).toHaveBeenCalledTimes(1);
-    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("SSE write:error event is broadcast when pipeline.writeNextChapter rejects", async () => {
-    writeNextChapterMock.mockRejectedValueOnce(new Error("INKOS_LLM_API_KEY not set"));
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
-      method: "POST",
-    });
-
-    // Immediate response is still 200 — error is pushed asynchronously via SSE
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
-
-    // Let the rejection propagate
-    await Promise.resolve();
-    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
   });
 });
