@@ -41,6 +41,7 @@ export function buildWriteNextPayload(form: WriteNextFormState): WriteNextPayloa
 interface WriteNextDialogProps {
   readonly open: boolean;
   readonly defaultWordCount?: number;
+  readonly initialForm?: Partial<WriteNextFormState>;
   readonly t: TFunction;
   readonly onSubmit: (payload: WriteNextPayload) => void;
   readonly onCancel: () => void;
@@ -49,6 +50,7 @@ interface WriteNextDialogProps {
 export function WriteNextDialog({
   open,
   defaultWordCount,
+  initialForm,
   t,
   onSubmit,
   onCancel,
@@ -57,6 +59,7 @@ export function WriteNextDialog({
   const [form, setForm] = useState<WriteNextFormState>({
     ...INITIAL_WRITE_NEXT_FORM,
     wordCount: defaultWordCount ? String(defaultWordCount) : "",
+    ...initialForm,
   });
 
   // Reset form whenever the dialog opens
@@ -65,9 +68,10 @@ export function WriteNextDialog({
       setForm({
         ...INITIAL_WRITE_NEXT_FORM,
         wordCount: defaultWordCount ? String(defaultWordCount) : "",
+        ...initialForm,
       });
     }
-  }, [open, defaultWordCount]);
+  }, [open, defaultWordCount, initialForm]);
 
   useEffect(() => {
     if (!open) return;

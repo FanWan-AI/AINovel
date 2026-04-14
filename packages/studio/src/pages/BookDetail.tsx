@@ -6,6 +6,8 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { NextPlanPanel } from "../components/write-next/NextPlanPanel";
+import type { NextPlanResult } from "../hooks/use-api";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import {
@@ -119,6 +121,7 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const [pendingNextPlan, setPendingNextPlan] = useState<NextPlanResult | null>(null);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -187,6 +190,11 @@ export function BookDetail({
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
     }
+  };
+
+  const handleWriteNextWithPlan = (plan: NextPlanResult) => {
+    setPendingNextPlan(plan);
+    setWriteNextDialogOpen(true);
   };
 
   const handleDraft = async () => {
@@ -572,6 +580,13 @@ export function BookDetail({
         </div>
       </div>
 
+      {/* Next Chapter Suggestion Panel */}
+      <NextPlanPanel
+        bookId={bookId}
+        onApply={(plan) => setPendingNextPlan(plan)}
+        t={t}
+      />
+
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
         <div className="overflow-x-auto">
@@ -709,9 +724,16 @@ export function BookDetail({
       <WriteNextDialog
         open={writeNextDialogOpen}
         defaultWordCount={data?.book.chapterWordCount}
+        initialForm={pendingNextPlan ? {
+          chapterGoal: pendingNextPlan.goal,
+          mustInclude: pendingNextPlan.conflicts,
+        } : undefined}
         t={t}
-        onSubmit={handleWriteNextWithPayload}
-        onCancel={() => setWriteNextDialogOpen(false)}
+        onSubmit={(payload) => {
+          setPendingNextPlan(null);
+          return handleWriteNextWithPayload(payload);
+        }}
+        onCancel={() => { setPendingNextPlan(null); setWriteNextDialogOpen(false); }}
       />
     </div>
   );

@@ -115,6 +115,15 @@ const strings = {
   "book.statusCompleted": { zh: "已完成", en: "Completed" },
   "book.statusDropped": { zh: "已放弃", en: "Dropped" },
   "book.truthFiles": { zh: "真相文件", en: "Truth Files" },
+  "book.nextPlan": { zh: "下一章建议", en: "Next Chapter Suggestion" },
+  "book.generateNextPlan": { zh: "生成下一章建议", en: "Generate Suggestion" },
+  "book.nextPlanHint": { zh: '点击「生成下一章建议」获取 AI 规划。', en: 'Click "Generate Suggestion" to get an AI plan for the next chapter.' },
+  "book.planGoal": { zh: "章节目标", en: "Goal" },
+  "book.planConflicts": { zh: "核心冲突", en: "Conflicts" },
+  "book.applyNextPlan": { zh: "按此建议写下一章", en: "Write Next with This Plan" },
+  "book.nextPlanDialogTitle": { zh: "按建议写下一章", en: "Write Next with Plan" },
+  "book.nextPlanDialogBody": { zh: "以下 AI 建议将作为本次写作的引导：", en: "The following AI suggestion will guide this writing run:" },
+  "book.confirmWrite": { zh: "确认写作", en: "Confirm Write" },
 
   // Style
   "style.title": { zh: "文风分析", en: "Style Analyzer" },
