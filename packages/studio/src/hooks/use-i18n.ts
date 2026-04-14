@@ -254,7 +254,7 @@ const strings = {
   "entry.quickTitle": { zh: "快速开始", en: "Quick Start" },
   "entry.quickDesc": { zh: "用自然语言描述你的故事，AI 帮你整理成创作摘要", en: "Describe your story in natural language and let AI organize it into a creative brief" },
   "entry.proTitle": { zh: "专业模式", en: "Professional Mode" },
-  "entry.proDesc": { zh: "逐步填写详细创作蓝图，精细把控每个设定（即将推出）", en: "Fill in a detailed creation blueprint step by step (Coming soon)" },
+  "entry.proDesc": { zh: "逐步填写详细创作蓝图，精细把控每个设定", en: "Fill in a detailed creation blueprint step by step with fine-grained control" },
   "entry.quickBtn": { zh: "快速开始", en: "Quick Start" },
   "entry.proBtn": { zh: "敬请期待", en: "Coming Soon" },
 
@@ -282,6 +282,54 @@ const strings = {
   "simple.titleRequired": { zh: "请输入书名", en: "Book title is required" },
   "simple.inputRequired": { zh: "请输入创意描述", en: "Creative description is required" },
   "simple.backToEntry": { zh: "返回模式选择", en: "Back to Mode Selection" },
+
+  // BookCreatePro — page-level
+  "pro.pageTitle": { zh: "专业模式", en: "Professional Mode" },
+  "pro.back": { zh: "上一步", en: "Back" },
+  "pro.next": { zh: "下一步", en: "Next" },
+  "pro.finish": { zh: "完成", en: "Finish" },
+  "pro.briefTitle": { zh: "创作摘要", en: "Creative Brief" },
+  "pro.editAgain": { zh: "重新编辑", en: "Edit Again" },
+  "pro.done": { zh: "完成", en: "Done" },
+
+  // BookCreatePro — Step 1: Blueprint
+  "pro.step1.label": { zh: "创作蓝图", en: "Blueprint" },
+  "pro.step1.subtitle": { zh: "填写书名、核心题材与故事定位", en: "Fill in title, genres and story positioning" },
+  "pro.step1.titleLabel": { zh: "书名", en: "Title" },
+  "pro.step1.titlePlaceholder": { zh: "请输入书名...", en: "Enter book title..." },
+  "pro.step1.titleRequired": { zh: "请输入书名", en: "Title is required" },
+  "pro.step1.genresLabel": { zh: "核心题材", en: "Core Genres" },
+  "pro.step1.genresPlaceholder": { zh: "如：玄幻, 修仙（逗号分隔）", en: "e.g. Fantasy, Cultivation (comma-separated)" },
+  "pro.step1.positioningLabel": { zh: "故事定位", en: "Positioning" },
+  "pro.step1.positioningPlaceholder": { zh: "用一两句话描述故事的核心卖点与情感基调...", en: "Describe the core hook and emotional tone in one or two sentences..." },
+  "pro.step1.positioningRequired": { zh: "请填写故事定位", en: "Positioning is required" },
+  "pro.step1.audienceLabel": { zh: "目标读者", en: "Target Audience" },
+  "pro.step1.audiencePlaceholder": { zh: "如：18-35 岁男性读者", en: "e.g. Male readers aged 18-35" },
+  "pro.step1.platformLabel": { zh: "目标平台", en: "Target Platform" },
+  "pro.step1.platformPlaceholder": { zh: "如：起点中文网、Amazon Kindle", en: "e.g. Qidian, Amazon Kindle" },
+
+  // BookCreatePro — Step 2: World & Characters
+  "pro.step2.label": { zh: "世界与人物", en: "World & Characters" },
+  "pro.step2.subtitle": { zh: "描绘世界观架构与主要角色设定", en: "Describe world-building and main character setup" },
+  "pro.step2.worldLabel": { zh: "世界观", en: "World Setting" },
+  "pro.step2.worldPlaceholder": { zh: "描述故事发生的时代背景、地理环境、社会规则、特殊力量体系等...", en: "Describe the era, geography, social rules, power system, etc..." },
+  "pro.step2.worldRequired": { zh: "请填写世界观", en: "World setting is required" },
+  "pro.step2.protagonistLabel": { zh: "主角设定", en: "Protagonist" },
+  "pro.step2.protagonistPlaceholder": { zh: "主角的姓名、背景、性格、核心成长弧等...", en: "Protagonist's name, background, personality, character arc..." },
+  "pro.step2.protagonistRequired": { zh: "请填写主角设定", en: "Protagonist is required" },
+
+  // BookCreatePro — Step 3: Plot Commitment
+  "pro.step3.label": { zh: "剧情承诺", en: "Plot Commitment" },
+  "pro.step3.subtitle": { zh: "明确主冲突、结局方向与写作风格规则", en: "Define main conflict, ending direction and style rules" },
+  "pro.step3.conflictLabel": { zh: "主冲突", en: "Main Conflict" },
+  "pro.step3.conflictPlaceholder": { zh: "贯穿全书的核心矛盾与主线驱动力...", en: "The central tension and driving force throughout the book..." },
+  "pro.step3.conflictRequired": { zh: "请填写主冲突", en: "Main conflict is required" },
+  "pro.step3.endingLabel": { zh: "结局方向", en: "Ending Direction" },
+  "pro.step3.endingPlaceholder": { zh: "如：大团圆、开放式结局、悲剧（可选）", en: "e.g. Happy ending, open ending, tragedy (optional)" },
+  "pro.step3.styleLabel": { zh: "风格规则", en: "Style Rules" },
+  "pro.step3.stylePlaceholder": { zh: "如：节奏轻快, 少用环境描写（逗号分隔）", en: "e.g. Fast pacing, minimal scene-setting (comma-separated)" },
+  "pro.step3.forbiddenLabel": { zh: "禁止模式", en: "Forbidden Patterns" },
+  "pro.step3.forbiddenPlaceholder": { zh: "如：重复伏笔, 主角无敌（逗号分隔）", en: "e.g. Repeated foreshadowing, overpowered protagonist (comma-separated)" },
 
   // Common
   "common.save": { zh: "保存", en: "Save" },

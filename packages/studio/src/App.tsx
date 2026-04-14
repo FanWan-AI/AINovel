@@ -7,6 +7,7 @@ import { BookCreate } from "./pages/BookCreate";
 import { BookCreateEntry } from "./pages/BookCreateEntry";
 import { BookCreateSimple } from "./pages/BookCreateSimple";
 import { BookCreateReview } from "./pages/BookCreateReview";
+import { BookCreatePro } from "./pages/BookCreatePro";
 import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
 import { ConfigView } from "./pages/ConfigView";
@@ -33,6 +34,7 @@ export type Route =
   | { page: "book-create-entry" }
   | { page: "book-create-simple" }
   | { page: "book-create-review" }
+  | { page: "book-create-pro" }
   | { page: "chapter"; bookId: string; chapterNumber: number }
   | { page: "analytics"; bookId: string }
   | { page: "config" }
@@ -84,6 +86,7 @@ export function App() {
     toBookCreateEntry: () => setRoute({ page: "book-create-entry" }),
     toBookCreateSimple: () => setRoute({ page: "book-create-simple" }),
     toBookCreateReview: () => setRoute({ page: "book-create-review" }),
+    toBookCreatePro: () => setRoute({ page: "book-create-pro" }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
@@ -178,6 +181,7 @@ export function App() {
             {route.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
             {route.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} flow={createFlow} />}
             {route.page === "book-create-review" && <BookCreateReview nav={nav} theme={theme} t={t} flow={createFlow} />}
+            {route.page === "book-create-pro" && <BookCreatePro nav={nav} theme={theme} t={t} />}
             {route.page === "chapter" && <ChapterReader bookId={route.bookId} chapterNumber={route.chapterNumber} nav={nav} theme={theme} t={t} />}
             {route.page === "analytics" && <Analytics bookId={route.bookId} nav={nav} theme={theme} t={t} />}
             {route.page === "config" && <ConfigView nav={nav} theme={theme} t={t} />}
