@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { X, Zap } from "lucide-react";
+import { X, Zap, Lightbulb, AlertCircle } from "lucide-react";
 import type { TFunction } from "../../hooks/use-i18n";
+import { fetchNextPlan, ApiError } from "../../hooks/use-api";
+import type { NextPlanResult } from "../../hooks/use-api";
 
 export interface WriteNextFormState {
   readonly chapterGoal: string;
@@ -63,6 +65,20 @@ export function buildWriteNextPayload(form: WriteNextFormState): WriteNextPayloa
   return payload as WriteNextPayload;
 }
 
+export type PlanningTab = "ai" | "manual";
+
+/** Converts an AI-generated NextPlanResult into a WriteNextPayload for the write-next API. */
+export function buildPlanPayloadFromNextPlan(plan: NextPlanResult): WriteNextPayload {
+  const payload: {
+    chapterGoal?: string;
+    mustInclude?: string[];
+  } = {};
+  if (plan.goal.trim()) payload.chapterGoal = plan.goal.trim();
+  const conflicts = plan.conflicts.filter((c) => c.trim());
+  if (conflicts.length > 0) payload.mustInclude = conflicts;
+  return payload as WriteNextPayload;
+}
+
 interface WriteNextDialogProps {
   readonly open: boolean;
   readonly defaultWordCount?: number;
@@ -70,6 +86,7 @@ interface WriteNextDialogProps {
   readonly t: TFunction;
   readonly onSubmit: (payload: WriteNextPayload) => void;
   readonly onCancel: () => void;
+  readonly bookId: string;
 }
 
 export function WriteNextDialog({
@@ -79,17 +96,26 @@ export function WriteNextDialog({
   t,
   onSubmit,
   onCancel,
+  bookId,
 }: WriteNextDialogProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<PlanningTab>("ai");
+  const [aiPlan, setAiPlan] = useState<NextPlanResult | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [form, setForm] = useState<WriteNextFormState>({
     ...INITIAL_WRITE_NEXT_FORM,
     wordCount: defaultWordCount ? String(defaultWordCount) : "",
     ...initialForm,
   });
 
-  // Reset form whenever the dialog opens
+  // Reset form and AI state whenever the dialog opens
   useEffect(() => {
     if (open) {
+      setActiveTab("ai");
+      setAiPlan(null);
+      setAiError(null);
+      setAiLoading(false);
       setForm({
         ...INITIAL_WRITE_NEXT_FORM,
         wordCount: defaultWordCount ? String(defaultWordCount) : "",
@@ -117,6 +143,27 @@ export function WriteNextDialog({
     onSubmit(buildWriteNextPayload(form));
   };
 
+  const handleGeneratePlan = async () => {
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const result = await fetchNextPlan(bookId);
+      setAiPlan(result);
+    } catch (e) {
+      const msg = e instanceof ApiError
+        ? `${e.message} (${e.status})`
+        : (e instanceof Error ? e.message : t("writeNext.planError"));
+      setAiError(msg);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleApplyPlan = () => {
+    if (!aiPlan) return;
+    onSubmit(buildPlanPayloadFromNextPlan(aiPlan));
+  };
+
   return (
     <div
       ref={overlayRef}
@@ -130,7 +177,7 @@ export function WriteNextDialog({
             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
               <Zap size={20} className="text-primary" />
             </div>
-            <h3 className="text-lg font-semibold">{t("writeNext.dialogTitle")}</h3>
+            <h3 className="text-lg font-semibold">{t("book.planNextAndWrite")}</h3>
           </div>
           <button
             onClick={onCancel}
@@ -140,8 +187,99 @@ export function WriteNextDialog({
           </button>
         </div>
 
-        {/* Body */}
-        <form onSubmit={handleSubmit}>
+        {/* Tab switcher */}
+        <div className="flex gap-1 px-6 pt-2 pb-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab("ai")}
+            className={`px-4 py-1.5 text-xs font-bold rounded-t-lg border-b-2 transition-colors ${
+              activeTab === "ai"
+                ? "border-primary text-primary bg-primary/5"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {t("writeNext.tabAI")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("manual")}
+            className={`px-4 py-1.5 text-xs font-bold rounded-t-lg border-b-2 transition-colors ${
+              activeTab === "manual"
+                ? "border-primary text-primary bg-primary/5"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {t("writeNext.tabManual")}
+          </button>
+        </div>
+        <div className="border-t border-border/40 mx-6" />
+
+        {/* AI Suggestions tab */}
+        {activeTab === "ai" && (
+          <div className="px-6 py-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-muted-foreground">{t("writeNext.planHint")}</p>
+              <button
+                type="button"
+                onClick={handleGeneratePlan}
+                disabled={aiLoading}
+                className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50 shrink-0"
+              >
+                {aiLoading
+                  ? <div className="w-3 h-3 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" />
+                  : <Lightbulb size={12} />}
+                {t("writeNext.generatePlan")}
+              </button>
+            </div>
+            {aiError && (
+              <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/5 rounded-xl px-4 py-3 border border-destructive/20">
+                <AlertCircle size={14} className="shrink-0" />
+                {aiError}
+              </div>
+            )}
+            {aiPlan && !aiError && (
+              <div className="space-y-3 rounded-xl border border-border/40 bg-secondary/20 p-4">
+                <div className="text-xs font-mono text-muted-foreground">Ch.{aiPlan.chapterNumber}</div>
+                <div className="space-y-1">
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">{t("book.planGoal")}</div>
+                  <p className="text-sm leading-relaxed">{aiPlan.goal}</p>
+                </div>
+                {aiPlan.conflicts.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">{t("book.planConflicts")}</div>
+                    <ul className="text-sm leading-relaxed list-disc pl-5 space-y-1">
+                      {aiPlan.conflicts.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={onCancel}
+                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-secondary text-foreground hover:bg-secondary/80 transition-all border border-border/50"
+              >
+                {t("writeNext.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyPlan}
+                disabled={!aiPlan || aiLoading}
+                className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-primary text-primary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 disabled:opacity-50"
+              >
+                <Zap size={14} />
+                {t("writeNext.applyPlan")}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Manual Plan tab */}
+        {activeTab === "manual" && (
+          <form onSubmit={handleSubmit}>
           <div className="px-6 py-4 space-y-4">
             {/* Chapter Goal */}
             <div className="space-y-1.5">
@@ -234,6 +372,7 @@ export function WriteNextDialog({
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   );

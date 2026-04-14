@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { translateChapterStatus } from "./BookDetail";
-import { strings } from "../hooks/use-i18n";
+import { translateChapterStatus, getTopActionIds } from "./BookDetail";
 import type { TFunction } from "../hooks/use-i18n";
 
 // Minimal stub that echoes the translation key so tests stay readable without
@@ -67,38 +66,28 @@ describe("translateChapterStatus", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BookDetail copy assertions — verifies the i18n keys used in BookDetail.tsx
-// render the correct copy per the feat(copy) onboarding upgrade spec.
+// Dual-button rendering — verifies only 2 top actions are exposed
 // ---------------------------------------------------------------------------
 
-describe("BookDetail — feat(copy) button label assertions", () => {
-  it("primary write button label is '规划下章并写作' in Chinese", () => {
-    // BookDetail renders: t("book.writeNext") for the primary write button
-    expect(strings["book.writeNext"].zh).toBe("规划下章并写作");
+describe("getTopActionIds — dual-button contract", () => {
+  it("returns exactly two action IDs", () => {
+    const actions = getTopActionIds();
+    expect(actions).toHaveLength(2);
   });
 
-  it("quick-write button label is '快速写' in Chinese", () => {
-    // BookDetail renders: t("writeNext.quickWrite") for the secondary quick-write button
-    expect(strings["writeNext.quickWrite"].zh).toBe("快速写");
+  it("exposes planNextAndWrite as the first action", () => {
+    const [first] = getTopActionIds();
+    expect(first).toBe("planNextAndWrite");
   });
 
-  it("empty-chapter hint references the updated button name", () => {
-    // book.noChapters is shown when there are no chapters yet
-    expect(strings["book.noChapters"].zh).toContain("规划下章并写作");
+  it("exposes quickWrite as the second action", () => {
+    const [, second] = getTopActionIds();
+    expect(second).toBe("quickWrite");
   });
 
-  it("NextPlanPanel section header is 'AI 生成建议' in Chinese", () => {
-    // NextPlanPanel renders: t("book.nextPlan") as the section header
-    expect(strings["book.nextPlan"].zh).toBe("AI 生成建议");
-  });
-
-  it("WriteNextDialog title is '手动规划' in Chinese", () => {
-    // WriteNextDialog renders: t("writeNext.dialogTitle") as its header title
-    expect(strings["writeNext.dialogTitle"].zh).toBe("手动规划");
-  });
-
-  it("book.manualPlanLabel provides the '手动规划' label key", () => {
-    expect(strings["book.manualPlanLabel"].zh).toBe("手动规划");
+  it("does not expose the old draftOnly or writeNext action IDs", () => {
+    const actions = getTopActionIds() as ReadonlyArray<string>;
+    expect(actions).not.toContain("draftOnly");
+    expect(actions).not.toContain("writeNext");
   });
 });
-
