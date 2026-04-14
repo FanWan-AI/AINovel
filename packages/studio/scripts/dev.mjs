@@ -11,20 +11,34 @@ const viteBin = join(studioRoot, "node_modules", ".bin", "vite");
 const apiPort = "4569";
 const webPort = "4567";
 
-const configuredProjectRoot = process.env.INKOS_PROJECT_ROOT
-  ? resolve(process.env.INKOS_PROJECT_ROOT)
-  : process.cwd();
-const projectRoot = existsSync(join(configuredProjectRoot, "inkos.json"))
-  ? configuredProjectRoot
-  : repoRoot;
-
-if (!existsSync(join(projectRoot, "inkos.json"))) {
-  console.error(`[studio:dev] inkos.json not found in ${projectRoot}`);
-  console.error(
-    "[studio:dev] Set INKOS_PROJECT_ROOT to your InkOS project path, e.g.\n" +
-    "INKOS_PROJECT_ROOT=/path/to/your-book pnpm --filter @actalk/inkos-studio dev",
-  );
-  process.exit(1);
+// Resolve project root: explicit env var takes priority with no silent fallback.
+// Without it, check cwd first, then fall back to repo root (useful for contributors).
+let projectRoot;
+if (process.env.INKOS_PROJECT_ROOT) {
+  projectRoot = resolve(process.env.INKOS_PROJECT_ROOT);
+  if (!existsSync(join(projectRoot, "inkos.json"))) {
+    console.error(`[studio:dev] inkos.json not found in INKOS_PROJECT_ROOT=${projectRoot}`);
+    console.error(
+      "[studio:dev] Make sure the path contains a valid InkOS project (with inkos.json).\n" +
+      "  Run: inkos init <name>    # to create a new project\n" +
+      "  Or:  cd /path/to/project && inkos init",
+    );
+    process.exit(1);
+  }
+} else {
+  const cwd = process.cwd();
+  if (existsSync(join(cwd, "inkos.json"))) {
+    projectRoot = cwd;
+  } else if (existsSync(join(repoRoot, "inkos.json"))) {
+    projectRoot = repoRoot;
+  } else {
+    console.error(`[studio:dev] inkos.json not found in ${cwd}`);
+    console.error(
+      "[studio:dev] Set INKOS_PROJECT_ROOT to your InkOS project path, e.g.\n" +
+      "  INKOS_PROJECT_ROOT=/path/to/your-book pnpm --filter @actalk/inkos-studio dev",
+    );
+    process.exit(1);
+  }
 }
 
 function launch(command, args, env = process.env) {

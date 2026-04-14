@@ -399,6 +399,38 @@ pnpm test         # 运行测试
 pnpm typecheck    # 类型检查
 ```
 
+### Studio 本地开发启动
+
+最短启动步骤（前端 + API 一条命令同时启动）：
+
+```bash
+# 1. 安装依赖（首次）
+pnpm install
+
+# 2. 指定 InkOS 项目目录并启动 Studio（前端 :4567，API :4569）
+INKOS_PROJECT_ROOT=/path/to/your-book pnpm --filter @actalk/inkos-studio dev
+```
+
+启动后访问 **http://localhost:4567**。
+
+> **`INKOS_PROJECT_ROOT`**：指向包含 `inkos.json` 的 InkOS 项目根目录。
+> 未设置时，脚本依次尝试当前目录和仓库根目录；两者都没有 `inkos.json` 时报错退出。
+
+#### 常见故障排查
+
+| 现象 | 原因 | 解决方法 |
+|------|------|---------|
+| `/api/*` 返回 `ECONNREFUSED` | 只启动了前端（`vite`），API 进程未运行 | 用 `pnpm --filter @actalk/inkos-studio dev` 同时启动前后端，**不要**单独运行 `dev:client` |
+| `inkos.json not found` | `INKOS_PROJECT_ROOT` 指向的目录没有 `inkos.json` | 确认路径正确；新项目先运行 `inkos init <name>` |
+| 端口 4567/4569 已占用 | 已有进程监听该端口 | `lsof -ti:4567 | xargs kill -9` 或更换端口 |
+| `tsx: command not found` | 依赖未安装或 `node_modules` 损坏 | `pnpm install --force` 后重试 |
+
+类型检查：
+
+```bash
+pnpm --filter @actalk/inkos-studio typecheck
+```
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">
