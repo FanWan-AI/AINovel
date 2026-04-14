@@ -479,6 +479,36 @@ INKOS_PROJECT_ROOT=/path/to/your-book pnpm --filter @actalk/inkos-studio dev
 pnpm --filter @actalk/inkos-studio typecheck
 ```
 
+### "规划下章并写作"本地验收
+
+运行以下命令验证"规划下章并写作"功能的全部测试路径：
+
+```bash
+# 1. 类型检查（零错误）
+pnpm --filter @actalk/inkos-studio typecheck
+
+# 2. 全量 Studio 测试（全部通过）
+pnpm --filter @actalk/inkos-studio test
+
+# 3. 只跑"规划下章并写作"相关测试（快速验收）
+pnpm --filter @actalk/inkos-studio test -- \
+  --reporter=verbose \
+  book-detail-next-plan \
+  book-detail-write-next \
+  server
+```
+
+覆盖的四条验收路径：
+
+| 路径 | 测试文件 | describe |
+|------|----------|---------|
+| AI 生成建议成功 | `book-detail-next-plan.test.ts` | `E2E acceptance: AI suggestion success path` |
+| AI 建议低质量失败 | `book-detail-next-plan.test.ts` | `E2E acceptance: AI suggestion low-confidence failure path` |
+| 手动规划提交写作 | `book-detail-next-plan.test.ts` | `E2E acceptance: manual plan → write path` |
+| 快速写 | `book-detail-next-plan.test.ts` | `E2E acceptance: quick write path` |
+
+完整验收标准与 curl 步骤参见 [`DevDocs/08-测试策略与验收标准.md` § 11](DevDocs/08-测试策略与验收标准.md)。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">
