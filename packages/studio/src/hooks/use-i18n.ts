@@ -284,6 +284,12 @@ const strings = {
   "simple.titleRequired": { zh: "请输入书名", en: "Book title is required" },
   "simple.inputRequired": { zh: "请输入创意描述", en: "Creative description is required" },
   "simple.backToEntry": { zh: "返回模式选择", en: "Back to Mode Selection" },
+  "simple.positioningLabel": { zh: "一句话定位（可选）", en: "Tagline (optional)" },
+  "simple.positioningPlaceholder": { zh: "例：都市女强人逆袭爽文", en: "e.g. Strong female lead urban revenge story" },
+  "simple.targetReadersLabel": { zh: "目标读者（可选）", en: "Target Readers (optional)" },
+  "simple.targetReadersPlaceholder": { zh: "例：18-30 岁女性读者", en: "e.g. Female readers aged 18–30" },
+  "simple.stylePreferenceLabel": { zh: "风格偏好（可选）", en: "Style Preference (optional)" },
+  "simple.stylePreferencePlaceholder": { zh: "例：轻松幽默，节奏快", en: "e.g. Light-hearted, fast-paced" },
 
   // BookCreatePro — page-level
   "pro.pageTitle": { zh: "专业模式", en: "Professional Mode" },
