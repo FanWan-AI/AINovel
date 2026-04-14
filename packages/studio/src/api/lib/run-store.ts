@@ -175,3 +175,83 @@ export class RunStore {
 export function isTerminalRunStatus(status: RunStatus): boolean {
   return status === "succeeded" || status === "failed";
 }
+
+// ---------------------------------------------------------------------------
+// BookCreateRunStore — tracks the lifecycle of /api/v2/books/create/confirm
+// ---------------------------------------------------------------------------
+
+/** Four-phase lifecycle for a book-creation run. */
+export type BookCreateRunStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface BookCreateRun {
+  readonly bookId: string;
+  readonly status: BookCreateRunStatus;
+  readonly error?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * Per-process in-memory store for book-creation runs triggered via the v2
+ * confirm endpoint.  Each bookId maps to at most one run entry; entries for
+ * terminal states (succeeded / failed) can be cleared to allow retries.
+ */
+export class BookCreateRunStore {
+  private readonly runs = new Map<string, BookCreateRun>();
+
+  /** Begin tracking a new creation attempt; sets status to "queued". */
+  enqueue(bookId: string): BookCreateRun {
+    const now = new Date().toISOString();
+    const run: BookCreateRun = { bookId, status: "queued", createdAt: now, updatedAt: now };
+    this.runs.set(bookId, run);
+    return run;
+  }
+
+  /** Transition from "queued" to "running". */
+  markRunning(bookId: string): BookCreateRun {
+    return this.patch(bookId, { status: "running" });
+  }
+
+  /** Transition to "succeeded" after initBook resolves. */
+  succeed(bookId: string): BookCreateRun {
+    return this.patch(bookId, { status: "succeeded" });
+  }
+
+  /** Transition to "failed" after initBook rejects. */
+  fail(bookId: string, error: string): BookCreateRun {
+    return this.patch(bookId, { status: "failed", error });
+  }
+
+  /** Return the current run for a bookId, or null if none exists. */
+  get(bookId: string): BookCreateRun | null {
+    return this.runs.get(bookId) ?? null;
+  }
+
+  /**
+   * Return true when a run for the given bookId is queued or running.
+   * Used for idempotency: a second confirm request while active should not
+   * launch a new pipeline.
+   */
+  isActive(bookId: string): boolean {
+    const run = this.runs.get(bookId);
+    return run?.status === "queued" || run?.status === "running";
+  }
+
+  /**
+   * Remove a failed run so the next confirm request can start a fresh attempt.
+   * No-op if the run does not exist or is not in "failed" state.
+   */
+  clearIfFailed(bookId: string): void {
+    if (this.runs.get(bookId)?.status === "failed") {
+      this.runs.delete(bookId);
+    }
+  }
+
+  private patch(bookId: string, fields: Partial<BookCreateRun>): BookCreateRun {
+    const current = this.runs.get(bookId);
+    if (!current) throw new Error(`BookCreateRunStore: no run found for book "${bookId}"`);
+    const next: BookCreateRun = { ...current, ...fields, updatedAt: new Date().toISOString() };
+    this.runs.set(bookId, next);
+    return next;
+  }
+}
