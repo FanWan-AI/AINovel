@@ -6,6 +6,8 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { NextPlanPanel, buildApplyBrief } from "../components/write-next/NextPlanPanel";
+import type { NextPlanResult } from "../components/write-next/NextPlanPanel";
 import {
   ChevronLeft,
   Zap,
@@ -116,6 +118,7 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const [pendingNextPlan, setPendingNextPlan] = useState<NextPlanResult | null>(null);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -165,6 +168,17 @@ export function BookDetail({
     setWriteRequestPending(true);
     try {
       await postApi(`/books/${bookId}/write-next`);
+    } catch (e) {
+      setWriteRequestPending(false);
+      alert(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleWriteNextWithPlan = async (plan: NextPlanResult) => {
+    setPendingNextPlan(null);
+    setWriteRequestPending(true);
+    try {
+      await postApi(`/books/${bookId}/write-next`, { brief: buildApplyBrief(plan) });
     } catch (e) {
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
@@ -545,6 +559,13 @@ export function BookDetail({
         </div>
       </div>
 
+      {/* Next Chapter Suggestion Panel */}
+      <NextPlanPanel
+        bookId={bookId}
+        onApply={(plan) => setPendingNextPlan(plan)}
+        t={t}
+      />
+
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
         <div className="overflow-x-auto">
@@ -678,6 +699,57 @@ export function BookDetail({
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
       />
+
+      {/* Write-Next with Plan Dialog */}
+      {pendingNextPlan && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm fade-in"
+          onClick={(e) => { if (e.currentTarget === e.target) setPendingNextPlan(null); }}
+        >
+          <div className="bg-card border border-border rounded-2xl shadow-2xl shadow-primary/10 w-full max-w-md mx-4 overflow-hidden">
+            <div className="flex items-center justify-between px-6 pt-6 pb-2">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <Zap size={18} className="text-primary" />
+                {t("book.nextPlanDialogTitle")}
+              </h3>
+              <button
+                onClick={() => setPendingNextPlan(null)}
+                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              <p className="text-sm text-muted-foreground">{t("book.nextPlanDialogBody")}</p>
+              <div className="rounded-xl bg-secondary/40 border border-border/50 p-4 space-y-3">
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mb-1">{t("book.planGoal")}</div>
+                  <p className="text-sm leading-relaxed">{pendingNextPlan.goal}</p>
+                </div>
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mb-1">{t("book.planConflicts")}</div>
+                  <p className="text-sm leading-relaxed">{pendingNextPlan.conflicts}</p>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 px-6 pb-6">
+              <button
+                onClick={() => setPendingNextPlan(null)}
+                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-secondary text-foreground hover:bg-secondary/80 transition-all border border-border/50"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={() => void handleWriteNextWithPlan(pendingNextPlan)}
+                className="flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
+              >
+                <Zap size={14} />
+                {t("book.confirmWrite")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

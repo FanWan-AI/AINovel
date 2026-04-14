@@ -219,6 +219,19 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
   return result;
 }
 
+export interface NextPlanResult {
+  readonly chapterNumber: number;
+  readonly goal: string;
+  readonly conflicts: string;
+}
+
+export async function fetchNextPlan(
+  bookId: string,
+  deps?: { readonly fetchImpl?: typeof fetch },
+): Promise<NextPlanResult> {
+  return fetchJson<NextPlanResult>(`/books/${bookId}/next-plan`, {}, deps);
+}
+
 export async function normalizeBrief(payload: {
   readonly mode: "simple" | "pro";
   readonly title: string;
