@@ -24,6 +24,11 @@ import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
+import {
+  loadSteeringPrefs,
+  saveSteeringPrefs,
+  validateSteeringPrefsInput,
+} from "./services/chapter-steering-service.js";
 
 // --- Event bus for SSE ---
 
@@ -698,6 +703,35 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json(result);
     } catch (e) {
       broadcast("revise:error", { bookId: id, error: String(e) });
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  // --- Steering Preferences ---
+
+  app.get("/api/books/:id/steering-prefs", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    try {
+      const prefs = await loadSteeringPrefs(bookDir);
+      return c.json({ prefs });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.put("/api/books/:id/steering-prefs", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const raw = await c.req.json().catch(() => null);
+    const result = validateSteeringPrefsInput(raw);
+    if (!result.ok) {
+      return c.json({ errors: result.errors }, 400);
+    }
+    try {
+      const prefs = await saveSteeringPrefs(bookDir, result.value);
+      return c.json({ ok: true, prefs });
+    } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
   });
