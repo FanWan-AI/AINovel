@@ -269,6 +269,8 @@ const strings = {
   "review.continue": { zh: "继续创建", en: "Continue Creating" },
   "review.titleRequired": { zh: "书名不能为空", en: "Title is required" },
   "review.noBrief": { zh: "暂无摘要，请先返回完成快速模式", en: "No brief found. Please go back and complete Quick Mode first." },
+  "review.confirming": { zh: "创建中...", en: "Creating..." },
+  "review.confirmError": { zh: "创建失败，请重试", en: "Failed to create book, please try again" },
 
   // BookCreateSimple
   "simple.title": { zh: "快速模式", en: "Quick Mode" },

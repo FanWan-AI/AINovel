@@ -24,6 +24,10 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return ["/api/books"];
   }
 
+  if (normalized === "/api/v2/books/create/confirm") {
+    return ["/api/books"];
+  }
+
   if (normalized === "/api/project") {
     return ["/api/project"];
   }

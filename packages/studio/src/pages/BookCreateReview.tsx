@@ -1,16 +1,19 @@
 import { useState } from "react";
+import { postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import type { CreativeBrief } from "../shared/contracts";
+import type { CreativeBrief, ConfirmCreateResponse } from "../shared/contracts";
 import { useColors } from "../hooks/use-colors";
 
 interface Nav {
   toDashboard: () => void;
   toBookCreateEntry: () => void;
   toBookCreateSimple: () => void;
+  toBook: (bookId: string) => void;
 }
 
 interface CreateFlowProps {
+  briefId: string | null;
   brief: CreativeBrief | null;
   updateBrief: (updates: Partial<CreativeBrief>) => void;
 }
@@ -40,6 +43,31 @@ export function validateReviewDraft(draft: ReviewDraft): "review.titleRequired" 
   return null;
 }
 
+export interface ConfirmPayload {
+  readonly mode: "simple";
+  readonly briefId: string | null;
+  readonly brief: CreativeBrief;
+  readonly draft: ReviewDraft;
+}
+
+export async function callConfirmCreate(
+  payload: ConfirmPayload,
+  deps?: { readonly postApiImpl?: typeof postApi },
+): Promise<ConfirmCreateResponse> {
+  const post = deps?.postApiImpl ?? postApi;
+  const genre = payload.brief.coreGenres[0] ?? "fiction";
+  const mergedBrief: CreativeBrief = { ...payload.brief, ...payload.draft };
+  return post<ConfirmCreateResponse>("/v2/books/create/confirm", {
+    mode: payload.mode,
+    briefId: payload.briefId ?? undefined,
+    brief: mergedBrief,
+    bookConfig: {
+      title: payload.draft.title.trim(),
+      genre,
+    },
+  });
+}
+
 export function BookCreateReview({
   nav,
   theme,
@@ -52,12 +80,13 @@ export function BookCreateReview({
   flow: CreateFlowProps;
 }) {
   const c = useColors(theme);
-  const { brief, updateBrief } = flow;
+  const { briefId, brief, updateBrief } = flow;
 
   const [draft, setDraft] = useState<ReviewDraft | null>(
     brief ? buildReviewDraft(brief) : null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   if (!brief || !draft) {
     return (
@@ -92,13 +121,24 @@ export function BookCreateReview({
     nav.toBookCreateSimple();
   };
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     const validationError = validateReviewDraft(draft);
     if (validationError) {
       setError(t(validationError));
       return;
     }
-    // TODO: navigate to confirm/create page (next task)
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const response = await callConfirmCreate({ mode: "simple", briefId, brief, draft });
+      nav.toBook(response.bookId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -182,15 +222,17 @@ export function BookCreateReview({
       <div className="flex gap-3">
         <button
           onClick={handleBack}
-          className={`flex-1 px-4 py-3 ${c.btnSecondary} rounded-md font-medium text-base`}
+          disabled={submitting}
+          className={`flex-1 px-4 py-3 ${c.btnSecondary} rounded-md font-medium text-base disabled:opacity-50`}
         >
           {t("review.backToEdit")}
         </button>
         <button
           onClick={handleContinue}
-          className={`flex-1 px-4 py-3 ${c.btnPrimary} rounded-md font-medium text-base`}
+          disabled={submitting}
+          className={`flex-1 px-4 py-3 ${c.btnPrimary} rounded-md font-medium text-base disabled:opacity-50`}
         >
-          {t("review.continue")}
+          {submitting ? t("review.confirming") : t("review.continue")}
         </button>
       </div>
     </div>

@@ -172,3 +172,8 @@ export interface NormalizeBriefResponse {
   readonly briefId: string;
   readonly normalizedBrief: CreativeBrief;
 }
+
+export interface ConfirmCreateResponse {
+  readonly status: "creating";
+  readonly bookId: string;
+}
