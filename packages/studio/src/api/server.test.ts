@@ -249,6 +249,46 @@ describe("createStudioServer daemon lifecycle", () => {
     resolveStart?.();
   });
 
+  it("runtime center status/events reflect daemon lifecycle and support history query", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const statusBefore = await app.request("http://localhost/api/runtime/status");
+    expect(statusBefore.status).toBe(200);
+    await expect(statusBefore.json()).resolves.toMatchObject({
+      daemonRunning: false,
+      eventCount: 0,
+      recentErrorCount: 0,
+    });
+
+    const startResponse = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(startResponse.status).toBe(200);
+
+    const stopResponse = await app.request("http://localhost/api/daemon/stop", { method: "POST" });
+    expect(stopResponse.status).toBe(200);
+
+    const statusAfter = await app.request("http://localhost/api/runtime/status");
+    expect(statusAfter.status).toBe(200);
+    await expect(statusAfter.json()).resolves.toMatchObject({
+      daemonRunning: false,
+      eventCount: 2,
+    });
+
+    const lifecycle = await app.request("http://localhost/api/runtime/events?source=daemon&limit=10");
+    expect(lifecycle.status).toBe(200);
+    const lifecycleData = await lifecycle.json() as {
+      entries: Array<{ event: string }>;
+      total: number;
+    };
+    expect(lifecycleData.entries.map((entry) => entry.event)).toEqual(["daemon:started", "daemon:stopped"]);
+    expect(lifecycleData.total).toBe(2);
+
+    // Simulate page refresh: historical events remain queryable via runtime API.
+    const replay = await app.request("http://localhost/api/runtime/events?source=daemon&limit=10");
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({ total: 2 });
+  });
+
   it("rejects book routes with path traversal ids", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

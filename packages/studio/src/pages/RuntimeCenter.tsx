@@ -34,7 +34,9 @@ export function deriveEventLevel(msg: SSEMessage): string {
     return data.level.toLowerCase();
   }
   if (msg.event.endsWith(":error")) return "error";
+  if (msg.event.endsWith(":fail")) return "error";
   if (msg.event.endsWith(":complete")) return "info";
+  if (msg.event.endsWith(":success")) return "info";
   if (msg.event.endsWith(":start")) return "info";
   return "debug";
 }

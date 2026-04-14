@@ -31,9 +31,15 @@ describe("deriveEventLevel", () => {
     expect(deriveEventLevel(makeMsg("daemon:error"))).toBe("error");
   });
 
+  it("infers error from semantic fail events", () => {
+    expect(deriveEventLevel(makeMsg("rewrite:fail"))).toBe("error");
+    expect(deriveEventLevel(makeMsg("revise:fail"))).toBe("error");
+  });
+
   it("infers info from events ending in :complete or :start", () => {
     expect(deriveEventLevel(makeMsg("write:complete"))).toBe("info");
     expect(deriveEventLevel(makeMsg("draft:start"))).toBe("info");
+    expect(deriveEventLevel(makeMsg("write-next:success"))).toBe("info");
   });
 
   it("falls back to debug for unrecognised events", () => {
