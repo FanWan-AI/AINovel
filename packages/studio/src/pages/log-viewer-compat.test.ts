@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { logViewerCompatMessageKey } from "./LogViewer";
+import { LOG_VIEWER_COMPAT_MESSAGE_KEY } from "./LogViewer";
 
-describe("logViewerCompatMessageKey", () => {
+describe("LOG_VIEWER_COMPAT_MESSAGE_KEY", () => {
   it("renders logs migration copy key", () => {
-    expect(logViewerCompatMessageKey()).toBe("compat.logsMoved");
+    expect(LOG_VIEWER_COMPAT_MESSAGE_KEY).toBe("compat.logsMoved");
   });
 });

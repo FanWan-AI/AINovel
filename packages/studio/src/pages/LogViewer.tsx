@@ -23,9 +23,7 @@ const LEVEL_COLORS: Record<string, string> = {
   debug: "text-muted-foreground/50",
 };
 
-export function logViewerCompatMessageKey(): "compat.logsMoved" {
-  return "compat.logsMoved";
-}
+export const LOG_VIEWER_COMPAT_MESSAGE_KEY = "compat.logsMoved" as const;
 
 export function LogViewer({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
@@ -57,7 +55,7 @@ export function LogViewer({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunct
       </div>
 
       <div className={`rounded-lg border ${c.cardStatic} px-4 py-3`}>
-        <p className="text-sm text-foreground">{t(logViewerCompatMessageKey())}</p>
+        <p className="text-sm text-foreground">{t(LOG_VIEWER_COMPAT_MESSAGE_KEY)}</p>
         <div className="mt-2 flex items-center gap-3">
           <button
             onClick={nav.toRuntimeCenter}

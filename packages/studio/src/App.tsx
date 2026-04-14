@@ -51,8 +51,13 @@ export type Route =
 
 export type LegacyRuntimePage = "daemon" | "logs";
 
-export function routeToRuntimeCenterFromLegacy(_page: LegacyRuntimePage): Route {
-  return { page: "runtime-center" };
+const LEGACY_RUNTIME_ROUTE_TARGET: Record<LegacyRuntimePage, Route["page"]> = {
+  daemon: "runtime-center",
+  logs: "runtime-center",
+};
+
+export function routeToRuntimeCenterFromLegacy(page: LegacyRuntimePage): Route {
+  return { page: LEGACY_RUNTIME_ROUTE_TARGET[page] };
 }
 
 export function deriveActiveBookId(route: Route): string | undefined {

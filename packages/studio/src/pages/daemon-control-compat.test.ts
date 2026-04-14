@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { daemonControlCompatMessageKey } from "./DaemonControl";
+import { DAEMON_COMPAT_MESSAGE_KEY } from "./DaemonControl";
 
-describe("daemonControlCompatMessageKey", () => {
+describe("DAEMON_COMPAT_MESSAGE_KEY", () => {
   it("renders daemon migration copy key", () => {
-    expect(daemonControlCompatMessageKey()).toBe("compat.daemonMoved");
+    expect(DAEMON_COMPAT_MESSAGE_KEY).toBe("compat.daemonMoved");
   });
 });

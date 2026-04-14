@@ -11,9 +11,7 @@ interface Nav {
   toRuntimeCenter: () => void;
 }
 
-export function daemonControlCompatMessageKey(): "compat.daemonMoved" {
-  return "compat.daemonMoved";
-}
+export const DAEMON_COMPAT_MESSAGE_KEY = "compat.daemonMoved" as const;
 
 export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: { messages: ReadonlyArray<SSEMessage> } }) {
   const c = useColors(theme);
@@ -98,7 +96,7 @@ export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; 
       </div>
 
       <div className={`rounded-lg border ${c.cardStatic} px-4 py-3`}>
-        <p className="text-sm text-foreground">{t(daemonControlCompatMessageKey())}</p>
+        <p className="text-sm text-foreground">{t(DAEMON_COMPAT_MESSAGE_KEY)}</p>
         <div className="mt-2 flex items-center gap-3">
           <button
             onClick={nav.toRuntimeCenter}
