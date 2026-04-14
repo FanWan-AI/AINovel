@@ -248,8 +248,8 @@ export function WriteNextDialog({
                   <div className="space-y-1">
                     <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">{t("book.planConflicts")}</div>
                     <ul className="text-sm leading-relaxed list-disc pl-5 space-y-1">
-                      {aiPlan.conflicts.map((item, index) => (
-                        <li key={`${item}-${index}`}>{item}</li>
+                      {aiPlan.conflicts.map((item) => (
+                        <li key={item}>{item}</li>
                       ))}
                     </ul>
                   </div>
