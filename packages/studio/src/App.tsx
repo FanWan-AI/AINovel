@@ -51,13 +51,9 @@ export type Route =
 
 export type LegacyRuntimePage = "daemon" | "logs";
 
-const LEGACY_RUNTIME_ROUTE_TARGET: Record<LegacyRuntimePage, Route["page"]> = {
-  daemon: "runtime-center",
-  logs: "runtime-center",
-};
-
 export function routeToRuntimeCenterFromLegacy(page: LegacyRuntimePage): Route {
-  return { page: LEGACY_RUNTIME_ROUTE_TARGET[page] };
+  void page;
+  return { page: "runtime-center" };
 }
 
 export function deriveActiveBookId(route: Route): string | undefined {
@@ -120,6 +116,10 @@ export function App() {
     activeBookId
       ? `book:${activeBookId}`
       : route.page;
+  const contentContainerClass =
+    route.page === "truth"
+      ? "max-w-[1400px] mx-auto px-4 py-8 md:px-6 lg:px-8 lg:py-10 fade-in"
+      : "max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in";
 
   if (!ready) {
     return (
@@ -152,7 +152,7 @@ export function App() {
         <header className="h-14 shrink-0 flex items-center justify-between px-8 border-b border-border/40">
           <div className="flex items-center gap-2">
              <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-bold">
-               InkOS Studio
+               NovaScribe Studio
              </span>
           </div>
 
@@ -188,7 +188,7 @@ export function App() {
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto scroll-smooth">
-          <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
+          <div className={contentContainerClass}>
             {route.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
             {route.page === "book" && <BookDetail bookId={route.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
             {route.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}

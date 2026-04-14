@@ -306,6 +306,30 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("allows opening dynamic truth markdown files under story/", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const bookId = "truth-dynamic";
+    const storyDir = join(root, "books", bookId, "story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(join(storyDir, "author_intent.md"), "# intent\nline", "utf-8");
+
+    const response = await app.request(`http://localhost/api/books/${bookId}/truth/author_intent.md`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      file: "author_intent.md",
+      content: "# intent\nline",
+    });
+  });
+
+  it("rejects unsafe truth file names", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo/truth/author%20intent.md");
+    expect(response.status).toBe(400);
+  });
+
   it("reflects project edits immediately without restarting the studio server", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

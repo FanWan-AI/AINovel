@@ -15,7 +15,7 @@ import {
   type LogEntry,
 } from "@actalk/inkos-core";
 import { access, readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
@@ -481,18 +481,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   // --- Truth files ---
 
-  const TRUTH_FILES = [
-    "story_bible.md", "volume_outline.md", "current_state.md",
-    "particle_ledger.md", "pending_hooks.md", "chapter_summaries.md",
-    "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
-    "style_guide.md", "parent_canon.md", "fanfic_canon.md", "book_rules.md",
-  ];
+  const STORY_FILE_PATTERN = /^[A-Za-z0-9._-]+$/;
+  const isSafeStoryFileName = (file: string): boolean => {
+    if (!file || !STORY_FILE_PATTERN.test(file)) return false;
+    if (file !== basename(file)) return false;
+    return file.endsWith(".md") || file.endsWith(".json");
+  };
 
   app.get("/api/books/:id/truth/:file", async (c) => {
     const id = c.req.param("id");
     const file = c.req.param("file");
 
-    if (!TRUTH_FILES.includes(file)) {
+    if (!isSafeStoryFileName(file)) {
       return c.json({ error: "Invalid truth file" }, 400);
     }
 
@@ -1348,7 +1348,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.put("/api/books/:id/truth/:file", async (c) => {
     const id = c.req.param("id");
     const file = c.req.param("file");
-    if (!TRUTH_FILES.includes(file)) {
+    if (!isSafeStoryFileName(file)) {
       return c.json({ error: "Invalid truth file" }, 400);
     }
     const { content } = await c.req.json<{ content: string }>();
@@ -1894,6 +1894,6 @@ export async function startStudioServer(
     }
   }
 
-  console.log(`InkOS Studio running on http://localhost:${port}`);
+  console.log(`NovaScribe Studio running on http://localhost:${port}`);
   serve({ fetch: app.fetch, port });
 }
