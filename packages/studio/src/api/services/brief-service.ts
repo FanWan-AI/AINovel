@@ -4,6 +4,7 @@
  */
 
 import type { NormalizeBriefInput } from "../schemas/brief-schema.js";
+import { normalizeBriefText } from "../schemas/brief-schema.js";
 import type { CreativeBrief, NormalizeBriefResponse } from "../../shared/contracts.js";
 
 /** Generates a stable, unique briefId based on current time + title. */
@@ -29,8 +30,12 @@ function generateBriefId(title: string): string {
 export function normalizeBrief(input: NormalizeBriefInput): NormalizeBriefResponse {
   const briefId = generateBriefId(input.title);
 
+  // rawInput has already been normalized by validateNormalizeBriefInput.
+  // Apply normalizeBriefText to the title as well to ensure consistent output.
+  const normalizedTitle = normalizeBriefText(input.title);
+
   const normalizedBrief: CreativeBrief = {
-    title: input.title,
+    title: normalizedTitle,
     coreGenres: extractGenres(input.rawInput),
     positioning: extractPositioning(input.rawInput),
     worldSetting: extractWorldSetting(input.rawInput),

@@ -1,0 +1,48 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`validateNormalizeBriefInput — structured error responses > returns a field error when mode is invalid 1`] = `
+{
+  "field": "mode",
+  "message": "mode must be "simple" or "pro"",
+}
+`;
+
+exports[`validateNormalizeBriefInput — structured error responses > returns a language field error for unsupported language values 1`] = `
+{
+  "field": "language",
+  "message": "language must be "zh" or "en"",
+}
+`;
+
+exports[`validateNormalizeBriefInput — structured error responses > returns a title field error when title exceeds max length 1`] = `
+{
+  "field": "title",
+  "message": "title must not exceed 80 characters",
+}
+`;
+
+exports[`validateNormalizeBriefInput — structured error responses > returns body error when request is not an object 1`] = `
+[
+  {
+    "field": "body",
+    "message": "Request body must be a JSON object",
+  },
+]
+`;
+
+exports[`validateNormalizeBriefInput — structured error responses > returns structured errors for multiple missing required fields 1`] = `
+[
+  {
+    "field": "mode",
+    "message": "mode is required",
+  },
+  {
+    "field": "title",
+    "message": "title is required",
+  },
+  {
+    "field": "rawInput",
+    "message": "rawInput is required",
+  },
+]
+`;
