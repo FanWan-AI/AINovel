@@ -6,8 +6,6 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { NextPlanPanel } from "../components/write-next/NextPlanPanel";
-import type { NextPlanResult } from "../hooks/use-api";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import {
@@ -80,6 +78,12 @@ export function translateChapterStatus(status: string, t: TFunction): string {
   return map[status]?.() ?? status;
 }
 
+/** Returns the two top-level action IDs rendered in the header.
+ *  Used in tests to verify dual-button rendering without touching the DOM. */
+export function getTopActionIds(): ReadonlyArray<"planNextAndWrite" | "quickWrite"> {
+  return ["planNextAndWrite", "quickWrite"];
+}
+
 const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = {
   "ready-for-review": { color: "text-amber-500 bg-amber-500/10", icon: <Eye size={12} /> },
   approved: { color: "text-emerald-500 bg-emerald-500/10", icon: <Check size={12} /> },
@@ -121,7 +125,6 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
-  const [pendingNextPlan, setPendingNextPlan] = useState<NextPlanResult | null>(null);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -190,11 +193,6 @@ export function BookDetail({
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
     }
-  };
-
-  const handleWriteNextWithPlan = (plan: NextPlanResult) => {
-    setPendingNextPlan(plan);
-    setWriteNextDialogOpen(true);
   };
 
   const handleDraft = async () => {
@@ -417,33 +415,16 @@ export function BookDetail({
             disabled={writing || drafting}
             className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-primary text-primary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 disabled:opacity-50"
           >
-            {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Zap size={16} />}
-            {writing ? t("dash.writing") : t("book.writeNext")}
+            {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Wand2 size={16} />}
+            {writing ? t("dash.writing") : t("book.planNextAndWrite")}
           </button>
           <button
             onClick={handleQuickWrite}
             disabled={writing || drafting}
             className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
-            title={t("writeNext.quickWrite")}
           >
             <Zap size={14} />
             {t("writeNext.quickWrite")}
-          </button>
-          <button
-            onClick={handleDraft}
-            disabled={writing || drafting}
-            className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
-          >
-            {drafting ? <div className="w-4 h-4 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" /> : <Wand2 size={16} />}
-            {drafting ? t("book.drafting") : t("book.draftOnly")}
-          </button>
-          <button
-            onClick={() => setConfirmDeleteOpen(true)}
-            disabled={deleting}
-            className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 disabled:opacity-50"
-          >
-            {deleting ? <div className="w-4 h-4 border-2 border-destructive/20 border-t-destructive rounded-full animate-spin" /> : <Trash2 size={16} />}
-            {deleting ? t("common.loading") : t("book.deleteBook")}
           </button>
         </div>
       </div>
@@ -577,15 +558,16 @@ export function BookDetail({
             {savingSettings ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Save size={14} />}
             {savingSettings ? t("book.saving") : t("book.save")}
           </button>
+          <button
+            onClick={() => setConfirmDeleteOpen(true)}
+            disabled={deleting}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-bold bg-destructive/10 text-destructive rounded-lg hover:bg-destructive hover:text-white transition-all border border-destructive/20 disabled:opacity-50"
+          >
+            {deleting ? <div className="w-4 h-4 border-2 border-destructive/20 border-t-destructive rounded-full animate-spin" /> : <Trash2 size={14} />}
+            {deleting ? t("common.loading") : t("book.deleteBook")}
+          </button>
         </div>
       </div>
-
-      {/* Next Chapter Suggestion Panel */}
-      <NextPlanPanel
-        bookId={bookId}
-        onApply={(plan) => setPendingNextPlan(plan)}
-        t={t}
-      />
 
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
@@ -724,16 +706,10 @@ export function BookDetail({
       <WriteNextDialog
         open={writeNextDialogOpen}
         defaultWordCount={data?.book.chapterWordCount}
-        initialForm={pendingNextPlan ? {
-          chapterGoal: pendingNextPlan.goal,
-          mustInclude: pendingNextPlan.conflicts.join("\n"),
-        } : undefined}
+        bookId={bookId}
         t={t}
-        onSubmit={(payload) => {
-          setPendingNextPlan(null);
-          return handleWriteNextWithPayload(payload);
-        }}
-        onCancel={() => { setPendingNextPlan(null); setWriteNextDialogOpen(false); }}
+        onSubmit={handleWriteNextWithPayload}
+        onCancel={() => setWriteNextDialogOpen(false)}
       />
     </div>
   );
