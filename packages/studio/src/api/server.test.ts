@@ -868,4 +868,107 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(fields).toContain("mustInclude");
     expect(writeNextChapterMock).not.toHaveBeenCalled();
   });
+
+  it("write-next with invalid mode returns 422 with mode error", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "ultra-fast" }),
+    });
+
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string; message: string }> };
+    expect(data.code).toBe("WRITE_NEXT_VALIDATION_FAILED");
+    expect(Array.isArray(data.errors)).toBe(true);
+    const fields = data.errors.map((e) => e.field);
+    expect(fields).toContain("mode");
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+  });
+
+  it("write-next mode=ai-plan calls planChapter then writeNextChapter with plan context", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "ai-plan",
+        planInput: "聚焦师债主线，节奏加快。",
+        wordCount: 3000,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    // Wait for the async plan → write pipeline to complete
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", "聚焦师债主线，节奏加快。");
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 3000);
+
+    // The pipeline config used for writing should contain plan-derived context
+    const injectedContext = (pipelineConfigs.at(-1) as Record<string, unknown>)["externalContext"] as string;
+    expect(typeof injectedContext).toBe("string");
+    expect(injectedContext).toContain("主角发现线索，局势骤然紧张"); // plan goal from mock
+  });
+
+  it("write-next mode=manual-plan injects externalContext from steering fields", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "manual-plan",
+        wordCount: 2500,
+        chapterGoal: "主角完成最终抉择。",
+        mustInclude: ["天命令牌"],
+        mustAvoid: ["现代用语"],
+        pace: "fast",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2500);
+    expect(planChapterMock).not.toHaveBeenCalled();
+
+    const injectedContext = (pipelineConfigs.at(-1) as Record<string, unknown>)["externalContext"] as string;
+    expect(typeof injectedContext).toBe("string");
+    expect(injectedContext).toContain("主角完成最终抉择。");
+    expect(injectedContext).toContain("天命令牌");
+    expect(injectedContext).toContain("现代用语");
+    expect(injectedContext).toContain("fast");
+  });
+
+  it("write-next mode=quick writes without planning or context injection", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "quick", wordCount: 1500 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    expect(planChapterMock).not.toHaveBeenCalled();
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 1500);
+
+    const config = pipelineConfigs.at(-1) as Record<string, unknown>;
+    expect(config["externalContext"]).toBeUndefined();
+  });
 });

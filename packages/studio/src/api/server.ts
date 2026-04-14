@@ -26,7 +26,7 @@ import { normalizeBrief } from "./services/brief-service.js";
 import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
 import { previewNextPlan } from "./services/next-plan-service.js";
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
-import { buildWriteNextExternalContext } from "./services/write-next-service.js";
+import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
 import {
   loadSteeringPrefs,
@@ -386,21 +386,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ code: "WRITE_NEXT_VALIDATION_FAILED", errors: validation.errors }, 422);
     }
 
-    const { wordCount, ...steeringInput } = validation.value;
-    const externalContext = buildWriteNextExternalContext(steeringInput);
+    const { wordCount, mode, planInput, ...steeringInput } = validation.value;
 
     broadcast("write:start", { bookId: id });
 
-    // Fire and forget — progress/completion/errors pushed via SSE
-    const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
-    pipeline.writeNextChapter(id, wordCount).then(
-      (result) => {
-        broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
-      },
-      (e) => {
-        broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
-      },
-    );
+    // Shared SSE callbacks used by all mode branches.
+    type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
+    const onWriteComplete = (result: WriteResult): void => {
+      broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
+    };
+    const onWriteError = (e: unknown): void => {
+      broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
+    };
+
+    if (mode === "ai-plan") {
+      // AI-plan mode: run the plan stage first, then write using the plan result as context.
+      // planInput (optional) is passed to planChapter as additional planning context.
+      // Both steps are fire-and-forget; progress is pushed via SSE.
+      const planPipeline = new PipelineRunner(await buildPipelineConfig());
+      planPipeline.planChapter(id, planInput)
+        .then(async (plan) => {
+          const externalContext = buildWriteNextContextFromPlan(plan, steeringInput);
+          const writePipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+          return writePipeline.writeNextChapter(id, wordCount);
+        })
+        .then(onWriteComplete, onWriteError);
+    } else if (mode === "quick") {
+      // Quick mode: write directly without any context injection.
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
+    } else {
+      // manual-plan or legacy (no mode): build externalContext from steering fields.
+      const externalContext = buildWriteNextExternalContext(steeringInput);
+      const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+      pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
+    }
 
     return c.json({ status: "writing", bookId: id });
   });
