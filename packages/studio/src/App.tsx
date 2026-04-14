@@ -6,6 +6,7 @@ import { BookDetail } from "./pages/BookDetail";
 import { BookCreate } from "./pages/BookCreate";
 import { BookCreateEntry } from "./pages/BookCreateEntry";
 import { BookCreateSimple } from "./pages/BookCreateSimple";
+import { BookCreateReview } from "./pages/BookCreateReview";
 import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
 import { ConfigView } from "./pages/ConfigView";
@@ -22,6 +23,7 @@ import { useSSE } from "./hooks/use-sse";
 import { useTheme } from "./hooks/use-theme";
 import { useI18n } from "./hooks/use-i18n";
 import { postApi, useApi } from "./hooks/use-api";
+import { useCreateFlow } from "./hooks/use-create-flow";
 import { Sun, Moon, Bell, MessageSquare } from "lucide-react";
 
 export type Route =
@@ -30,6 +32,7 @@ export type Route =
   | { page: "book-create" }
   | { page: "book-create-entry" }
   | { page: "book-create-simple" }
+  | { page: "book-create-review" }
   | { page: "chapter"; bookId: string; chapterNumber: number }
   | { page: "analytics"; bookId: string }
   | { page: "config" }
@@ -57,6 +60,7 @@ export function App() {
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const createFlow = useCreateFlow();
 
   const isDark = theme === "dark";
 
@@ -79,6 +83,7 @@ export function App() {
     toBookCreate: () => setRoute({ page: "book-create-entry" }),
     toBookCreateEntry: () => setRoute({ page: "book-create-entry" }),
     toBookCreateSimple: () => setRoute({ page: "book-create-simple" }),
+    toBookCreateReview: () => setRoute({ page: "book-create-review" }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
@@ -171,7 +176,8 @@ export function App() {
             {route.page === "book" && <BookDetail bookId={route.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
             {route.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}
             {route.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
-            {route.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} />}
+            {route.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} flow={createFlow} />}
+            {route.page === "book-create-review" && <BookCreateReview nav={nav} theme={theme} t={t} flow={createFlow} />}
             {route.page === "chapter" && <ChapterReader bookId={route.bookId} chapterNumber={route.chapterNumber} nav={nav} theme={theme} t={t} />}
             {route.page === "analytics" && <Analytics bookId={route.bookId} nav={nav} theme={theme} t={t} />}
             {route.page === "config" && <ConfigView nav={nav} theme={theme} t={t} />}

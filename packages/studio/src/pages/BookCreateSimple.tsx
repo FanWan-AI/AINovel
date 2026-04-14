@@ -3,11 +3,16 @@ import { postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
-import type { NormalizeBriefResponse } from "../shared/contracts";
+import type { CreativeBrief, NormalizeBriefResponse } from "../shared/contracts";
 
 interface Nav {
   toDashboard: () => void;
   toBookCreateEntry: () => void;
+  toBookCreateReview: () => void;
+}
+
+interface CreateFlowActions {
+  setBrief: (briefId: string, brief: CreativeBrief) => void;
 }
 
 export interface NormalizeBriefPayload {
@@ -26,14 +31,13 @@ export async function callNormalizeBrief(
   return post<NormalizeBriefResponse>("/v2/books/create/brief/normalize", payload);
 }
 
-export function BookCreateSimple({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
+export function BookCreateSimple({ nav, theme, t, flow }: { nav: Nav; theme: Theme; t: TFunction; flow: CreateFlowActions }) {
   const c = useColors(theme);
 
   const [title, setTitle] = useState("");
   const [rawInput, setRawInput] = useState("");
   const [normalizing, setNormalizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<NormalizeBriefResponse | null>(null);
 
   const handleNormalize = async () => {
     if (!title.trim()) {
@@ -47,11 +51,11 @@ export function BookCreateSimple({ nav, theme, t }: { nav: Nav; theme: Theme; t:
 
     setNormalizing(true);
     setError(null);
-    setResult(null);
 
     try {
       const response = await callNormalizeBrief({ mode: "simple", title: title.trim(), rawInput: rawInput.trim() });
-      setResult(response);
+      flow.setBrief(response.briefId, response.normalizedBrief);
+      nav.toBookCreateReview();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -112,45 +116,7 @@ export function BookCreateSimple({ nav, theme, t }: { nav: Nav; theme: Theme; t:
       >
         {normalizing ? t("simple.normalizing") : t("simple.normalizeBtn")}
       </button>
-
-      {/* Result display */}
-      {result && (
-        <div className="space-y-4">
-          <h2 className="font-semibold text-lg">{t("simple.briefResult")}</h2>
-          <div className={`rounded-xl border ${c.cardStatic} bg-card p-5`}>
-            <BriefSummary brief={result.normalizedBrief} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function BriefSummary({ brief }: { brief: NormalizeBriefResponse["normalizedBrief"] }) {
-  const rows: Array<{ label: string; value: string | undefined }> = [
-    { label: "标题 / Title", value: brief.title },
-    { label: "核心类型 / Genres", value: brief.coreGenres.join("、") },
-    { label: "定位 / Positioning", value: brief.positioning },
-    { label: "世界观 / World Setting", value: brief.worldSetting },
-    { label: "主角 / Protagonist", value: brief.protagonist },
-    { label: "主冲突 / Main Conflict", value: brief.mainConflict },
-    { label: "结局方向 / Ending", value: brief.endingDirection },
-    { label: "风格规则 / Style Rules", value: brief.styleRules.length > 0 ? brief.styleRules.join("、") : undefined },
-    { label: "禁区 / Forbidden Patterns", value: brief.forbiddenPatterns.length > 0 ? brief.forbiddenPatterns.join("、") : undefined },
-    { label: "目标受众 / Audience", value: brief.targetAudience },
-    { label: "平台 / Platform", value: brief.platformIntent },
-  ];
-
-  return (
-    <dl className="space-y-3">
-      {rows.map(({ label, value }) =>
-        value ? (
-          <div key={label} className="grid grid-cols-[160px_1fr] gap-2 text-sm">
-            <dt className="text-muted-foreground shrink-0">{label}</dt>
-            <dd className="text-foreground break-words">{value}</dd>
-          </div>
-        ) : null,
-      )}
-    </dl>
-  );
-}
