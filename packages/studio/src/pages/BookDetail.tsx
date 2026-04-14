@@ -64,7 +64,7 @@ interface Nav {
   toAnalytics: (bookId: string) => void;
 }
 
-function translateChapterStatus(status: string, t: TFunction): string {
+export function translateChapterStatus(status: string, t: TFunction): string {
   const map: Record<string, () => string> = {
     "ready-for-review": () => t("chapter.readyForReview"),
     "approved": () => t("chapter.approved"),

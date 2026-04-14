@@ -171,6 +171,54 @@ inkos compose chapter 吞天魔帝
 
 这会生成 `story/runtime/chapter-XXXX.intent.md`、`context.json`、`rule-stack.yaml`、`trace.json`。其中 `intent.md` 给人看，其他文件给系统执行和调试。`plan` / `compose` 只编译本地文档和状态，不依赖在线 LLM，可在没配好 API Key 前先验证控制输入。
 
+### 可控写下一章
+
+在 Studio 或 CLI 中，你可以通过以下步骤精确控制每一章的方向：
+
+**Studio（推荐）**
+
+1. 打开书籍详情页，在章节列表上方点击 **「写草稿」** 并填入干预内容（如"本章聚焦师债冲突，不出现新角色"）
+2. 草稿完成后通过 SSE 实时显示（`draft:complete` 事件），可在 Studio 编辑器中预览
+3. 确认草稿方向后点击 **「写下一章」** 触发完整管线（`write:start` → `write:complete`）
+4. 章节状态变为 `ready-for-review`，可审阅、批准或驳回
+
+**CLI**
+
+```bash
+# 步骤 1：预览 plan（填入干预，生成草稿）
+inkos draft 吞天魔帝 --context "本章聚焦师债冲突，节奏要紧张"
+
+# 步骤 2：写下一章（完整管线：草稿 → 审计 → 修订）
+inkos write next 吞天魔帝
+
+# 步骤 3：审阅结果
+inkos review list 吞天魔帝
+inkos review approve 吞天魔帝 --chapter <N>
+```
+
+**Studio API**（适用于自动化/Agent 集成）
+
+```bash
+# 预览 plan（带干预文本）
+curl -X POST http://localhost:8765/api/books/<BOOK_ID>/draft \
+  -H "Content-Type: application/json" \
+  -d '{"context":"本章聚焦师债冲突"}' | jq .
+# → {"status":"drafting","bookId":"<BOOK_ID>"}
+# 订阅 SSE: draft:start ... draft:complete
+
+# 写下一章
+curl -X POST http://localhost:8765/api/books/<BOOK_ID>/write-next \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+# → {"status":"writing","bookId":"<BOOK_ID>"}
+# 订阅 SSE: write:start ... write:complete → {"chapterNumber":N,"status":"ready-for-review",...}
+
+# 验证章节
+curl http://localhost:8765/api/books/<BOOK_ID> | jq '.chapters[-1]'
+```
+
+完整验收标准参见 [`DevDocs/08-测试策略与验收标准.md` § 10](DevDocs/08-测试策略与验收标准.md)。
+
 ### 字数治理
 
 `draft`、`write next`、`revise` 现在共享同一套保守型字数治理：
