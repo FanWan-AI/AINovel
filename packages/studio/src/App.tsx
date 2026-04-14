@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatBar";
 import { Dashboard } from "./pages/Dashboard";
@@ -87,7 +87,7 @@ export function App() {
     }
   }, [project]);
 
-  const nav = {
+  const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookCreate: () => setRoute({ page: "book-create-entry" }),
@@ -108,7 +108,7 @@ export function App() {
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
-  };
+  }), []);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage =
