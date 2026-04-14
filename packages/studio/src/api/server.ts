@@ -34,6 +34,14 @@ import {
   saveSteeringPrefs,
   validateSteeringPrefsInput,
 } from "./services/chapter-steering-service.js";
+import {
+  validateRuntimeEventsQuery,
+  RUNTIME_EVENTS_DEFAULT_LIMIT,
+  RUNTIME_EVENTS_MAX_LIMIT,
+  type RuntimeEventSource,
+  type RuntimeEventLevel,
+} from "./schemas/runtime-schema.js";
+import type { RuntimeEvent, RuntimeOverview, RuntimeEventsResponse, RuntimeClearResponse } from "../shared/contracts.js";
 
 // --- Event bus for SSE ---
 
@@ -57,6 +65,53 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
   let cachedConfig = initialConfig;
+
+  // --- Runtime event log ---
+  const runtimeEvents: RuntimeEvent[] = [];
+  let runtimeEventIdCounter = 0;
+  let sseClientCount = 0;
+
+  function deriveEventSource(event: string): RuntimeEventSource {
+    if (event.startsWith("daemon:")) return "daemon";
+    if (event.startsWith("agent:")) return "agent";
+    if (event === "log") return "pipeline";
+    if (event.startsWith("llm:")) return "system";
+    return "pipeline";
+  }
+
+  function deriveEventLevel(event: string, data: unknown): RuntimeEventLevel {
+    if (event.endsWith(":error")) return "error";
+    if (event === "log" && typeof data === "object" && data !== null) {
+      const lvl = (data as Record<string, unknown>)["level"];
+      if (lvl === "error") return "error";
+      if (lvl === "warn") return "warn";
+    }
+    return "info";
+  }
+
+  function pushRuntimeEvent(event: string, data: unknown): void {
+    const dataObj = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {};
+    const bookId = typeof dataObj["bookId"] === "string" ? dataObj["bookId"] : undefined;
+    const entry: RuntimeEvent = {
+      id: String(++runtimeEventIdCounter),
+      timestamp: new Date().toISOString(),
+      source: deriveEventSource(event),
+      level: deriveEventLevel(event, data),
+      event,
+      data,
+      ...(bookId !== undefined ? { bookId } : {}),
+    };
+    runtimeEvents.push(entry);
+    if (runtimeEvents.length > RUNTIME_EVENTS_MAX_LIMIT) {
+      runtimeEvents.splice(0, runtimeEvents.length - RUNTIME_EVENTS_MAX_LIMIT);
+    }
+  }
+
+  // Register a subscriber that captures all broadcast events into the runtime event log
+  const runtimeLogHandler: EventHandler = (event, data) => {
+    pushRuntimeEvent(event, data);
+  };
+  subscribers.add(runtimeLogHandler);
 
   app.use("/*", cors());
 
@@ -557,6 +612,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.get("/api/events", (c) => {
     return streamSSE(c, async (stream) => {
+      sseClientCount++;
       const handler: EventHandler = (event, data) => {
         stream.writeSSE({ event, data: JSON.stringify(data) });
       };
@@ -568,6 +624,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 30000);
 
       stream.onAbort(() => {
+        sseClientCount--;
         subscribers.delete(handler);
         clearInterval(keepAlive);
       });
@@ -708,7 +765,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ ok: true, running: false });
   });
 
-  // --- Logs ---
+  // --- Logs (deprecated — use /api/runtime/events instead) ---
 
   app.get("/api/logs", async (c) => {
     const logPath = join(root, "inkos.log");
@@ -718,10 +775,64 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const entries = lines.map((line) => {
         try { return JSON.parse(line); } catch { return { message: line }; }
       });
-      return c.json({ entries });
+      return c.json({ entries, deprecated: true });
     } catch {
-      return c.json({ entries: [] });
+      return c.json({ entries: [], deprecated: true });
     }
+  });
+
+  // --- Runtime center ---
+
+  app.get("/api/runtime/status", (c) => {
+    const recentErrorCount = runtimeEvents.filter((e) => e.level === "error").length;
+    const overview: RuntimeOverview = {
+      daemonRunning: schedulerInstance?.isRunning ?? false,
+      sseClientCount,
+      recentErrorCount,
+      eventCount: runtimeEvents.length,
+    };
+    return c.json(overview);
+  });
+
+  app.get("/api/runtime/events", (c) => {
+    const raw = {
+      source: c.req.query("source"),
+      level: c.req.query("level"),
+      bookId: c.req.query("bookId"),
+      limit: c.req.query("limit"),
+    };
+
+    const validation = validateRuntimeEventsQuery(raw);
+    if (!validation.ok) {
+      return c.json({ code: "RUNTIME_EVENTS_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    const { source, level, bookId, limit } = validation.value;
+
+    let filtered = runtimeEvents;
+    if (source !== undefined) {
+      filtered = filtered.filter((e) => e.source === source);
+    }
+    if (level !== undefined) {
+      filtered = filtered.filter((e) => e.level === level);
+    }
+    if (bookId !== undefined) {
+      filtered = filtered.filter((e) => e.bookId === bookId);
+    }
+
+    const total = filtered.length;
+    const entries = filtered.slice(-limit);
+
+    const response: RuntimeEventsResponse = { entries, total };
+    return c.json(response);
+  });
+
+  app.post("/api/runtime/clear", (c) => {
+    const cleared = runtimeEvents.length;
+    runtimeEvents.splice(0, runtimeEvents.length);
+    runtimeEventIdCounter = 0;
+    const response: RuntimeClearResponse = { ok: true, cleared };
+    return c.json(response);
   });
 
   // --- Agent chat ---

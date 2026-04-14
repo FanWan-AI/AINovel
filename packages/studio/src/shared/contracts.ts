@@ -177,3 +177,35 @@ export interface ConfirmCreateResponse {
   readonly status: "creating";
   readonly bookId: string;
 }
+
+// --- Runtime Center ---
+
+export type RuntimeEventSource = "daemon" | "pipeline" | "system" | "agent" | "user-action";
+export type RuntimeEventLevel = "info" | "warn" | "error";
+
+export interface RuntimeEvent {
+  readonly id: string;
+  readonly timestamp: string;
+  readonly source: RuntimeEventSource;
+  readonly level: RuntimeEventLevel;
+  readonly event: string;
+  readonly data: unknown;
+  readonly bookId?: string;
+}
+
+export interface RuntimeOverview {
+  readonly daemonRunning: boolean;
+  readonly sseClientCount: number;
+  readonly recentErrorCount: number;
+  readonly eventCount: number;
+}
+
+export interface RuntimeEventsResponse {
+  readonly entries: ReadonlyArray<RuntimeEvent>;
+  readonly total: number;
+}
+
+export interface RuntimeClearResponse {
+  readonly ok: true;
+  readonly cleared: number;
+}
