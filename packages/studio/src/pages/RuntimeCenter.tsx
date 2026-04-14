@@ -148,7 +148,7 @@ export function RuntimeCenter({
     }
   };
 
-  const emptyHintKey = deriveEmptyHint(isRunning, hasFilter && visible.length === 0);
+  const emptyHintKey = deriveEmptyHint(isRunning, hasFilter);
 
   return (
     <div className="space-y-8">
