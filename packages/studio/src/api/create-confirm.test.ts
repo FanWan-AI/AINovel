@@ -158,9 +158,8 @@ describe("confirmCreateBook", () => {
       await Promise.resolve();
 
       expect(deps.runStore.get(makeBookId("Book A"))?.status).toBe("succeeded");
-      expect(deps.runStore.get(makeBookId("Book B"))?.status).toBe("failed");
       // Book A must remain succeeded — failure of Book B must not affect it
-      expect(deps.runStore.get(makeBookId("Book A"))?.status).toBe("succeeded");
+      expect(deps.runStore.get(makeBookId("Book B"))?.status).toBe("failed");
     });
   });
 
