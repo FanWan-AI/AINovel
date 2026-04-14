@@ -84,7 +84,7 @@ export function normalizeBriefText(text: string): string {
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join("\n");
 
-  // 5. Collapse more than two consecutive blank lines
+  // 5. Collapse 3 or more consecutive newlines to 2 (i.e., at most one blank line between content blocks)
   result = result.replace(/\n{3,}/g, "\n\n");
 
   // 6. Trim overall
@@ -103,9 +103,10 @@ function normalizeParagraph(paragraph: string): string {
 
   // Try to find the last sentence boundary before the limit
   const truncated = paragraph.slice(0, PARAGRAPH_MAX_LENGTH);
-  const boundaryMatch = /[。!?.\n][^。!?.\n]*$/.exec(truncated);
-  if (boundaryMatch) {
-    return truncated.slice(0, boundaryMatch.index + 1).trim();
+  const boundaries = [...truncated.matchAll(/[。!?.\n]/g)];
+  if (boundaries.length > 0) {
+    const lastBoundary = boundaries[boundaries.length - 1]!;
+    return truncated.slice(0, lastBoundary.index + 1).trim();
   }
 
   // No boundary found — hard truncate
