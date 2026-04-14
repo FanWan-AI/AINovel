@@ -35,6 +35,36 @@ export type WriteNextValidation =
 
 const VALID_PACES: ReadonlySet<string> = new Set(["slow", "balanced", "fast"]);
 
+function validateOptionalNonEmptyString(
+  field: string,
+  value: unknown,
+  errors: WriteNextValidationError[],
+): void {
+  if (value !== undefined && value !== null) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      errors.push({ field, message: `${field} must be a non-empty string` });
+    }
+  }
+}
+
+function validateOptionalStringArray(
+  field: string,
+  value: unknown,
+  errors: WriteNextValidationError[],
+): void {
+  if (value !== undefined && value !== null) {
+    if (!Array.isArray(value)) {
+      errors.push({ field, message: `${field} must be an array of strings` });
+    } else {
+      for (let i = 0; i < value.length; i++) {
+        if (typeof value[i] !== "string" || (value[i] as string).trim().length === 0) {
+          errors.push({ field: `${field}[${i}]`, message: `each item in ${field} must be a non-empty string` });
+        }
+      }
+    }
+  }
+}
+
 /**
  * Validates the write-next request body. All fields are optional —
  * an empty body is valid (backward-compatible with legacy wordCount-only calls).
@@ -63,44 +93,16 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
   }
 
   // brief: optional non-empty string
-  if (raw["brief"] !== undefined && raw["brief"] !== null) {
-    if (typeof raw["brief"] !== "string" || raw["brief"].trim().length === 0) {
-      errors.push({ field: "brief", message: "brief must be a non-empty string" });
-    }
-  }
+  validateOptionalNonEmptyString("brief", raw["brief"], errors);
 
   // chapterGoal: optional non-empty string
-  if (raw["chapterGoal"] !== undefined && raw["chapterGoal"] !== null) {
-    if (typeof raw["chapterGoal"] !== "string" || raw["chapterGoal"].trim().length === 0) {
-      errors.push({ field: "chapterGoal", message: "chapterGoal must be a non-empty string" });
-    }
-  }
+  validateOptionalNonEmptyString("chapterGoal", raw["chapterGoal"], errors);
 
   // mustInclude: optional array of non-empty strings
-  if (raw["mustInclude"] !== undefined && raw["mustInclude"] !== null) {
-    if (!Array.isArray(raw["mustInclude"])) {
-      errors.push({ field: "mustInclude", message: "mustInclude must be an array of strings" });
-    } else {
-      for (let i = 0; i < raw["mustInclude"].length; i++) {
-        if (typeof raw["mustInclude"][i] !== "string") {
-          errors.push({ field: `mustInclude[${i}]`, message: "each item in mustInclude must be a string" });
-        }
-      }
-    }
-  }
+  validateOptionalStringArray("mustInclude", raw["mustInclude"], errors);
 
   // mustAvoid: optional array of non-empty strings
-  if (raw["mustAvoid"] !== undefined && raw["mustAvoid"] !== null) {
-    if (!Array.isArray(raw["mustAvoid"])) {
-      errors.push({ field: "mustAvoid", message: "mustAvoid must be an array of strings" });
-    } else {
-      for (let i = 0; i < raw["mustAvoid"].length; i++) {
-        if (typeof raw["mustAvoid"][i] !== "string") {
-          errors.push({ field: `mustAvoid[${i}]`, message: "each item in mustAvoid must be a string" });
-        }
-      }
-    }
-  }
+  validateOptionalStringArray("mustAvoid", raw["mustAvoid"], errors);
 
   // pace: optional enum
   if (raw["pace"] !== undefined && raw["pace"] !== null) {
