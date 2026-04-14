@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { CreativeBrief } from "../shared/contracts";
@@ -13,6 +13,13 @@ import { ProStepWorld, validateWorld } from "../components/create/ProStepWorld";
 import type { WorldFields } from "../components/create/ProStepWorld";
 import { ProStepPlot, validatePlot } from "../components/create/ProStepPlot";
 import type { PlotFields } from "../components/create/ProStepPlot";
+import {
+  PRO_DRAFT_KEY,
+  loadDraft,
+  saveDraft,
+  clearDraft,
+  canNavigateToStep,
+} from "../hooks/use-create-flow";
 
 // ---------------------------------------------------------------------------
 // Types & helpers
@@ -22,6 +29,13 @@ export interface ProFormState {
   blueprint: BlueprintFields;
   world: WorldFields;
   plot: PlotFields;
+}
+
+/** Shape of the data persisted to localStorage between sessions. */
+export interface ProDraftData {
+  form: ProFormState;
+  /** The highest step index the user has successfully validated (−1 = none). */
+  highestValidated: number;
 }
 
 export const INITIAL_PRO_FORM: ProFormState = {
@@ -93,10 +107,19 @@ interface Nav {
 
 export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
+
+  // Restore draft from localStorage — each lazy initializer reads from the same key;
+  // the two synchronous reads are negligible and the simplest correct approach.
+  const [form, setForm] = useState<ProFormState>(() => loadDraft<ProDraftData>(PRO_DRAFT_KEY)?.form ?? INITIAL_PRO_FORM);
+  const [highestValidated, setHighestValidated] = useState<number>(() => loadDraft<ProDraftData>(PRO_DRAFT_KEY)?.highestValidated ?? -1);
   const [step, setStep] = useState<ProStep>(0);
-  const [form, setForm] = useState<ProFormState>(INITIAL_PRO_FORM);
   const [error, setError] = useState<string | null>(null);
   const [brief, setBrief] = useState<CreativeBrief | null>(null);
+
+  // Auto-save draft whenever form or highestValidated changes.
+  useEffect(() => {
+    saveDraft<ProDraftData>(PRO_DRAFT_KEY, { form, highestValidated });
+  }, [form, highestValidated]);
 
   const stepsMeta = [
     { index: 0, label: t("pro.step1.label") },
@@ -111,6 +134,8 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
       return;
     }
     setError(null);
+    // Record that this step has been validated.
+    setHighestValidated((prev) => Math.max(prev, step));
     if (step < 2) {
       setStep((step + 1) as ProStep);
     } else {
@@ -126,6 +151,23 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
     } else {
       nav.toBookCreateEntry();
     }
+  };
+
+  /** Navigate to a specific step via the step indicator (step guard applies). */
+  const handleStepClick = (index: number) => {
+    if (!canNavigateToStep(index, highestValidated)) return;
+    setError(null);
+    setStep(index as ProStep);
+  };
+
+  /** Clears the persisted draft and resets the form to its initial state. */
+  const handleClearDraft = () => {
+    clearDraft(PRO_DRAFT_KEY);
+    setForm(INITIAL_PRO_FORM);
+    setHighestValidated(-1);
+    setStep(0);
+    setError(null);
+    setBrief(null);
   };
 
   // Brief summary view shown after completing all steps
@@ -179,8 +221,13 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
 
       <h1 className="font-serif text-3xl">{t("pro.pageTitle")}</h1>
 
-      {/* Step indicator */}
-      <ProStepIndicator steps={stepsMeta} currentStep={step} />
+      {/* Step indicator — supports click-to-jump with step guard */}
+      <ProStepIndicator
+        steps={stepsMeta}
+        currentStep={step}
+        highestValidated={highestValidated}
+        onStepClick={handleStepClick}
+      />
 
       {/* Step heading */}
       <div className="space-y-1">
@@ -230,6 +277,16 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
           className={`flex-1 px-4 py-3 ${c.btnPrimary} rounded-md font-medium text-base`}
         >
           {step < 2 ? t("pro.next") : t("pro.finish")}
+        </button>
+      </div>
+
+      {/* Clear draft */}
+      <div className="flex justify-end">
+        <button
+          onClick={handleClearDraft}
+          className="text-xs text-muted-foreground underline underline-offset-2 hover:text-destructive transition-colors"
+        >
+          {t("pro.clearDraft")}
         </button>
       </div>
     </div>
