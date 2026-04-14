@@ -48,7 +48,18 @@ export function NextPlanPanel({ bookId, onApply, t }: NextPlanPanelProps) {
       const result = await fetchNextPlan(bookId);
       setPlan(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch plan");
+      const status = e instanceof ApiError ? e.status : null;
+      const kind = classifyNextPlanError(status);
+      if (e instanceof Error && kind === "unknown") {
+        setError(e.message);
+      } else {
+        const kindMessages: Record<string, string> = {
+          forbidden: "Access denied — check your API key or permissions.",
+          rateLimit: "Rate limit reached. Please wait a moment and try again.",
+          serverError: "Server error. Please try again later.",
+        };
+        setError(kindMessages[kind] ?? (e instanceof Error ? e.message : "Failed to fetch plan"));
+      }
     } finally {
       setLoading(false);
     }
@@ -116,6 +127,3 @@ export function NextPlanPanel({ bookId, onApply, t }: NextPlanPanelProps) {
     </div>
   );
 }
-
-// Re-export ApiError kind helper for callers that catch errors from fetchNextPlan
-export { ApiError };

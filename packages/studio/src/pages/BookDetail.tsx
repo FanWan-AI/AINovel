@@ -7,7 +7,7 @@ import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { NextPlanPanel, buildApplyBrief } from "../components/write-next/NextPlanPanel";
-import type { NextPlanResult } from "../components/write-next/NextPlanPanel";
+import type { NextPlanResult } from "../hooks/use-api";
 import {
   ChevronLeft,
   Zap,
