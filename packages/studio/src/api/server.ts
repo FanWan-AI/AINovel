@@ -23,6 +23,7 @@ import { confirmCreateBook, briefToExternalContext } from "./services/create-flo
 import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
+import { BookCreateRunStore } from "./lib/run-store.js";
 
 // --- Event bus for SSE ---
 
@@ -35,6 +36,9 @@ function broadcast(event: string, data: unknown): void {
     handler(event, data);
   }
 }
+
+// --- V2 confirm run-state store ---
+const bookCreateRunStore = new BookCreateRunStore();
 
 // --- Server factory ---
 
@@ -238,6 +242,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         bookDir: (id) => state.bookDir(id),
         broadcast,
         bookCreateStatus,
+        runStore: bookCreateRunStore,
         initBook: (bookConfig) => pipeline.initBook(bookConfig),
       });
       return c.json({ status: "creating", bookId });

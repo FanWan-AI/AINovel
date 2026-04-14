@@ -8,11 +8,15 @@ import { join } from "node:path";
 import { buildStudioBookConfig } from "../book-create.js";
 import type { ConfirmCreateRequest, CreateMode, CreativeBrief } from "../schemas/create-flow-schema.js";
 import type { StudioBookConfigDraft } from "../book-create.js";
+import { BookCreateRunStore } from "../lib/run-store.js";
 
 export interface CreateFlowServiceDeps {
   readonly bookDir: (bookId: string) => string;
   readonly broadcast: (event: string, data: unknown) => void;
+  /** Legacy map maintained for backward compatibility with /api/books/:id/create-status. */
   readonly bookCreateStatus: Map<string, { status: "creating" | "error"; error?: string }>;
+  /** Stable run-state store: queued → running → succeeded | failed. */
+  readonly runStore: BookCreateRunStore;
   /** Caller is responsible for passing externalContext into the pipeline config. */
   readonly initBook: (bookConfig: StudioBookConfigDraft) => Promise<void>;
 }
@@ -59,9 +63,11 @@ export function briefToExternalContext(brief: CreativeBrief | string): string {
  * Executes the confirm-create flow:
  * 1. Derives the bookConfig from the request.
  * 2. Checks for conflicts (409 if already exists).
- * 3. Checks for in-progress creation (returns existing "creating" status).
- * 4. Persists the brief (if provided).
- * 5. Fires off initBook asynchronously.
+ * 3. Checks for in-progress creation (idempotent — returns existing bookId).
+ * 4. Clears any prior failed run to allow retry.
+ * 5. Persists the brief (if provided).
+ * 6. Fires off initBook asynchronously, advancing run-state through
+ *    queued → running → succeeded | failed.
  *
  * Returns `{ bookId }` on success; throws on conflict.
  */
@@ -81,10 +87,14 @@ export async function confirmCreateBook(
     throw err;
   }
 
-  // Idempotency — if the same book is already being created, return current status
-  if (deps.bookCreateStatus.get(bookId)?.status === "creating") {
+  // Idempotency — if the same book is already queued or running, return the
+  // existing bookId without launching a second pipeline.
+  if (deps.runStore.isActive(bookId)) {
     return { bookId };
   }
+
+  // Allow retry after failure — clear the stale failed entry before proceeding.
+  deps.runStore.clearIfFailed(bookId);
 
   // Persist brief for traceability before kicking off the pipeline
   if (request.brief) {
@@ -92,15 +102,22 @@ export async function confirmCreateBook(
   }
 
   deps.broadcast("book:creating", { bookId, title: request.bookConfig.title });
+
+  // ── Lifecycle: queued ────────────────────────────────────────────────────
+  deps.runStore.enqueue(bookId);
   deps.bookCreateStatus.set(bookId, { status: "creating" });
 
+  // ── Lifecycle: running → succeeded | failed ──────────────────────────────
+  deps.runStore.markRunning(bookId);
   deps.initBook(bookConfig).then(
     () => {
+      deps.runStore.succeed(bookId);
       deps.bookCreateStatus.delete(bookId);
       deps.broadcast("book:created", { bookId });
     },
     (e: unknown) => {
       const error = e instanceof Error ? e.message : String(e);
+      deps.runStore.fail(bookId, error);
       deps.bookCreateStatus.set(bookId, { status: "error", error });
       deps.broadcast("book:error", { bookId, error });
     },
