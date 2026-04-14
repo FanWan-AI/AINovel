@@ -246,7 +246,67 @@ describe("createStudioServer daemon lifecycle", () => {
     const status = await app.request("http://localhost/api/daemon");
     await expect(status.json()).resolves.toEqual({ running: true });
 
+    const session = await app.request("http://localhost/api/daemon/session");
+    expect(session.status).toBe(200);
+    await expect(session.json()).resolves.toMatchObject({ state: "running", running: true });
+
     resolveStart?.();
+  });
+
+  it("daemon session transitions start -> running -> stop and keeps legacy daemon status compatible", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const initialSession = await app.request("http://localhost/api/daemon/session");
+    expect(initialSession.status).toBe(200);
+    await expect(initialSession.json()).resolves.toMatchObject({ state: "idle", running: false });
+
+    const startResponse = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(startResponse.status).toBe(200);
+
+    const runningSession = await app.request("http://localhost/api/daemon/session");
+    await expect(runningSession.json()).resolves.toMatchObject({ state: "running", running: true });
+
+    const legacyRunning = await app.request("http://localhost/api/daemon");
+    await expect(legacyRunning.json()).resolves.toEqual({ running: true });
+
+    const stopResponse = await app.request("http://localhost/api/daemon/stop", { method: "POST" });
+    expect(stopResponse.status).toBe(200);
+
+    const stoppedSession = await app.request("http://localhost/api/daemon/session");
+    await expect(stoppedSession.json()).resolves.toMatchObject({ state: "stopped", running: false });
+
+    const legacyStopped = await app.request("http://localhost/api/daemon");
+    await expect(legacyStopped.json()).resolves.toEqual({ running: false });
+  });
+
+  it("daemon session transitions to error with summary when start loop fails", async () => {
+    schedulerStartMock.mockRejectedValueOnce(new Error("scheduler exploded"));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const startResponse = await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    expect(startResponse.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const session = await app.request("http://localhost/api/daemon/session");
+      const body = await session.json() as {
+        state: string;
+        running: boolean;
+        lastError?: { message: string; timestamp: string };
+      };
+      expect(body.state).toBe("error");
+      expect(body.running).toBe(false);
+      expect(body.lastError).toMatchObject({ message: "scheduler exploded" });
+      expect(typeof body.lastError?.timestamp).toBe("string");
+    });
+
+    const daemonEvents = await app.request("http://localhost/api/runtime/events?source=daemon&limit=10");
+    expect(daemonEvents.status).toBe(200);
+    const daemonEventsBody = await daemonEvents.json() as {
+      entries: Array<{ event: string }>;
+    };
+    expect(daemonEventsBody.entries.map((entry) => entry.event)).toContain("daemon:error");
   });
 
   it("runtime center status/events reflect daemon lifecycle and support history query", async () => {

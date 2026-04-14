@@ -41,7 +41,15 @@ import {
   type RuntimeEventSource,
   type RuntimeEventLevel,
 } from "./schemas/runtime-schema.js";
-import type { RuntimeEvent, RuntimeOverview, RuntimeEventsResponse, RuntimeClearResponse } from "../shared/contracts.js";
+import type {
+  RuntimeEvent,
+  RuntimeOverview,
+  RuntimeEventsResponse,
+  RuntimeClearResponse,
+  DaemonSessionSummary,
+  DaemonSessionState,
+  DaemonSessionErrorSummary,
+} from "../shared/contracts.js";
 
 // --- Event bus for SSE ---
 
@@ -842,17 +850,44 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   // --- Daemon control ---
 
   let schedulerInstance: import("@actalk/inkos-core").Scheduler | null = null;
+  let daemonSession: DaemonSessionSummary = {
+    state: "idle",
+    running: false,
+    updatedAt: new Date().toISOString(),
+  };
+
+  function updateDaemonSession(
+    state: DaemonSessionState,
+    options?: { lastError?: DaemonSessionErrorSummary },
+  ): DaemonSessionSummary {
+    daemonSession = {
+      state,
+      running: state === "running" || state === "planning" || state === "paused",
+      updatedAt: new Date().toISOString(),
+      ...(options?.lastError !== undefined
+        ? { lastError: options.lastError }
+        : daemonSession.lastError !== undefined && state !== "error"
+          ? { lastError: daemonSession.lastError }
+          : {}),
+    };
+    return daemonSession;
+  }
+
+  app.get("/api/daemon/session", (c) => {
+    return c.json(daemonSession);
+  });
 
   app.get("/api/daemon", (c) => {
     return c.json({
-      running: schedulerInstance?.isRunning ?? false,
+      running: daemonSession.running,
     });
   });
 
   app.post("/api/daemon/start", async (c) => {
-    if (schedulerInstance?.isRunning) {
+    if (daemonSession.running) {
       return c.json({ error: "Daemon already running" }, 400);
     }
+    updateDaemonSession("planning");
     try {
       const { Scheduler } = await import("@actalk/inkos-core");
       const currentConfig = await loadCurrentProjectConfig();
@@ -869,10 +904,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           broadcast("daemon:chapter", { bookId, chapter, status });
         },
         onError: (bookId, error) => {
+          updateDaemonSession("error", {
+            lastError: { message: error.message, timestamp: new Date().toISOString() },
+          });
           broadcast("daemon:error", { bookId, error: error.message });
         },
       });
       schedulerInstance = scheduler;
+      updateDaemonSession("running");
       broadcast("daemon:started", {});
       void scheduler.start().catch((e) => {
         const error = e instanceof Error ? e : new Error(String(e));
@@ -881,20 +920,28 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           schedulerInstance = null;
           broadcast("daemon:stopped", {});
         }
+        updateDaemonSession("error", {
+          lastError: { message: error.message, timestamp: new Date().toISOString() },
+        });
         broadcast("daemon:error", { bookId: "scheduler", error: error.message });
       });
       return c.json({ ok: true, running: true });
     } catch (e) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      updateDaemonSession("error", {
+        lastError: { message: error.message, timestamp: new Date().toISOString() },
+      });
       return c.json({ error: String(e) }, 500);
     }
   });
 
   app.post("/api/daemon/stop", (c) => {
-    if (!schedulerInstance?.isRunning) {
+    if (!daemonSession.running || !schedulerInstance?.isRunning) {
       return c.json({ error: "Daemon not running" }, 400);
     }
     schedulerInstance.stop();
     schedulerInstance = null;
+    updateDaemonSession("stopped");
     broadcast("daemon:stopped", {});
     return c.json({ ok: true, running: false });
   });
@@ -920,7 +967,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.get("/api/runtime/status", (c) => {
     const recentErrorCount = runtimeEvents.filter((e) => e.level === "error").length;
     const overview: RuntimeOverview = {
-      daemonRunning: schedulerInstance?.isRunning ?? false,
+      daemonRunning: daemonSession.running,
       sseClientCount,
       recentErrorCount,
       eventCount: runtimeEvents.length,
