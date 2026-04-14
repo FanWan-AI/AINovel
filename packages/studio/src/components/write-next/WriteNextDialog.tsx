@@ -21,6 +21,7 @@ export const INITIAL_WRITE_NEXT_FORM: WriteNextFormState = {
 };
 
 export interface WriteNextPayload {
+  readonly mode?: "ai-plan" | "manual-plan" | "quick";
   readonly chapterGoal?: string;
   readonly mustInclude?: string[];
   readonly mustAvoid?: string[];
@@ -77,6 +78,30 @@ export function buildPlanPayloadFromNextPlan(plan: NextPlanResult): WriteNextPay
   const conflicts = plan.conflicts.filter((c) => c.trim());
   if (conflicts.length > 0) payload.mustInclude = conflicts;
   return payload as WriteNextPayload;
+}
+
+/**
+ * Converts an AI-generated NextPlanResult into an editable WriteNextFormState.
+ * Used by "Adopt Suggestion" to pre-fill the manual planning form.
+ *
+ * Mapping:
+ *   plan.goal      → chapterGoal
+ *   plan.conflicts → mustInclude  (one item per line)
+ *   avoidElements  → "" (left blank for user to fill)
+ *   pacing         → "" (left blank for user to fill)
+ *   wordCount      → preserved from the optional defaultWordCount
+ */
+export function applyPlanToFormState(
+  plan: NextPlanResult,
+  defaultWordCount?: number,
+): WriteNextFormState {
+  return {
+    chapterGoal: plan.goal.trim(),
+    mustInclude: plan.conflicts.filter((c) => c.trim()).join("\n"),
+    avoidElements: "",
+    pacing: "",
+    wordCount: defaultWordCount ? String(defaultWordCount) : "",
+  };
 }
 
 interface WriteNextDialogProps {
@@ -140,7 +165,7 @@ export function WriteNextDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit(buildWriteNextPayload(form));
+    onSubmit({ ...buildWriteNextPayload(form), mode: "manual-plan" });
   };
 
   const handleGeneratePlan = async () => {
@@ -161,7 +186,8 @@ export function WriteNextDialog({
 
   const handleApplyPlan = () => {
     if (!aiPlan) return;
-    onSubmit(buildPlanPayloadFromNextPlan(aiPlan));
+    setForm(applyPlanToFormState(aiPlan, defaultWordCount));
+    setActiveTab("manual");
   };
 
   return (
