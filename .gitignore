@@ -24,3 +24,4 @@ _*.md
 eval "$(ssh-agent -s)"
 .gitignore
 eval "$(ssh-agent -s)".pub
+package-lock.json
