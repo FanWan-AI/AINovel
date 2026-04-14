@@ -157,6 +157,18 @@ const strings = {
   "radar.scanning": { zh: "扫描中...", en: "Scanning..." },
   "radar.summary": { zh: "市场概要", en: "Market Summary" },
   "radar.emptyHint": { zh: "点击「扫描市场」分析当前趋势和机会", en: "Click \"Scan Market\" to analyze trends and opportunities" },
+  "radar.err.403.title": { zh: "访问被拒绝（403）", en: "Access Denied (403)" },
+  "radar.err.403.hint": { zh: "当前 API Key 无权访问此端点，或套餐已过期。请检查 baseUrl 和 API Key 配置，或联系服务提供商确认权限。", en: "The current API Key lacks access to this endpoint, or your plan has expired. Check your baseUrl and API Key, or contact your provider." },
+  "radar.err.429.title": { zh: "请求过于频繁（429）", en: "Too Many Requests (429)" },
+  "radar.err.429.hint": { zh: "API 调用配额已耗尽或触发了速率限制。请稍等片刻后重试，或升级您的套餐以获得更高配额。", en: "API quota exhausted or rate limit triggered. Wait a moment and retry, or upgrade your plan for higher limits." },
+  "radar.err.500.title": { zh: "服务器内部错误（500）", en: "Server Error (500)" },
+  "radar.err.500.hint": { zh: "服务器端出现临时故障。请稍后重试；若持续出现，请运行诊断命令排查。", en: "The server encountered a temporary fault. Please retry shortly. If it persists, run the diagnostic command." },
+  "radar.err.unknown.title": { zh: "扫描失败", en: "Scan Failed" },
+  "radar.err.unknown.hint": { zh: "发生了未知错误。请运行诊断命令排查配置或网络问题。", en: "An unexpected error occurred. Run the diagnostic command to check configuration or network issues." },
+  "radar.err.copy": { zh: "复制诊断命令", en: "Copy Diagnostic Command" },
+  "radar.err.copied": { zh: "已复制！", en: "Copied!" },
+  "radar.err.details": { zh: "展开错误详情", en: "Show error details" },
+  "radar.err.detailsHide": { zh: "收起错误详情", en: "Hide error details" },
 
   // Doctor
   "doctor.title": { zh: "环境诊断", en: "Environment Check" },

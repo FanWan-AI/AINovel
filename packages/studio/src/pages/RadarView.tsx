@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
-import { fetchJson } from "../hooks/use-api";
-import { TrendingUp, Loader2, Target } from "lucide-react";
+import { fetchJson, ApiError } from "../hooks/use-api";
+import { TrendingUp, Loader2, Target, ChevronDown, ChevronUp, Copy, Check } from "lucide-react";
 
 interface Recommendation {
   readonly confidence: number;
@@ -21,20 +21,139 @@ interface RadarResult {
 
 interface Nav { toDashboard: () => void }
 
+// ---------------------------------------------------------------------------
+// Pure helpers (exported for unit tests)
+// ---------------------------------------------------------------------------
+
+export type RadarErrorType = "forbidden" | "rateLimit" | "serverError" | "unknown";
+
+export function classifyRadarError(status: number | null): RadarErrorType {
+  if (status === 403) return "forbidden";
+  if (status === 429) return "rateLimit";
+  if (status === 500) return "serverError";
+  return "unknown";
+}
+
+export function buildDiagnosticCommand(): string {
+  return "pnpm inkos doctor";
+}
+
+export async function copyDiagnosticCommand(
+  deps?: { readonly clipboardImpl?: { writeText(text: string): Promise<void> } },
+): Promise<void> {
+  const clipboard = deps?.clipboardImpl ?? navigator.clipboard;
+  await clipboard.writeText(buildDiagnosticCommand());
+}
+
+// ---------------------------------------------------------------------------
+// Error banner sub-component
+// ---------------------------------------------------------------------------
+
+function errorTitleKey(type: RadarErrorType): Parameters<TFunction>[0] {
+  if (type === "forbidden") return "radar.err.403.title";
+  if (type === "rateLimit") return "radar.err.429.title";
+  if (type === "serverError") return "radar.err.500.title";
+  return "radar.err.unknown.title";
+}
+
+function errorHintKey(type: RadarErrorType): Parameters<TFunction>[0] {
+  if (type === "forbidden") return "radar.err.403.hint";
+  if (type === "rateLimit") return "radar.err.429.hint";
+  if (type === "serverError") return "radar.err.500.hint";
+  return "radar.err.unknown.hint";
+}
+
+interface ErrorBannerProps {
+  readonly errorMessage: string;
+  readonly errorType: RadarErrorType;
+  readonly t: TFunction;
+}
+
+function ErrorBanner({ errorMessage, errorType, t }: ErrorBannerProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    try {
+      await copyDiagnosticCommand();
+      setCopied(true);
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard unavailable — silently ignore
+    }
+  };
+
+  return (
+    <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 space-y-3 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1 flex-1">
+          <p className="font-semibold text-destructive">{t(errorTitleKey(errorType))}</p>
+          <p className="text-muted-foreground leading-relaxed">{t(errorHintKey(errorType))}</p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={() => void handleCopy()}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-background hover:bg-secondary transition-colors text-xs font-medium"
+        >
+          {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
+          {copied ? t("radar.err.copied") : t("radar.err.copy")}
+        </button>
+
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-background hover:bg-secondary transition-colors text-xs font-medium text-muted-foreground"
+        >
+          {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          {expanded ? t("radar.err.detailsHide") : t("radar.err.details")}
+        </button>
+      </div>
+
+      {expanded && (
+        <pre className="mt-1 rounded-md bg-secondary px-3 py-2 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-all">
+          {errorMessage}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page component
+// ---------------------------------------------------------------------------
+
 export function RadarView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const [result, setResult] = useState<RadarResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
 
   const handleScan = async () => {
     setLoading(true);
     setError("");
+    setErrorStatus(null);
     setResult(null);
     try {
       const data = await fetchJson<RadarResult>("/radar/scan", { method: "POST" });
       setResult(data);
     } catch (e) {
+      if (e instanceof ApiError) {
+        setErrorStatus(e.status);
+      }
       setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
@@ -64,7 +183,11 @@ export function RadarView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunct
       </div>
 
       {error && (
-        <div className="bg-destructive/10 text-destructive px-4 py-3 rounded-lg text-sm">{error}</div>
+        <ErrorBanner
+          errorMessage={error}
+          errorType={classifyRadarError(errorStatus)}
+          t={t}
+        />
       )}
 
       {result && (
