@@ -23,7 +23,16 @@ import { confirmCreateBook, briefToExternalContext } from "./services/create-flo
 import type { ConfirmCreateRequest } from "./schemas/create-flow-schema.js";
 import { validateNormalizeBriefInput } from "./schemas/brief-schema.js";
 import { normalizeBrief } from "./services/brief-service.js";
+import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
+import { previewNextPlan } from "./services/next-plan-service.js";
+import { validateWriteNextInput } from "./schemas/write-next-schema.js";
+import { buildWriteNextExternalContext } from "./services/write-next-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
+import {
+  loadSteeringPrefs,
+  saveSteeringPrefs,
+  validateSteeringPrefsInput,
+} from "./services/chapter-steering-service.js";
 
 // --- Event bus for SSE ---
 
@@ -346,15 +355,45 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   // --- Actions ---
 
+  app.post("/api/books/:id/next-plan", async (c) => {
+    const id = c.req.param("id");
+    const rawBody = await c.req.json<unknown>().catch(() => ({}));
+    const validation = validateNextPlanInput(rawBody);
+
+    if (!validation.ok) {
+      return c.json({ code: "NEXT_PLAN_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    try {
+      const pipeline = new PipelineRunner(await buildPipelineConfig({
+        externalContext: validation.value.brief,
+      }));
+      const plan = await previewNextPlan(id, validation.value, {
+        planChapter: (bookId, context) => pipeline.planChapter(bookId, context),
+      });
+      return c.json({ plan });
+    } catch (e) {
+      return c.json({ error: { code: "PLAN_FAILED", message: e instanceof Error ? e.message : String(e) } }, 500);
+    }
+  });
+
   app.post("/api/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const rawBody = await c.req.json().catch(() => null);
+
+    const validation = validateWriteNextInput(rawBody);
+    if (!validation.ok) {
+      return c.json({ code: "WRITE_NEXT_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    const { wordCount, ...steeringInput } = validation.value;
+    const externalContext = buildWriteNextExternalContext(steeringInput);
 
     broadcast("write:start", { bookId: id });
 
     // Fire and forget — progress/completion/errors pushed via SSE
-    const pipeline = new PipelineRunner(await buildPipelineConfig());
-    pipeline.writeNextChapter(id, body.wordCount).then(
+    const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+    pipeline.writeNextChapter(id, wordCount).then(
       (result) => {
         broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
       },
@@ -698,6 +737,35 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json(result);
     } catch (e) {
       broadcast("revise:error", { bookId: id, error: String(e) });
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  // --- Steering Preferences ---
+
+  app.get("/api/books/:id/steering-prefs", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    try {
+      const prefs = await loadSteeringPrefs(bookDir);
+      return c.json({ prefs });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.put("/api/books/:id/steering-prefs", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const raw = await c.req.json().catch(() => null);
+    const result = validateSteeringPrefsInput(raw);
+    if (!result.ok) {
+      return c.json({ errors: result.errors }, 400);
+    }
+    try {
+      const prefs = await saveSteeringPrefs(bookDir, result.value);
+      return c.json({ ok: true, prefs });
+    } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
   });
