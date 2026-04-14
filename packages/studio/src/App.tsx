@@ -113,7 +113,7 @@ export function App() {
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
-  }), []);
+  }), [setRoute]);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage =
