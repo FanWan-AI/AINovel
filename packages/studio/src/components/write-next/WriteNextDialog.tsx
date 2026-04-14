@@ -282,6 +282,9 @@ export function WriteNextDialog({
                 )}
               </div>
             )}
+            {aiPlan && !aiError && (
+              <p className="text-xs text-muted-foreground">{t("writeNext.applyPlanHint")}</p>
+            )}
             <div className="flex justify-end gap-3 pt-2">
               <button
                 type="button"

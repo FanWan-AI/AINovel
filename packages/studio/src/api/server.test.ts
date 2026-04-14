@@ -781,7 +781,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(planChapterMock).not.toHaveBeenCalled();
   });
 
-  it("POST /api/books/:id/next-plan returns 409 PLAN_LOW_CONFIDENCE when AI output is always placeholder", async () => {
+  it("POST /api/books/:id/next-plan returns contextual fallback plan when AI output is always placeholder", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -800,10 +800,14 @@ describe("createStudioServer daemon lifecycle", () => {
       body: JSON.stringify({}),
     });
 
-    expect(response.status).toBe(409);
-    const data = await response.json() as { code: string; message: string };
-    expect(data.code).toBe("PLAN_LOW_CONFIDENCE");
-    expect(typeof data.message).toBe("string");
+    expect(response.status).toBe(200);
+    const data = await response.json() as {
+      plan: { goal: string; conflicts: string[]; chapterNumber: number };
+      warning?: { code: string; message: string };
+    };
+    expect(data.warning?.code).toBe("PLAN_LOW_CONFIDENCE_FALLBACK");
+    expect(data.plan.goal).not.toBe("推进本章核心事件，并让主角做出一个带代价的关键选择。");
+    expect(data.plan.conflicts.length).toBeGreaterThan(0);
     // Should have retried once (2 total calls)
     expect(planChapterMock).toHaveBeenCalledTimes(2);
   });

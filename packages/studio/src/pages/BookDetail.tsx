@@ -8,6 +8,7 @@ import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-act
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
+import { ChapterActionDialog, type ChapterActionKind } from "../components/chapter-actions/ChapterActionDialog";
 import {
   ChevronLeft,
   Zap,
@@ -59,6 +60,13 @@ interface BookCreateStatusData {
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
+type ActionNoticeTone = "success" | "error" | "info";
+
+interface ChapterActionState {
+  readonly kind: ChapterActionKind;
+  readonly chapterNum: number;
+  readonly mode?: ReviseMode;
+}
 
 interface Nav {
   toDashboard: () => void;
@@ -119,6 +127,10 @@ export function BookDetail({
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
   const [revisingChapters, setRevisingChapters] = useState<ReadonlyArray<number>>([]);
   const [syncingChapters, setSyncingChapters] = useState<ReadonlyArray<number>>([]);
+  const [chapterActionDialog, setChapterActionDialog] = useState<ChapterActionState | null>(null);
+  const [chapterActionBrief, setChapterActionBrief] = useState("");
+  const [chapterActionRunning, setChapterActionRunning] = useState(false);
+  const [actionNotice, setActionNotice] = useState<{ tone: ActionNoticeTone; message: string; detail?: string } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsWordCount, setSettingsWordCount] = useState<number | null>(null);
   const [settingsTargetChapters, setSettingsTargetChapters] = useState<number | null>(null);
@@ -134,7 +146,7 @@ export function BookDetail({
     const recent = sse.messages.at(-1);
     if (!recent) return;
 
-    const data = recent.data as { bookId?: string } | null;
+    const data = recent.data as { bookId?: string; chapter?: number; error?: string; fixedCount?: number } | null;
     if (data?.bookId !== bookId) return;
 
     if (recent.event === "write:start") {
@@ -145,6 +157,35 @@ export function BookDetail({
     if (recent.event === "draft:start") {
       setDraftRequestPending(false);
       return;
+    }
+
+    if (recent.event === "revise:complete") {
+      setActionNotice({
+        tone: "success",
+        message: `${t("chapterAction.noticeReviseDone")} #${data?.chapter ?? "-"}`,
+        detail: typeof data?.fixedCount === "number"
+          ? `${data.fixedCount}${t("chapterAction.noticeIssuesUnit")}`
+          : undefined,
+      });
+    }
+    if (recent.event === "rewrite:complete") {
+      setActionNotice({
+        tone: "success",
+        message: t("chapterAction.noticeRewriteDone"),
+      });
+    }
+    if (recent.event === "resync:complete") {
+      setActionNotice({
+        tone: "success",
+        message: t("chapterAction.noticeResyncDone"),
+      });
+    }
+    if (recent.event === "revise:error" || recent.event === "rewrite:error" || recent.event === "resync:error") {
+      setActionNotice({
+        tone: "error",
+        message: t("chapterAction.noticeFailed"),
+        detail: data?.error,
+      });
     }
 
     if (shouldRefetchBookView(recent, bookId)) {
@@ -222,72 +263,100 @@ export function BookDetail({
     }
   };
 
-  const handleRewrite = async (chapterNum: number) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional rewrite brief for this run only. Leave blank to use existing focus."
-        : "可选：输入这次重写要遵循的补充想法。留空则沿用现有 focus。",
-      "",
-    );
-    if (brief === null) return;
+  const handleRewrite = async (chapterNum: number, brief?: string) => {
     setRewritingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/rewrite/${chapterNum}`, {
+      const result = await fetchJson<{ status: string; chapter: number; appliedBrief?: string | null }>(`/books/${bookId}/rewrite/${chapterNum}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief: brief.trim() || undefined }),
+        body: JSON.stringify({ brief }),
       });
       refetch();
+      return result;
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Rewrite failed");
+      throw e;
     } finally {
       setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
   };
 
-  const handleRevise = async (chapterNum: number, mode: ReviseMode) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional revise brief for this run only. Leave blank to use existing focus."
-        : "可选：输入这次修订要遵循的补充想法。留空则沿用现有 focus。",
-      "",
-    );
-    if (brief === null) return;
+  const handleRevise = async (chapterNum: number, mode: ReviseMode, brief?: string) => {
     setRevisingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/revise/${chapterNum}`, {
+      const result = await fetchJson<{ fixedIssues?: string[]; status?: string; appliedBrief?: string | null }>(`/books/${bookId}/revise/${chapterNum}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, brief: brief.trim() || undefined }),
+        body: JSON.stringify({ mode, brief }),
       });
       refetch();
+      return result;
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Revision failed");
+      throw e;
     } finally {
       setRevisingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
   };
 
-  const handleSync = async (chapterNum: number) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional sync brief for interpreting the edited chapter body. Leave blank to sync directly from the text."
-        : "可选：输入这次同步时要遵循的补充说明。留空则直接按正文同步。",
-      "",
-    );
-    if (brief === null) return;
+  const handleSync = async (chapterNum: number, brief?: string) => {
     setSyncingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/resync/${chapterNum}`, {
+      const result = await fetchJson<{ ok?: boolean; appliedBrief?: string | null }>(`/books/${bookId}/resync/${chapterNum}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief: brief.trim() || undefined }),
+        body: JSON.stringify({ brief }),
       });
       refetch();
+      return result;
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Sync failed");
+      throw e;
     } finally {
       setSyncingChapters((prev) => prev.filter((n) => n !== chapterNum));
+    }
+  };
+
+  const openChapterActionDialog = (next: ChapterActionState) => {
+    setChapterActionDialog(next);
+    setChapterActionBrief("");
+  };
+
+  const executeChapterAction = async () => {
+    if (!chapterActionDialog) return;
+    setChapterActionRunning(true);
+    setActionNotice(null);
+    const brief = chapterActionBrief.trim() || undefined;
+    try {
+      if (chapterActionDialog.kind === "rewrite") {
+        await handleRewrite(chapterActionDialog.chapterNum, brief);
+        setActionNotice({
+          tone: "info",
+          message: `${t("chapterAction.noticeRewriteStarted")} #${chapterActionDialog.chapterNum}`,
+          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
+        });
+      } else if (chapterActionDialog.kind === "resync") {
+        await handleSync(chapterActionDialog.chapterNum, brief);
+        setActionNotice({
+          tone: "success",
+          message: `${t("chapterAction.noticeResyncDone")} #${chapterActionDialog.chapterNum}`,
+          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
+        });
+      } else {
+        await handleRevise(chapterActionDialog.chapterNum, chapterActionDialog.mode ?? "spot-fix", brief);
+        setActionNotice({
+          tone: "info",
+          message: `${t("chapterAction.noticeReviseStarted")} #${chapterActionDialog.chapterNum}`,
+          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
+        });
+      }
+      setChapterActionDialog(null);
+      setChapterActionBrief("");
+    } catch (e) {
+      setActionNotice({
+        tone: "error",
+        message: t("chapterAction.noticeFailed"),
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setChapterActionRunning(false);
     }
   };
 
@@ -445,6 +514,22 @@ export function BookDetail({
             <span>{t("book.pipelineWriting")}</span>
           ) : (
             <span>{t("book.pipelineDrafting")}</span>
+          )}
+        </div>
+      )}
+      {actionNotice && (
+        <div
+          className={`rounded-2xl border px-4 py-3 text-sm ${
+            actionNotice.tone === "success"
+              ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-600"
+              : actionNotice.tone === "error"
+                ? "border-destructive/30 bg-destructive/5 text-destructive"
+                : "border-primary/30 bg-primary/[0.05] text-foreground"
+          }`}
+        >
+          <div className="font-semibold">{actionNotice.message}</div>
+          {actionNotice.detail && (
+            <div className="text-xs mt-1 opacity-85">{actionNotice.detail}</div>
           )}
         </div>
       )}
@@ -635,7 +720,7 @@ export function BookDetail({
                         <ShieldCheck size={14} />
                       </button>
                       <button
-                        onClick={() => handleRewrite(ch.number)}
+                        onClick={() => openChapterActionDialog({ kind: "rewrite", chapterNum: ch.number })}
                         disabled={rewritingChapters.includes(ch.number)}
                         className="p-2 rounded-lg bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all shadow-sm disabled:opacity-50"
                         title={t("book.rewrite")}
@@ -645,7 +730,7 @@ export function BookDetail({
                           : <RotateCcw size={14} />}
                       </button>
                       <button
-                        onClick={() => handleSync(ch.number)}
+                        onClick={() => openChapterActionDialog({ kind: "resync", chapterNum: ch.number })}
                         disabled={syncingChapters.includes(ch.number) || ch.number !== latestPersistedChapter}
                         className="p-2 rounded-lg bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all shadow-sm disabled:opacity-50"
                         title={data?.book.language === "en" ? "Sync truth/state from edited chapter" : "根据已编辑章节同步 truth/state"}
@@ -659,7 +744,10 @@ export function BookDetail({
                         value=""
                         onChange={(e) => {
                           const mode = e.target.value as ReviseMode;
-                          if (mode) handleRevise(ch.number, mode);
+                          if (mode) {
+                            openChapterActionDialog({ kind: "revise", chapterNum: ch.number, mode });
+                            e.currentTarget.value = "";
+                          }
                         }}
                         className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-secondary text-muted-foreground border border-border/50 outline-none hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-50 cursor-pointer"
                         title="Revise with AI"
@@ -710,6 +798,35 @@ export function BookDetail({
         t={t}
         onSubmit={handleWriteNextWithPayload}
         onCancel={() => setWriteNextDialogOpen(false)}
+      />
+
+      <ChapterActionDialog
+        open={chapterActionDialog !== null}
+        kind={chapterActionDialog?.kind ?? "revise"}
+        chapterNumber={chapterActionDialog?.chapterNum ?? 0}
+        modeLabel={
+          chapterActionDialog?.mode
+            ? chapterActionDialog.mode === "spot-fix"
+              ? t("book.spotFix")
+              : chapterActionDialog.mode === "polish"
+                ? t("book.polish")
+                : chapterActionDialog.mode === "rewrite"
+                  ? t("book.rewrite")
+                  : chapterActionDialog.mode === "rework"
+                    ? t("book.rework")
+                    : t("book.antiDetect")
+            : undefined
+        }
+        brief={chapterActionBrief}
+        running={chapterActionRunning}
+        t={t}
+        onBriefChange={setChapterActionBrief}
+        onSubmit={executeChapterAction}
+        onCancel={() => {
+          if (chapterActionRunning) return;
+          setChapterActionDialog(null);
+          setChapterActionBrief("");
+        }}
       />
     </div>
   );

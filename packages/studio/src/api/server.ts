@@ -126,6 +126,65 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     };
   }
 
+  async function readLatestChapterSnippet(bookId: string, chapterNumber: number): Promise<string> {
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const prefix = `${String(chapterNumber).padStart(4, "0")}_`;
+    try {
+      const files = await readdir(chaptersDir);
+      const target = files.find((file) => file.startsWith(prefix) && file.endsWith(".md"));
+      if (!target) return "";
+      const raw = await readFile(join(chaptersDir, target), "utf-8");
+      const cleaned = raw
+        .replace(/^#.*$/gm, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      return cleaned.slice(0, 220);
+    } catch {
+      return "";
+    }
+  }
+
+  async function buildFallbackNextPlan(bookId: string, brief?: string): Promise<{
+    goal: string;
+    conflicts: string[];
+    chapterNumber: number;
+  }> {
+    const chapters = await state.loadChapterIndex(bookId);
+    const chapterNumber = await state.getNextChapterNumber(bookId);
+    const latest = chapters.length > 0
+      ? [...chapters].sort((a, b) => b.number - a.number)[0]
+      : undefined;
+
+    const briefText = brief?.trim();
+    const latestTitle = latest?.title?.trim();
+    const latestNumber = latest?.number;
+    const latestSnippet = latest ? await readLatestChapterSnippet(bookId, latest.number) : "";
+
+    const goal = briefText
+      ? `围绕“${briefText.slice(0, 48)}”推进本章主线，并让主角做出一个不可逆选择。`
+      : latestTitle && latestNumber
+        ? `承接第${latestNumber}章《${latestTitle}》的后果，推进主角本章核心目标并触发代价。`
+        : "为主角建立本章明确目标，并在章末制造一个可持续推进的悬念。";
+
+    const conflicts: string[] = [];
+    if (latestTitle && latestNumber) {
+      conflicts.push(`连续性冲突：第${latestNumber}章《${latestTitle}》留下的问题必须在本章正面回应。`);
+    }
+    if (latestSnippet) {
+      conflicts.push(`情节冲突：围绕“${latestSnippet.slice(0, 40)}...”引发新的阻力，避免重复上一章推进方式。`);
+    }
+    if (briefText) {
+      conflicts.push(`目标冲突：主角想完成“${briefText.slice(0, 36)}”，但关键阻拦者会在本章中段介入。`);
+    }
+    conflicts.push("代价冲突：若本章目标失败，主角将失去一项已获得优势（关系、资源或主动权）。");
+
+    return {
+      goal,
+      conflicts,
+      chapterNumber,
+    };
+  }
+
   // --- Books ---
 
   app.get("/api/books", async (c) => {
@@ -374,7 +433,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ plan });
     } catch (e) {
       if (e instanceof PlanLowConfidenceError) {
-        return c.json({ code: "PLAN_LOW_CONFIDENCE", message: e.message }, 409);
+        const fallbackPlan = await buildFallbackNextPlan(id, validation.value.brief);
+        return c.json({
+          plan: fallbackPlan,
+          warning: { code: "PLAN_LOW_CONFIDENCE_FALLBACK", message: e.message },
+        });
       }
       return c.json({ error: { code: "PLAN_FAILED", message: e instanceof Error ? e.message : String(e) } }, 500);
     }
@@ -748,16 +811,30 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     broadcast("revise:start", { bookId: id, chapter: chapterNum });
     try {
+      const appliedBrief = body.brief?.trim() || undefined;
       const pipeline = new PipelineRunner(await buildPipelineConfig({
-        externalContext: body.brief,
+        externalContext: appliedBrief,
       }));
-      const result = await pipeline.reviseDraft(
+      pipeline.reviseDraft(
         id,
         chapterNum,
         (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect",
+      ).then(
+        (result) => broadcast("revise:complete", {
+          bookId: id,
+          chapter: chapterNum,
+          fixedCount: result.fixedIssues.length,
+          status: result.status,
+        }),
+        (e) => broadcast("revise:error", { bookId: id, chapter: chapterNum, error: String(e) }),
       );
-      broadcast("revise:complete", { bookId: id, chapter: chapterNum });
-      return c.json(result);
+      return c.json({
+        status: "revising",
+        bookId: id,
+        chapter: chapterNum,
+        mode: body.mode ?? "spot-fix",
+        appliedBrief: appliedBrief ?? null,
+      });
     } catch (e) {
       broadcast("revise:error", { bookId: id, error: String(e) });
       return c.json({ error: String(e) }, 500);
@@ -1074,16 +1151,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     broadcast("rewrite:start", { bookId: id, chapter: chapterNum });
     try {
+      const appliedBrief = body.brief?.trim() || undefined;
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(id, rollbackTarget);
       const pipeline = new PipelineRunner(await buildPipelineConfig({
-        externalContext: body.brief,
+        externalContext: appliedBrief,
       }));
       pipeline.writeNextChapter(id).then(
         (result) => broadcast("rewrite:complete", { bookId: id, chapterNumber: result.chapterNumber, title: result.title, wordCount: result.wordCount }),
         (e) => broadcast("rewrite:error", { bookId: id, error: e instanceof Error ? e.message : String(e) }),
       );
-      return c.json({ status: "rewriting", bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded });
+      return c.json({ status: "rewriting", bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
     } catch (e) {
       broadcast("rewrite:error", { bookId: id, error: String(e) });
       return c.json({ error: String(e) }, 500);
@@ -1098,8 +1176,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       .catch(() => ({}));
 
     try {
+      const appliedBrief = body.brief?.trim() || undefined;
+      broadcast("resync:start", { bookId: id, chapter: chapterNum });
       const pipeline = new PipelineRunner(await buildPipelineConfig({
-        externalContext: body.brief,
+        externalContext: appliedBrief,
       }));
       const resyncChapterArtifacts = (
         pipeline as PipelineRunner & {
@@ -1112,8 +1192,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
-      return c.json(result);
+      broadcast("resync:complete", { bookId: id, chapter: chapterNum });
+      if (result && typeof result === "object") {
+        return c.json({ ...(result as Record<string, unknown>), appliedBrief: appliedBrief ?? null });
+      }
+      return c.json({ ok: true, result, appliedBrief: appliedBrief ?? null });
     } catch (e) {
+      broadcast("resync:error", { bookId: id, chapter: chapterNum, error: String(e) });
       return c.json({ error: String(e) }, 500);
     }
   });

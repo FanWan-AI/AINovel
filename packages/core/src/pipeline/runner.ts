@@ -915,7 +915,14 @@ export class PipelineRunner {
       );
 
       if (reviseOutput.revisedContent.length === 0) {
-        throw new Error("Reviser returned empty content");
+        return {
+          chapterNumber: targetChapter,
+          wordCount: countChapterLength(content, lengthSpec.countingMode),
+          fixedIssues: [],
+          applied: false,
+          status: "unchanged",
+          skippedReason: "Manual revision returned empty content; kept original chapter.",
+        };
       }
       const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
         bookId,
