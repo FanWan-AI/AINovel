@@ -456,6 +456,10 @@ export const strings = {
   "rc.emptyIdle": { zh: "守护进程尚未启动。点击「启动」开始接收事件。", en: "Daemon is not running. Click Start to begin receiving events." },
   "rc.emptyRunning": { zh: "守护进程运行中，等待事件到来…", en: "Daemon is running — waiting for events…" },
   "rc.emptyFiltered": { zh: "当前过滤条件下无匹配事件。", en: "No events match the current filter." },
+  "compat.daemonMoved": { zh: "守护进程页已迁移到「运行中心」。这里保留为兼容入口。", en: "The daemon page has moved to Runtime Center. This page is kept for compatibility." },
+  "compat.logsMoved": { zh: "日志页已迁移到「运行中心」。这里保留为兼容入口。", en: "The logs page has moved to Runtime Center. This page is kept for compatibility." },
+  "compat.openRuntimeCenter": { zh: "打开运行中心", en: "Open Runtime Center" },
+  "compat.redirecting": { zh: "即将自动跳转…", en: "Redirecting shortly…" },
 } as const;
 
 export type StringKey = keyof typeof strings;

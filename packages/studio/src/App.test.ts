@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveActiveBookId } from "./App";
+import { deriveActiveBookId, routeToRuntimeCenterFromLegacy } from "./App";
 
 describe("deriveActiveBookId", () => {
   it("returns the current book across book-centered routes", () => {
@@ -17,5 +17,15 @@ describe("deriveActiveBookId", () => {
 
   it("returns undefined for runtime-center route", () => {
     expect(deriveActiveBookId({ page: "runtime-center" })).toBeUndefined();
+  });
+});
+
+describe("routeToRuntimeCenterFromLegacy", () => {
+  it("redirects daemon entry to runtime center", () => {
+    expect(routeToRuntimeCenterFromLegacy("daemon")).toEqual({ page: "runtime-center" });
+  });
+
+  it("redirects logs entry to runtime center", () => {
+    expect(routeToRuntimeCenterFromLegacy("logs")).toEqual({ page: "runtime-center" });
   });
 });
