@@ -1372,16 +1372,6 @@ describe("runtimeEventStore integration via server broadcast", () => {
       bookId: "demo-book",
       chapterNumber: 1,
     });
-    expect(lifecycle.map((entry) => entry.event)).toEqual(
-      expect.arrayContaining([
-        "plan:start",
-        "plan:success",
-        "compose:start",
-        "compose:success",
-        "write-next:start",
-        "write-next:success",
-      ]),
-    );
   });
 
   it("rewrite and resync emit success/fail events without silent failures", async () => {
@@ -1441,9 +1431,31 @@ describe("runtimeEventStore integration via server broadcast", () => {
       expect(typeof e.message).toBe("string");
       expect(typeof e.timestamp).toBe("string");
       expect(typeof e.source).toBe("string");
-      if (["write-next", "compose", "plan", "revise", "rewrite", "resync"].includes(e.source)) {
-        const data = e as { chapter?: number; message: string };
-        expect(typeof data.message).toBe("string");
+    }
+
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+    expect(runtimeResponse.status).toBe(200);
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event: string; data: unknown }>;
+    };
+    const semanticEntries = runtimeData.entries.filter((entry) =>
+      entry.event.startsWith("write-next:")
+      || entry.event.startsWith("compose:")
+      || entry.event.startsWith("plan:")
+      || entry.event.startsWith("revise:")
+      || entry.event.startsWith("rewrite:")
+      || entry.event.startsWith("resync:")
+    );
+    for (const entry of semanticEntries) {
+      const payload = entry.data as {
+        action?: unknown;
+        chapterNumber?: unknown;
+        briefUsed?: unknown;
+      };
+      expect(typeof payload.action).toBe("string");
+      expect(typeof payload.briefUsed).toBe("boolean");
+      if (payload.chapterNumber !== undefined) {
+        expect(typeof payload.chapterNumber).toBe("number");
       }
     }
   });

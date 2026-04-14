@@ -48,7 +48,9 @@ import type { RuntimeEvent, RuntimeOverview, RuntimeEventsResponse, RuntimeClear
 type EventHandler = (event: string, data: unknown) => void;
 const subscribers = new Set<EventHandler>();
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
+// Runtime lifecycle actions emitted for human-readable run narration in Studio.
 type RuntimeAction = "revise" | "rewrite" | "resync" | "plan" | "compose" | "write-next";
+// Common lifecycle stages for runtime actions.
 type RuntimeActionStage = "start" | "success" | "fail";
 
 function broadcast(event: string, data: unknown): void {
@@ -88,6 +90,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   function deriveEventLevel(event: string, data: unknown): RuntimeEventLevel {
+    // Explicit payload level wins over suffix heuristics so semantic fail events
+    // can use `:fail` with `level: "error"` consistently.
     if (typeof data === "object" && data !== null) {
       const lvl = (data as Record<string, unknown>)["level"];
       if (lvl === "info") return "info";
@@ -578,6 +582,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const planBrief = normalizeBriefValue(planInput);
     const briefUsed = directBrief !== undefined || planBrief !== undefined;
     const chapterNumber = await resolveNextChapterNumber(id);
+    const resolvePlanOrFallbackChapterNumber = (plan: { chapterNumber?: unknown }): number | undefined =>
+      typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber;
     emitActionEvent("write-next", "start", {
       bookId: id,
       chapterNumber,
@@ -628,15 +634,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
       planPipeline.planChapter(id, planInput)
         .then(async (plan) => {
+          const planChapterNumber = resolvePlanOrFallbackChapterNumber(plan);
           emitActionEvent("plan", "success", {
             bookId: id,
-            chapterNumber: typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber,
+            chapterNumber: planChapterNumber,
             briefUsed: planBrief !== undefined,
           });
           const externalContext = buildWriteNextContextFromPlan(plan, steeringInput);
           emitActionEvent("compose", "start", {
             bookId: id,
-            chapterNumber: typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber,
+            chapterNumber: planChapterNumber,
             briefUsed,
           });
           const writePipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
