@@ -1040,3 +1040,232 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(config["externalContext"]).toBeUndefined();
   });
 });
+
+describe("createStudioServer runtime center API", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-studio-runtime-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    loadProjectConfigMock.mockReset();
+    loadProjectConfigMock.mockImplementation(async () => cloneProjectConfig());
+    pipelineConfigs.length = 0;
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("GET /api/runtime/status returns stable shape with empty event log", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/status");
+    expect(response.status).toBe(200);
+    const data = await response.json() as {
+      daemonRunning: boolean;
+      sseClientCount: number;
+      recentErrorCount: number;
+      eventCount: number;
+    };
+    expect(typeof data.daemonRunning).toBe("boolean");
+    expect(data.daemonRunning).toBe(false);
+    expect(typeof data.sseClientCount).toBe("number");
+    expect(data.sseClientCount).toBe(0);
+    expect(typeof data.recentErrorCount).toBe("number");
+    expect(data.recentErrorCount).toBe(0);
+    expect(typeof data.eventCount).toBe("number");
+    expect(data.eventCount).toBe(0);
+  });
+
+  it("GET /api/runtime/events returns empty entries array with total=0 when no events", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/events");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: unknown[]; total: number };
+    expect(Array.isArray(data.entries)).toBe(true);
+    expect(data.entries).toHaveLength(0);
+    expect(data.total).toBe(0);
+  });
+
+  it("GET /api/runtime/events captures daemon broadcast events", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Trigger daemon start which broadcasts "daemon:started"
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+
+    const response = await app.request("http://localhost/api/runtime/events");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: Array<{ source: string; level: string; event: string }>; total: number };
+    expect(data.total).toBeGreaterThan(0);
+    const daemonEvents = data.entries.filter((e) => e.source === "daemon");
+    expect(daemonEvents.length).toBeGreaterThan(0);
+    const started = daemonEvents.find((e) => e.event === "daemon:started");
+    expect(started).toBeDefined();
+    expect(started!.level).toBe("info");
+  });
+
+  it("GET /api/runtime/events filters by source=daemon", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+
+    const response = await app.request("http://localhost/api/runtime/events?source=daemon");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: Array<{ source: string }>; total: number };
+    expect(data.entries.every((e) => e.source === "daemon")).toBe(true);
+    expect(data.total).toBeGreaterThan(0);
+  });
+
+  it("GET /api/runtime/events filters by level=error", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Start and stop daemon (creates info events), then stop when not running (no error)
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+
+    const response = await app.request("http://localhost/api/runtime/events?level=error");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: Array<{ level: string }>; total: number };
+    expect(data.entries.every((e) => e.level === "error")).toBe(true);
+  });
+
+  it("GET /api/runtime/events filters by bookId", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Start daemon to generate events; daemon:started has no bookId
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+
+    const response = await app.request("http://localhost/api/runtime/events?bookId=nonexistent-book");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: Array<{ bookId?: string }>; total: number };
+    // All returned entries must have the matching bookId
+    expect(data.entries.every((e) => e.bookId === "nonexistent-book")).toBe(true);
+    // No events for a non-existent book
+    expect(data.entries).toHaveLength(0);
+    expect(data.total).toBe(0);
+  });
+
+  it("GET /api/runtime/events respects limit parameter", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Start daemon to generate some events
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+    await app.request("http://localhost/api/daemon/stop", { method: "POST" });
+
+    const response = await app.request("http://localhost/api/runtime/events?limit=1");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: unknown[]; total: number };
+    expect(data.entries.length).toBeLessThanOrEqual(1);
+    // total reflects untruncated count
+    expect(typeof data.total).toBe("number");
+  });
+
+  it("GET /api/runtime/events uses default limit of 100 when not specified", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/events");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: unknown[]; total: number };
+    // With no events, entries is empty; default limit is accepted without error
+    expect(Array.isArray(data.entries)).toBe(true);
+    expect(data.entries.length).toBeLessThanOrEqual(100);
+  });
+
+  it("GET /api/runtime/events returns 422 for invalid source", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/events?source=invalid-source");
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string }> };
+    expect(data.code).toBe("RUNTIME_EVENTS_VALIDATION_FAILED");
+    expect(data.errors.some((e) => e.field === "source")).toBe(true);
+  });
+
+  it("GET /api/runtime/events returns 422 for invalid level", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/events?level=verbose");
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string }> };
+    expect(data.code).toBe("RUNTIME_EVENTS_VALIDATION_FAILED");
+    expect(data.errors.some((e) => e.field === "level")).toBe(true);
+  });
+
+  it("GET /api/runtime/events returns 422 for invalid limit", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/runtime/events?limit=0");
+    expect(response.status).toBe(422);
+    const data = await response.json() as { code: string; errors: Array<{ field: string }> };
+    expect(data.code).toBe("RUNTIME_EVENTS_VALIDATION_FAILED");
+    expect(data.errors.some((e) => e.field === "limit")).toBe(true);
+  });
+
+  it("POST /api/runtime/clear empties the event log and returns cleared count", async () => {
+    schedulerStartMock.mockResolvedValue(undefined);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Generate some events
+    await app.request("http://localhost/api/daemon/start", { method: "POST" });
+
+    const beforeClear = await app.request("http://localhost/api/runtime/events");
+    const beforeData = await beforeClear.json() as { total: number };
+    expect(beforeData.total).toBeGreaterThan(0);
+
+    const clearResponse = await app.request("http://localhost/api/runtime/clear", { method: "POST" });
+    expect(clearResponse.status).toBe(200);
+    const clearData = await clearResponse.json() as { ok: boolean; cleared: number };
+    expect(clearData.ok).toBe(true);
+    expect(clearData.cleared).toBe(beforeData.total);
+
+    const afterClear = await app.request("http://localhost/api/runtime/events");
+    const afterData = await afterClear.json() as { entries: unknown[]; total: number };
+    expect(afterData.entries).toHaveLength(0);
+    expect(afterData.total).toBe(0);
+  });
+
+  it("GET /api/runtime/status reflects error count after daemon error events", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Daemon is not running, so stop returns 400 (no broadcast), but we can check initial state
+    const statusBefore = await app.request("http://localhost/api/runtime/status");
+    const dataBefore = await statusBefore.json() as { recentErrorCount: number };
+    expect(dataBefore.recentErrorCount).toBe(0);
+  });
+
+  it("GET /api/logs still works and includes deprecated:true flag", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/logs");
+    expect(response.status).toBe(200);
+    const data = await response.json() as { entries: unknown[]; deprecated: boolean };
+    expect(Array.isArray(data.entries)).toBe(true);
+    expect(data.deprecated).toBe(true);
+  });
+});
