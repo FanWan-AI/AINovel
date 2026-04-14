@@ -258,6 +258,18 @@ const strings = {
   "entry.quickBtn": { zh: "快速开始", en: "Quick Start" },
   "entry.proBtn": { zh: "敬请期待", en: "Coming Soon" },
 
+  // BookCreateReview
+  "review.title": { zh: "摘要确认", en: "Brief Review" },
+  "review.titleLabel": { zh: "书名", en: "Title" },
+  "review.positioningLabel": { zh: "定位", en: "Positioning" },
+  "review.worldLabel": { zh: "世界观", en: "World Setting" },
+  "review.protagonistLabel": { zh: "主角", en: "Protagonist" },
+  "review.conflictLabel": { zh: "主冲突", en: "Main Conflict" },
+  "review.backToEdit": { zh: "返回修改", en: "Back to Edit" },
+  "review.continue": { zh: "继续创建", en: "Continue Creating" },
+  "review.titleRequired": { zh: "书名不能为空", en: "Title is required" },
+  "review.noBrief": { zh: "暂无摘要，请先返回完成快速模式", en: "No brief found. Please go back and complete Quick Mode first." },
+
   // BookCreateSimple
   "simple.title": { zh: "快速模式", en: "Quick Mode" },
   "simple.bookTitleLabel": { zh: "书名", en: "Book Title" },
