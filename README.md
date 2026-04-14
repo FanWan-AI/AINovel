@@ -509,6 +509,33 @@ pnpm --filter @actalk/inkos-studio test -- \
 
 完整验收标准与 curl 步骤参见 [`DevDocs/08-测试策略与验收标准.md` § 11](DevDocs/08-测试策略与验收标准.md)。
 
+### 运行中心验收与运维（端到端）
+
+最小验收命令（可直接复制）：
+
+```bash
+# 1) 启动守护并确认运行中心状态可见
+curl -s -X POST http://localhost:4569/api/daemon/start | jq .
+curl -s http://localhost:4569/api/runtime/status | jq .
+
+# 2) 触发精修并检查运行中心全链路事件
+curl -s -X POST "http://localhost:4569/api/books/<BOOK_ID>/revise/<CHAPTER_NO>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"rewrite","brief":"修复节奏并保持人物动机"}' | jq .
+curl -s "http://localhost:4569/api/runtime/events?bookId=<BOOK_ID>&limit=100" | jq .
+
+# 3) 刷新页面后仍可查询历史事件
+curl -s "http://localhost:4569/api/runtime/events?limit=20" | jq '.total'
+```
+
+预期：
+- 启动守护后可见 `daemon:started`，状态从 `daemonRunning=false` 变为 `true`
+- 精修过程可见 `revise:start` 与 `revise:success` / `revise:fail`
+- 页面刷新不会清空运行中心历史事件（仍可通过 `/api/runtime/events` 查询）
+
+故障排查重点：SSE 断线、锁文件残留、空日志。  
+详细步骤见 [`DevDocs/08-测试策略与验收标准.md` § 12](DevDocs/08-测试策略与验收标准.md)。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">
