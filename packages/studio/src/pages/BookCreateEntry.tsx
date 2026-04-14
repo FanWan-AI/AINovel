@@ -6,6 +6,7 @@ import { Zap, Layers } from "lucide-react";
 interface Nav {
   toDashboard: () => void;
   toBookCreateSimple: () => void;
+  toBookCreatePro: () => void;
 }
 
 export function BookCreateEntry({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
@@ -46,18 +47,21 @@ export function BookCreateEntry({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
         </button>
 
         {/* Professional Mode (coming soon) */}
-        <div className={`text-left p-6 rounded-xl border border-border bg-card/50 opacity-60 space-y-4 cursor-not-allowed`}>
-          <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center text-muted-foreground">
+        <button
+          onClick={nav.toBookCreatePro}
+          className={`group text-left p-6 rounded-xl border ${c.card} bg-card hover:border-primary/40 transition-all space-y-4`}
+        >
+          <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary group-hover:bg-primary/20 transition-colors">
             <Layers size={20} />
           </div>
           <div className="space-y-1">
             <div className="font-semibold text-base">{t("entry.proTitle")}</div>
             <div className="text-sm text-muted-foreground leading-relaxed">{t("entry.proDesc")}</div>
           </div>
-          <div className={`inline-flex items-center px-4 py-2 rounded-md text-sm font-medium ${c.btnSecondary} opacity-60`}>
-            {t("entry.proBtn")}
+          <div className={`inline-flex items-center px-4 py-2 rounded-md text-sm font-medium ${c.btnSecondary}`}>
+            {t("pro.pageTitle")}
           </div>
-        </div>
+        </button>
       </div>
     </div>
   );
