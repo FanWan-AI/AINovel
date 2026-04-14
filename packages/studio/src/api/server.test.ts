@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { DaemonSessionSummary } from "../shared/contracts.js";
 
 const schedulerStartMock = vi.fn<() => Promise<void>>();
 const initBookMock = vi.fn();
@@ -290,11 +291,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     await vi.waitFor(async () => {
       const session = await app.request("http://localhost/api/daemon/session");
-      const body = await session.json() as {
-        state: string;
-        running: boolean;
-        lastError?: { message: string; timestamp: string };
-      };
+      const body = await session.json() as DaemonSessionSummary;
       expect(body.state).toBe("error");
       expect(body.running).toBe(false);
       expect(body.lastError).toMatchObject({ message: "scheduler exploded" });

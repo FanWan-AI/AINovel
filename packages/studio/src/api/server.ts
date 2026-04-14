@@ -850,6 +850,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   // --- Daemon control ---
 
   let schedulerInstance: import("@actalk/inkos-core").Scheduler | null = null;
+  const activeDaemonStates = new Set<DaemonSessionState>(["planning", "running", "paused"]);
   let daemonSession: DaemonSessionSummary = {
     state: "idle",
     running: false,
@@ -860,15 +861,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     state: DaemonSessionState,
     options?: { lastError?: DaemonSessionErrorSummary },
   ): DaemonSessionSummary {
+    const lastError = options?.lastError ?? daemonSession.lastError;
+
     daemonSession = {
       state,
-      running: state === "running" || state === "planning" || state === "paused",
+      running: activeDaemonStates.has(state),
       updatedAt: new Date().toISOString(),
-      ...(options?.lastError !== undefined
-        ? { lastError: options.lastError }
-        : daemonSession.lastError !== undefined && state !== "error"
-          ? { lastError: daemonSession.lastError }
-          : {}),
+      ...(lastError !== undefined ? { lastError } : {}),
     };
     return daemonSession;
   }
@@ -936,10 +935,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   app.post("/api/daemon/stop", (c) => {
-    if (!daemonSession.running || !schedulerInstance?.isRunning) {
+    if (!daemonSession.running) {
       return c.json({ error: "Daemon not running" }, 400);
     }
-    schedulerInstance.stop();
+    schedulerInstance?.stop();
     schedulerInstance = null;
     updateDaemonSession("stopped");
     broadcast("daemon:stopped", {});
