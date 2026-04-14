@@ -124,7 +124,7 @@ export { analyzeHookHealth } from "./utils/hook-health.js";
 
 // Pipeline
 export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
-export { Scheduler, type SchedulerConfig } from "./pipeline/scheduler.js";
+export { Scheduler, type SchedulerConfig, type RunPlan, type RunPlanMode, type RunPlanBookScope } from "./pipeline/scheduler.js";
 export { runAgentLoop, AGENT_TOOLS as AGENT_TOOLS, type AgentLoopOptions } from "./pipeline/agent.js";
 export { detectChapter, detectAndRewrite, loadDetectionHistory, type DetectChapterResult, type DetectAndRewriteResult } from "./pipeline/detection-runner.js";
 

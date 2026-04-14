@@ -22,6 +22,24 @@ export interface SchedulerConfig extends PipelineConfig {
   readonly onPause?: (bookId: string, reason: string) => void;
 }
 
+export type RunPlanMode = "managed-default" | "custom-plan";
+
+export type RunPlanBookScope =
+  | {
+    readonly type: "all-active";
+  }
+  | {
+    readonly type: "book-list";
+    readonly bookIds: ReadonlyArray<string>;
+  };
+
+export interface RunPlan {
+  readonly mode: RunPlanMode;
+  readonly bookScope: RunPlanBookScope;
+  readonly perBookChapterCap?: number;
+  readonly globalChapterCap?: number;
+}
+
 interface ScheduledTask {
   readonly name: string;
   readonly intervalMs: number;
@@ -46,6 +64,9 @@ export class Scheduler {
   private dailyChapterCount = new Map<string, number>();
 
   private readonly log?: Logger;
+  private runPlan?: RunPlan;
+  private runPlanGlobalChapterCount = 0;
+  private runPlanBookChapterCount = new Map<string, number>();
 
   constructor(config: SchedulerConfig) {
     this.config = config;
@@ -54,8 +75,11 @@ export class Scheduler {
     this.log = config.logger?.child("scheduler");
   }
 
-  async start(): Promise<void> {
+  async start(plan?: RunPlan): Promise<void> {
     if (this.running) return;
+    this.runPlan = plan;
+    this.runPlanGlobalChapterCount = 0;
+    this.runPlanBookChapterCount.clear();
     this.running = true;
 
     // Run write cycle immediately on start, then schedule
@@ -175,7 +199,7 @@ export class Scheduler {
       return;
     }
 
-    const bookIds = await this.state.listBooks();
+    const bookIds = this.resolveRunPlanBookIds(await this.state.listBooks());
 
     const activeBooks: Array<{ readonly id: string; readonly config: BookConfig }> = [];
     for (const id of bookIds) {
@@ -187,6 +211,17 @@ export class Scheduler {
     }
 
     const booksToWrite = activeBooks.slice(0, this.config.maxConcurrentBooks);
+    if (booksToWrite.length === 0) return;
+
+    if (this.isRunPlanGlobalCapReached()) return;
+
+    if (this.runPlan) {
+      for (const book of booksToWrite) {
+        if (this.isRunPlanGlobalCapReached()) break;
+        await this.processBook(book.id, book.config);
+      }
+      return;
+    }
 
     // Parallel book processing
     await Promise.all(
@@ -200,6 +235,8 @@ export class Scheduler {
       if (!this.running) return;
       if (this.isDailyCapReached()) return;
       if (this.pausedBooks.has(bookId)) return;
+      if (this.isRunPlanGlobalCapReached()) return;
+      if (this.isRunPlanBookCapReached(bookId)) return;
 
       // Cooldown between chapters (skip for the first one)
       if (i > 0 && this.config.cooldownAfterChapterMs > 0) {
@@ -218,6 +255,8 @@ export class Scheduler {
         } else {
           break; // Stop this book's cycle
         }
+      } else {
+        this.recordRunPlanChapterWritten(bookId);
       }
     }
   }
@@ -406,5 +445,32 @@ export class Scheduler {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private resolveRunPlanBookIds(allBookIds: ReadonlyArray<string>): ReadonlyArray<string> {
+    if (!this.runPlan) return allBookIds;
+    if (this.runPlan.bookScope.type === "all-active") return allBookIds;
+    if (this.runPlan.bookScope.type === "book-list") return this.runPlan.bookScope.bookIds;
+    return allBookIds;
+  }
+
+  private isRunPlanGlobalCapReached(): boolean {
+    if (!this.runPlan) return false;
+    if (this.runPlan.globalChapterCap === undefined) return false;
+    return this.runPlanGlobalChapterCount >= this.runPlan.globalChapterCap;
+  }
+
+  private isRunPlanBookCapReached(bookId: string): boolean {
+    if (!this.runPlan) return false;
+    if (this.runPlan.perBookChapterCap === undefined) return false;
+    const count = this.runPlanBookChapterCount.get(bookId) ?? 0;
+    return count >= this.runPlan.perBookChapterCap;
+  }
+
+  private recordRunPlanChapterWritten(bookId: string): void {
+    if (!this.runPlan) return;
+    this.runPlanGlobalChapterCount += 1;
+    const count = this.runPlanBookChapterCount.get(bookId) ?? 0;
+    this.runPlanBookChapterCount.set(bookId, count + 1);
   }
 }
