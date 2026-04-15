@@ -71,6 +71,28 @@ type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged
 const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 const BRIEF_TRACE_MAX_ITEMS = 8;
+const WRITING_GOVERNANCE_SCHEMA_VERSION = 1;
+const WRITING_STYLE_TEMPLATE_VALUES = ["narrative-balance", "dialogue-driven", "cinematic"] as const;
+const REVIEW_STRICTNESS_BASELINE_VALUES = ["balanced", "strict", "strict-plus"] as const;
+const ANTI_AI_TRACE_STRENGTH_VALUES = ["medium", "high", "max"] as const;
+
+type WritingStyleTemplate = (typeof WRITING_STYLE_TEMPLATE_VALUES)[number];
+type ReviewStrictnessBaseline = (typeof REVIEW_STRICTNESS_BASELINE_VALUES)[number];
+type AntiAiTraceStrength = (typeof ANTI_AI_TRACE_STRENGTH_VALUES)[number];
+
+interface WritingGovernanceSettings {
+  readonly schemaVersion: number;
+  readonly styleTemplate: WritingStyleTemplate;
+  readonly reviewStrictnessBaseline: ReviewStrictnessBaseline;
+  readonly antiAiTraceStrength: AntiAiTraceStrength;
+  readonly updatedAt: string;
+  readonly extensions?: Record<string, unknown>;
+}
+
+interface WritingGovernanceValidationError {
+  readonly field: string;
+  readonly message: string;
+}
 
 interface BriefTraceEntry {
   readonly text: string;
@@ -94,6 +116,95 @@ interface ManualCandidateRevision {
   readonly auditIssues: ReadonlyArray<string>;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: unknown;
+}
+
+function normalizeWritingGovernanceSettings(raw: unknown, fallbackUpdatedAt = ""): WritingGovernanceSettings {
+  const source = typeof raw === "object" && raw !== null && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  const styleTemplate = WRITING_STYLE_TEMPLATE_VALUES.includes(source.styleTemplate as WritingStyleTemplate)
+    ? source.styleTemplate as WritingStyleTemplate
+    : "narrative-balance";
+  const reviewStrictnessBaseline = REVIEW_STRICTNESS_BASELINE_VALUES.includes(source.reviewStrictnessBaseline as ReviewStrictnessBaseline)
+    ? source.reviewStrictnessBaseline as ReviewStrictnessBaseline
+    : "balanced";
+  const antiAiTraceStrength = ANTI_AI_TRACE_STRENGTH_VALUES.includes(source.antiAiTraceStrength as AntiAiTraceStrength)
+    ? source.antiAiTraceStrength as AntiAiTraceStrength
+    : "medium";
+  const updatedAt = typeof source.updatedAt === "string" && source.updatedAt.trim().length > 0
+    ? source.updatedAt
+    : fallbackUpdatedAt;
+  const extensions = typeof source.extensions === "object" && source.extensions !== null && !Array.isArray(source.extensions)
+    ? source.extensions as Record<string, unknown>
+    : undefined;
+  return {
+    schemaVersion: WRITING_GOVERNANCE_SCHEMA_VERSION,
+    styleTemplate,
+    reviewStrictnessBaseline,
+    antiAiTraceStrength,
+    updatedAt,
+    ...(extensions ? { extensions } : {}),
+  };
+}
+
+type WritingGovernanceInput = {
+  styleTemplate?: WritingStyleTemplate;
+  reviewStrictnessBaseline?: ReviewStrictnessBaseline;
+  antiAiTraceStrength?: AntiAiTraceStrength;
+  extensions?: Record<string, unknown>;
+};
+
+function validateWritingGovernanceInput(raw: unknown): { ok: true; value: WritingGovernanceInput } | { ok: false; errors: WritingGovernanceValidationError[] } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, errors: [{ field: "body", message: "Request body must be a JSON object." }] };
+  }
+  const body = raw as Record<string, unknown>;
+  const errors: WritingGovernanceValidationError[] = [];
+  const result: WritingGovernanceInput = {};
+
+  if (body.styleTemplate !== undefined) {
+    if (!WRITING_STYLE_TEMPLATE_VALUES.includes(body.styleTemplate as WritingStyleTemplate)) {
+      errors.push({ field: "styleTemplate", message: `styleTemplate must be one of ${WRITING_STYLE_TEMPLATE_VALUES.join(", ")}.` });
+    } else {
+      result.styleTemplate = body.styleTemplate as WritingStyleTemplate;
+    }
+  }
+
+  if (body.reviewStrictnessBaseline !== undefined) {
+    if (!REVIEW_STRICTNESS_BASELINE_VALUES.includes(body.reviewStrictnessBaseline as ReviewStrictnessBaseline)) {
+      errors.push({
+        field: "reviewStrictnessBaseline",
+        message: `reviewStrictnessBaseline must be one of ${REVIEW_STRICTNESS_BASELINE_VALUES.join(", ")}.`,
+      });
+    } else {
+      result.reviewStrictnessBaseline = body.reviewStrictnessBaseline as ReviewStrictnessBaseline;
+    }
+  }
+
+  if (body.antiAiTraceStrength !== undefined) {
+    if (!ANTI_AI_TRACE_STRENGTH_VALUES.includes(body.antiAiTraceStrength as AntiAiTraceStrength)) {
+      errors.push({
+        field: "antiAiTraceStrength",
+        message: `antiAiTraceStrength must be one of ${ANTI_AI_TRACE_STRENGTH_VALUES.join(", ")}.`,
+      });
+    } else {
+      result.antiAiTraceStrength = body.antiAiTraceStrength as AntiAiTraceStrength;
+    }
+  }
+
+  if (body.extensions !== undefined) {
+    if (typeof body.extensions !== "object" || body.extensions === null || Array.isArray(body.extensions)) {
+      errors.push({ field: "extensions", message: "extensions must be an object." });
+    } else {
+      result.extensions = body.extensions as Record<string, unknown>;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return { ok: true, value: result };
 }
 
 function broadcast(event: string, data: unknown): void {
@@ -1078,6 +1189,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const { writeFile: writeFileFs } = await import("node:fs/promises");
       await writeFileFs(configPath, JSON.stringify(existing, null, 2), "utf-8");
       return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.get("/api/project/writing-governance", async (c) => {
+    try {
+      const configPath = join(root, "inkos.json");
+      const raw = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+      const settings = normalizeWritingGovernanceSettings(raw.writingGovernance, "");
+      return c.json({ settings });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.put("/api/project/writing-governance", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const validation = validateWritingGovernanceInput(body);
+    if (!validation.ok) {
+      return c.json({ errors: validation.errors }, 400);
+    }
+    try {
+      const configPath = join(root, "inkos.json");
+      const existing = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+      const baseSettings = normalizeWritingGovernanceSettings(existing.writingGovernance, "");
+      const nextSettings = {
+        ...baseSettings,
+        ...validation.value,
+        schemaVersion: WRITING_GOVERNANCE_SCHEMA_VERSION,
+        updatedAt: new Date().toISOString(),
+      };
+      existing.writingGovernance = nextSettings;
+      await writeFile(configPath, JSON.stringify(existing, null, 2), "utf-8");
+      return c.json({ ok: true, settings: nextSettings });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     }

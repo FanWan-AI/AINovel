@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildSettingsTabItems,
+  buildWritingGovernancePayload,
+  collectWritingDuplicateKeys,
   normalizeSettingsTab,
+  normalizeWritingGovernanceForm,
+  saveWritingGovernance,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
 
@@ -46,5 +50,49 @@ describe("buildSettingsTabItems", () => {
     writingTab?.onClick();
 
     expect(onTabChange).toHaveBeenCalledWith("writing");
+  });
+});
+
+describe("writing governance helpers", () => {
+  it("normalizes missing settings to defaults", () => {
+    expect(normalizeWritingGovernanceForm()).toEqual({
+      styleTemplate: "narrative-balance",
+      reviewStrictnessBaseline: "balanced",
+      antiAiTraceStrength: "medium",
+    });
+  });
+
+  it("builds save payload from form", () => {
+    expect(buildWritingGovernancePayload({
+      styleTemplate: "cinematic",
+      reviewStrictnessBaseline: "strict-plus",
+      antiAiTraceStrength: "max",
+    })).toEqual({
+      styleTemplate: "cinematic",
+      reviewStrictnessBaseline: "strict-plus",
+      antiAiTraceStrength: "max",
+    });
+  });
+
+  it("saves governance form to project endpoint", async () => {
+    const putApiImpl = vi.fn().mockResolvedValue(undefined);
+    await saveWritingGovernance({
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    }, { putApiImpl });
+    expect(putApiImpl).toHaveBeenCalledWith("/project/writing-governance", {
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    });
+  });
+
+  it("guards duplicate keys against BookDetail operation keys", () => {
+    expect(collectWritingDuplicateKeys()).toEqual([]);
+    expect(collectWritingDuplicateKeys({
+      governanceKeys: ["plan-next-and-write", "style-template-global"],
+      bookDetailKeys: ["plan-next-and-write", "quick-write"],
+    })).toEqual(["plan-next-and-write"]);
   });
 });
