@@ -57,11 +57,18 @@ export interface ChatActionSseUpdate {
   readonly message: string;
 }
 
-const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/iu;
 const AUDIT_ACTION_PATTERN = /审计|audit/iu;
 const RADAR_ACTION_PATTERN = /市场雷达|市场趋势|雷达|market\s*radar|scan\s*market|market\s*trend/iu;
 const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+const ACTION_RESULT_SUMMARY_MAX_LENGTH = 120;
+const ACTION_RESULT_SUMMARY_TRUNCATE_LENGTH = 117;
+
+interface WriteNextDetailsPayload {
+  readonly title?: unknown;
+  readonly wordCount?: unknown;
+}
 
 export function resolveDirectWriteTarget(
   activeBookId: string | undefined,
@@ -80,7 +87,7 @@ export function resolveDirectWriteTarget(
 }
 
 export function detectChatActionIntent(prompt: string): ChatActionIntent | null {
-  const normalized = prompt.trim().toLowerCase();
+  const normalized = prompt.trim();
   if (!normalized) return null;
   if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return { type: "write-next" };
   if (AUDIT_ACTION_PATTERN.test(normalized)) {
@@ -105,7 +112,7 @@ export function buildChatActionApiPath(intent: ChatActionIntent, bookId: string 
   return "/radar/scan";
 }
 
-function resolveRadarSummary(result: unknown): string {
+function resolveActionResultSummary(result: unknown): string {
   if (result == null) return "ok";
   if (typeof result === "string") return result;
   if (Array.isArray(result)) return `${result.length} items`;
@@ -114,14 +121,16 @@ function resolveRadarSummary(result: unknown): string {
     if (typeof value.summary === "string" && value.summary.trim()) return value.summary;
     if (Array.isArray(value.items)) return `${value.items.length} items`;
     const json = JSON.stringify(value);
-    return json.length > 120 ? `${json.slice(0, 117)}...` : json;
+    return json.length > ACTION_RESULT_SUMMARY_MAX_LENGTH
+      ? `${json.slice(0, ACTION_RESULT_SUMMARY_TRUNCATE_LENGTH)}...`
+      : json;
   }
   return String(result);
 }
 
 function buildChatActionSuccessMessage(intent: ChatActionIntent, isZh: boolean, payload: Record<string, unknown>): string {
   if (intent.type === "write-next") {
-    const details = payload.details as { title?: unknown; wordCount?: unknown } | undefined;
+    const details = payload.details as WriteNextDetailsPayload | undefined;
     const title = typeof details?.title === "string" ? details.title : `Chapter ${payload.chapterNumber ?? "?"}`;
     const wordCount = typeof details?.wordCount === "number" ? details.wordCount.toLocaleString() : "?";
     return `✓ ${title} (${wordCount} chars)`;
@@ -133,7 +142,7 @@ function buildChatActionSuccessMessage(intent: ChatActionIntent, isZh: boolean, 
     if (passed === false) return isZh ? `✓ 第${chapter}章审计完成：需修订` : `✓ Chapter ${chapter} audit done: needs revision`;
     return isZh ? `✓ 第${chapter}章审计完成` : `✓ Chapter ${chapter} audit completed`;
   }
-  const summary = resolveRadarSummary(payload.result ?? payload);
+  const summary = resolveActionResultSummary(payload.result ?? payload);
   return isZh ? `✓ 市场雷达完成：${summary}` : `✓ Market radar completed: ${summary}`;
 }
 
@@ -386,10 +395,10 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
     setMessages((prev) => [...prev, { role: "user", content: text, timestamp: Date.now() }]);
     setLoading(true);
 
-    const lower = text.toLowerCase();
+    const normalizedPrompt = text.trim();
 
     try {
-      const intent = detectChatActionIntent(lower);
+      const intent = detectChatActionIntent(normalizedPrompt);
       if (intent) {
         if (intent.type === "audit" && !intent.chapterNumber) {
           setLoading(false);
