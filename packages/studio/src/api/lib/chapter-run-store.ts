@@ -15,6 +15,10 @@ interface StoredChapterRunLedger {
   readonly runs: ChapterRunRecord[];
 }
 
+const VALID_ACTION_TYPES: readonly ChapterRunActionType[] = ["revise", "rewrite", "anti-detect", "resync"];
+const VALID_STATUSES: readonly ChapterRunStatus[] = ["running", "succeeded", "failed"];
+const VALID_DECISIONS: readonly ChapterRunDecision[] = ["applied", "unchanged", "failed"];
+
 export class ChapterRunStore {
   private readonly bookMutations = new Map<string, Promise<void>>();
 
@@ -80,9 +84,9 @@ export class ChapterRunStore {
       updated = {
         ...run,
         status: input.status,
-        decision: input.decision ?? (input.status === "failed" ? "failed" : run.decision),
-        unchangedReason: input.unchangedReason ?? null,
-        error: input.error ?? null,
+        decision: this.resolveDecision(run, input),
+        unchangedReason: input.unchangedReason !== undefined ? input.unchangedReason : run.unchangedReason,
+        error: input.error !== undefined ? input.error : run.error,
         finishedAt: timestamp,
         events: [...run.events, event],
       };
@@ -143,8 +147,9 @@ export class ChapterRunStore {
         && typeof run.runId === "string"
         && typeof run.bookId === "string"
         && typeof run.chapter === "number"
-        && typeof run.actionType === "string"
-        && typeof run.status === "string"
+        && VALID_ACTION_TYPES.includes(run.actionType as ChapterRunActionType)
+        && VALID_STATUSES.includes(run.status as ChapterRunStatus)
+        && (run.decision === null || VALID_DECISIONS.includes(run.decision as ChapterRunDecision))
         && Array.isArray(run.events),
       );
       return { schemaVersion: CHAPTER_RUN_SCHEMA_VERSION, runs };
@@ -161,6 +166,18 @@ export class ChapterRunStore {
 
   private getLedgerPath(bookId: string): string {
     return join(this.resolveBookDir(bookId), ".studio", "chapter-runs.v1.json");
+  }
+
+  private resolveDecision(
+    run: ChapterRunRecord,
+    input: {
+      readonly status: "succeeded" | "failed";
+      readonly decision?: ChapterRunDecision | null;
+    },
+  ): ChapterRunDecision | null {
+    if (input.decision !== undefined) return input.decision;
+    if (input.status === "failed") return "failed";
+    return run.decision;
   }
 
   private async waitForPendingMutations(bookId: string): Promise<void> {
@@ -188,6 +205,7 @@ export class ChapterRunStore {
 
 export function inferRunDecision(status: ChapterRunStatus, applied: unknown): ChapterRunDecision {
   if (status === "failed") return "failed";
+  if (applied === true) return "applied";
   if (applied === false) return "unchanged";
   return "applied";
 }

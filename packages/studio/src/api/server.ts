@@ -319,7 +319,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       unchangedReason: run.unchangedReason,
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
-      ...(run.error !== null ? { error: run.error } : {}),
+      error: run.error,
     };
   }
 
@@ -1293,19 +1293,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
     const actionType: ChapterRunActionType = reviseMode === "anti-detect" ? "anti-detect" : "revise";
-    const chapterRun = await chapterRunStore.createRun({
-      bookId: id,
-      chapter: chapterNum,
-      actionType,
-      appliedBrief,
-    });
+    let chapterRunId: string | undefined;
 
-    emitActionEvent("revise", "start", {
-      bookId: id,
-      chapterNumber: chapterNum,
-      briefUsed,
-    });
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType,
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
+      emitActionEvent("revise", "start", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
@@ -1356,7 +1358,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       );
       return c.json({
         status: "revising",
-        runId: chapterRun.runId,
+        runId: chapterRunId,
         bookId: id,
         chapter: chapterNum,
         mode: reviseMode,
@@ -1370,14 +1372,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         error,
       });
-      await completeChapterRun({
-        bookId: id,
-        runId: chapterRun.runId,
-        status: "failed",
-        error,
-        message: error,
-      });
-      return c.json({ error: String(e), runId: chapterRun.runId }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 
@@ -1691,18 +1695,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
-    const chapterRun = await chapterRunStore.createRun({
-      bookId: id,
-      chapter: chapterNum,
-      actionType: "rewrite",
-      appliedBrief,
-    });
-    emitActionEvent("rewrite", "start", {
-      bookId: id,
-      chapterNumber: chapterNum,
-      briefUsed,
-    });
+    let chapterRunId: string | undefined;
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType: "rewrite",
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
+      emitActionEvent("rewrite", "start", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(id, rollbackTarget);
       const pipeline = new PipelineRunner(await buildPipelineConfig({
@@ -1744,7 +1750,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           });
         },
       );
-      return c.json({ status: "rewriting", runId: chapterRun.runId, bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
+      return c.json({ status: "rewriting", runId: chapterRunId, bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       emitActionEvent("rewrite", "fail", {
@@ -1753,14 +1759,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         error,
       });
-      await completeChapterRun({
-        bookId: id,
-        runId: chapterRun.runId,
-        status: "failed",
-        error,
-        message: error,
-      });
-      return c.json({ error: String(e), runId: chapterRun.runId }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 
@@ -1772,14 +1780,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       .catch(() => ({}));
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
-    const chapterRun = await chapterRunStore.createRun({
-      bookId: id,
-      chapter: chapterNum,
-      actionType: "resync",
-      appliedBrief,
-    });
+    let chapterRunId: string | undefined;
 
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType: "resync",
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
       emitActionEvent("resync", "start", {
         bookId: id,
         chapterNumber: chapterNum,
@@ -1809,7 +1819,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           error: message,
           message,
         });
-        return c.json({ error: message, runId: chapterRun.runId }, 501);
+        return c.json({ error: message, runId: chapterRunId }, 501);
       }
 
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
@@ -1818,9 +1828,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         chapterNumber: chapterNum,
         briefUsed,
       });
-      const revised = typeof result === "object" && result !== null
-        ? (result as Record<string, unknown>)["revised"]
-        : undefined;
+      const revised = (result as { revised?: unknown } | null | undefined)?.revised;
       const decision = inferRunDecision("succeeded", revised);
       await completeChapterRun({
         bookId: id,
@@ -1830,9 +1838,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         unchangedReason: decision === "unchanged" ? "No truth artifacts required updates." : null,
       });
       if (result && typeof result === "object") {
-        return c.json({ ...(result as Record<string, unknown>), runId: chapterRun.runId, appliedBrief: appliedBrief ?? null });
+        return c.json({ ...(result as Record<string, unknown>), runId: chapterRunId, appliedBrief: appliedBrief ?? null });
       }
-      return c.json({ ok: true, result, runId: chapterRun.runId, appliedBrief: appliedBrief ?? null });
+      return c.json({ ok: true, result, runId: chapterRunId, appliedBrief: appliedBrief ?? null });
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       emitActionEvent("resync", "fail", {
@@ -1841,14 +1849,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         error,
       });
-      await completeChapterRun({
-        bookId: id,
-        runId: chapterRun.runId,
-        status: "failed",
-        error,
-        message: error,
-      });
-      return c.json({ error: String(e), runId: chapterRun.runId }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 
