@@ -5,6 +5,7 @@ import {
   deriveEventLevel,
   deriveEventSource,
   deriveRuntimeSessionViewModel,
+  deriveRuntimeBookRunViewModels,
   filterEvents,
   deriveEmptyHint,
   parseBookIds,
@@ -118,6 +119,17 @@ describe("filterEvents", () => {
     const result = filterEvents(messages, { level: "", source: "noop", bookId: "" });
     expect(result).toHaveLength(0);
   });
+
+  it("hides noisy heartbeat messages", () => {
+    const noisy: ReadonlyArray<SSEMessage> = [
+      makeMsg("ping", {}, 1),
+      makeMsg("log", { level: "debug", message: "ping null" }, 2),
+      makeMsg("log", { level: "info", message: "real log" }, 3),
+    ];
+    const result = filterEvents(noisy, { level: "", source: "", bookId: "" });
+    expect(result).toHaveLength(1);
+    expect((result[0]?.data as { message?: string })?.message).toBe("real log");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -227,6 +239,76 @@ describe("deriveRuntimeSessionViewModel", () => {
       recentError: "network timeout",
     });
   });
+
+  it("falls back to daemon session fields when no daemon:chapter event exists", () => {
+    const session: DaemonSessionSummary = {
+      state: "running",
+      running: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      currentBookId: "book-2",
+      currentChapter: 8,
+      completedCount: 12,
+      failedCount: 2,
+    };
+
+    const model = deriveRuntimeSessionViewModel(
+      session,
+      [],
+      new Map([["book-2", "多子多福"]]),
+    );
+
+    expect(model).toEqual({
+      state: "running",
+      currentBook: "多子多福",
+      currentChapter: "8",
+      completedCount: 12,
+      failedCount: 2,
+      recentError: "—",
+    });
+  });
+
+  it("falls back to activeBookIds when currentBookId is missing", () => {
+    const session: DaemonSessionSummary = {
+      state: "running",
+      running: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      activeBookIds: ["book-3"],
+      completedCount: 0,
+      failedCount: 0,
+    };
+
+    const model = deriveRuntimeSessionViewModel(
+      session,
+      [],
+      new Map([["book-3", "选定书籍"]]),
+    );
+
+    expect(model).toEqual({
+      state: "running",
+      currentBook: "选定书籍",
+      currentChapter: "待调度",
+      completedCount: 0,
+      failedCount: 0,
+      recentError: "—",
+    });
+  });
+
+  it("extracts chapter number from stage log when daemon:chapter event is not present", () => {
+    const session: DaemonSessionSummary = {
+      state: "running",
+      running: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      currentBookId: "book-2",
+      completedCount: 0,
+      failedCount: 0,
+    };
+    const model = deriveRuntimeSessionViewModel(
+      session,
+      [makeMsg("log", { level: "info", message: "阶段 1：创作正文（第14章）" })],
+      new Map([["book-2", "多子多福"]]),
+    );
+    expect(model.currentChapter).toBe("14");
+  });
 });
 
 describe("deriveRuntimeControlState", () => {
@@ -248,6 +330,47 @@ describe("deriveRuntimeControlState", () => {
       showPause: false,
       showResume: true,
       stopDisabled: true,
+    });
+  });
+});
+
+describe("deriveRuntimeBookRunViewModels", () => {
+  it("builds per-book panels from activeBookIds and daemon chapter events", () => {
+    const session: DaemonSessionSummary = {
+      state: "running",
+      running: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      activeBookIds: ["book-a", "book-b"],
+      currentBookId: "book-b",
+      completedCount: 3,
+      failedCount: 0,
+    };
+
+    const rows = deriveRuntimeBookRunViewModels(
+      session,
+      [
+        makeMsg("daemon:chapter", { bookId: "book-a", chapter: 11, status: "success" }),
+        makeMsg("daemon:chapter", { bookId: "book-b", chapter: 14, status: "running" }),
+      ],
+      new Map([
+        ["book-a", "书 A"],
+        ["book-b", "书 B"],
+      ]),
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      bookId: "book-b",
+      title: "书 B",
+      chapter: "14",
+      isCurrent: true,
+    });
+    expect(rows[1]).toMatchObject({
+      bookId: "book-a",
+      title: "书 A",
+      chapter: "11",
+      completedCount: 1,
+      isCurrent: false,
     });
   });
 });

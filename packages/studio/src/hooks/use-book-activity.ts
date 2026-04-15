@@ -37,8 +37,11 @@ const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
 
 const DAEMON_STATUS_REFRESH_EVENTS = new Set([
   "daemon:started",
+  "daemon:paused",
+  "daemon:resumed",
   "daemon:stopped",
   "daemon:error",
+  "daemon:chapter",
 ]);
 
 export interface BookActivity {

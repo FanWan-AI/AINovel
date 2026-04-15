@@ -44,6 +44,15 @@ export interface RuntimeSessionViewModel {
   readonly recentError: string;
 }
 
+export interface RuntimeBookRunViewModel {
+  readonly bookId: string;
+  readonly title: string;
+  readonly chapter: string;
+  readonly completedCount: number;
+  readonly status: string;
+  readonly isCurrent: boolean;
+}
+
 export interface RuntimeControlState {
   readonly showStart: boolean;
   readonly showPause: boolean;
@@ -97,6 +106,7 @@ export function filterEvents(
   filter: EventFilter,
 ): ReadonlyArray<SSEMessage> {
   return messages.filter((msg) => {
+    if (isNoisyEvent(msg)) return false;
     if (filter.level && deriveEventLevel(msg) !== filter.level) return false;
     if (filter.source && deriveEventSource(msg) !== filter.source) return false;
     if (filter.bookId) {
@@ -104,6 +114,86 @@ export function filterEvents(
       if (typeof data?.bookId !== "string" || data.bookId !== filter.bookId) return false;
     }
     return true;
+  });
+}
+
+function extractChapterNumber(msg: SSEMessage): number | undefined {
+  const data = msg.data as Record<string, unknown> | null;
+  const chapterNumber = data?.chapterNumber;
+  if (typeof chapterNumber === "number" && Number.isFinite(chapterNumber)) {
+    return chapterNumber;
+  }
+  const chapter = data?.chapter;
+  if (typeof chapter === "number" && Number.isFinite(chapter)) {
+    return chapter;
+  }
+  const message = typeof data?.message === "string" ? data.message : "";
+  if (message) {
+    const match = message.match(/第\s*(\d+)\s*章/u);
+    if (match) {
+      return Number.parseInt(match[1] ?? "", 10);
+    }
+  }
+  return undefined;
+}
+
+function isNoisyEvent(msg: SSEMessage): boolean {
+  if (msg.event === "ping") return true;
+  if (msg.event !== "log") return false;
+  const data = msg.data as Record<string, unknown> | null;
+  const message = typeof data?.message === "string" ? data.message.trim().toLowerCase() : "";
+  return message === "ping null" || message === "ping";
+}
+
+function getBookId(msg: SSEMessage): string | undefined {
+  const data = msg.data as Record<string, unknown> | null;
+  return typeof data?.bookId === "string" ? data.bookId : undefined;
+}
+
+export function deriveRuntimeBookRunViewModels(
+  session: DaemonSessionSummary | null,
+  messages: ReadonlyArray<SSEMessage>,
+  bookTitleById: ReadonlyMap<string, string> = new Map(),
+): ReadonlyArray<RuntimeBookRunViewModel> {
+  const cleanMessages = messages.filter((msg) => !isNoisyEvent(msg));
+  const bookIds = new Set<string>(session?.activeBookIds ?? []);
+
+  for (const msg of cleanMessages) {
+    const bookId = getBookId(msg);
+    if (bookId) bookIds.add(bookId);
+  }
+
+  if (session?.currentBookId) {
+    bookIds.add(session.currentBookId);
+  }
+
+  const list = [...bookIds].map((bookId) => {
+    const byBook = cleanMessages.filter((msg) => getBookId(msg) === bookId);
+    const chapterEvents = byBook
+      .filter((msg) => msg.event === "daemon:chapter")
+      .map((msg) => msg.data as Record<string, unknown>);
+    const latestChapterEvent = chapterEvents.at(-1);
+    const latestChapter = [...byBook].reverse().map(extractChapterNumber).find((v) => typeof v === "number");
+    const completedCount = chapterEvents.filter(
+      (data) => typeof data.status === "string" && COMPLETED_STATUSES.includes(data.status),
+    ).length;
+    const rawStatus = typeof latestChapterEvent?.status === "string"
+      ? latestChapterEvent.status
+      : (bookId === session?.currentBookId && session?.running ? "running" : "waiting");
+    return {
+      bookId,
+      title: bookTitleById.get(bookId) ?? bookId,
+      chapter: typeof latestChapter === "number" ? String(latestChapter) : "待调度",
+      completedCount,
+      status: rawStatus,
+      isCurrent: bookId === session?.currentBookId,
+    } satisfies RuntimeBookRunViewModel;
+  });
+
+  return list.sort((a, b) => {
+    if (a.isCurrent && !b.isCurrent) return -1;
+    if (!a.isCurrent && b.isCurrent) return 1;
+    return a.title.localeCompare(b.title, "zh-CN");
   });
 }
 
@@ -170,18 +260,41 @@ export function buildAdvancedPlanPayload(form: RuntimeAdvancedForm): {
 export function deriveRuntimeSessionViewModel(
   session: DaemonSessionSummary | null,
   messages: ReadonlyArray<SSEMessage>,
+  bookTitleById: ReadonlyMap<string, string> = new Map(),
 ): RuntimeSessionViewModel {
-  const chapterEvents = messages
+  const cleanMessages = messages.filter((msg) => !isNoisyEvent(msg));
+  const chapterEvents = cleanMessages
     .filter((msg) => msg.event === "daemon:chapter")
     .map((msg) => msg.data as Record<string, unknown>);
   const latestChapter = chapterEvents.at(-1);
-  const currentBook = typeof latestChapter?.bookId === "string" ? latestChapter.bookId : "—";
-  const currentChapter = typeof latestChapter?.chapter === "number" ? String(latestChapter.chapter) : "—";
-  const completedCount = chapterEvents.filter(
+  const eventCurrentBookId = typeof latestChapter?.bookId === "string" ? latestChapter.bookId : undefined;
+  const sessionCurrentBookId = typeof session?.currentBookId === "string" ? session.currentBookId : undefined;
+  const fallbackBookId = session?.activeBookIds?.[0];
+  const currentBookId = eventCurrentBookId ?? sessionCurrentBookId ?? fallbackBookId;
+  const currentBookTitle = currentBookId ? bookTitleById.get(currentBookId) : undefined;
+  const currentBook = currentBookId
+    ? currentBookTitle ?? currentBookId
+    : "—";
+  const latestChapterFromMessages = [...cleanMessages]
+    .reverse()
+    .map(extractChapterNumber)
+    .find((value) => typeof value === "number");
+  const currentChapter = typeof latestChapter?.chapter === "number"
+    ? String(latestChapter.chapter)
+    : typeof latestChapterFromMessages === "number"
+      ? String(latestChapterFromMessages)
+    : typeof session?.currentChapter === "number"
+      ? String(session.currentChapter)
+      : session?.state === "running" && currentBookId
+        ? "待调度"
+        : "—";
+  const completedFromEvents = chapterEvents.filter(
     (data) => typeof data.status === "string" && COMPLETED_STATUSES.includes(data.status),
   ).length;
-  const failedCount = messages.filter((msg) => deriveEventLevel(msg) === "error").length;
-  const latestErrorMessage = [...messages].reverse().find((msg) => deriveEventLevel(msg) === "error");
+  const completedCount = session?.completedCount ?? completedFromEvents;
+  const failedFromEvents = cleanMessages.filter((msg) => deriveEventLevel(msg) === "error").length;
+  const failedCount = session?.failedCount ?? failedFromEvents;
+  const latestErrorMessage = [...cleanMessages].reverse().find((msg) => deriveEventLevel(msg) === "error");
   const latestData = latestErrorMessage?.data as Record<string, unknown> | undefined;
   const recentError = session?.lastError?.message
     ?? (typeof latestData?.error === "string" ? latestData.error : "");
@@ -254,6 +367,17 @@ export function RuntimeCenter({
     void refetchDaemon();
   }, [refetchDaemon, sse.messages]);
 
+  // Poll daemon session while running to keep status cards fresh even if SSE is sparse.
+  useEffect(() => {
+    if (!daemonSession?.running) return;
+    const timer = window.setInterval(() => {
+      void refetchDaemon();
+    }, 3000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [daemonSession?.running, refetchDaemon]);
+
   // Auto-scroll unless paused
   useEffect(() => {
     if (streamPaused) return;
@@ -263,7 +387,15 @@ export function RuntimeCenter({
   const sessionState = daemonSession?.state ?? "idle";
   const isRunning = daemonSession?.running ?? false;
   const controls = deriveRuntimeControlState(sessionState, loading);
-  const sessionView = deriveRuntimeSessionViewModel(daemonSession ?? null, sse.messages);
+  const bookTitleById = useMemo(
+    () => new Map((booksData?.books ?? []).map((book) => [book.id, book.title] as const)),
+    [booksData?.books],
+  );
+  const sessionView = deriveRuntimeSessionViewModel(daemonSession ?? null, sse.messages, bookTitleById);
+  const bookRunViews = useMemo(
+    () => deriveRuntimeBookRunViewModels(daemonSession ?? null, sse.messages, bookTitleById),
+    [daemonSession, sse.messages, bookTitleById],
+  );
   const activeBooks = useMemo(
     () => (booksData?.books ?? []).filter((book) => book.status === "active"),
     [booksData?.books],
@@ -432,6 +564,54 @@ export function RuntimeCenter({
             <div className="font-medium break-all">{sessionView.recentError}</div>
           </div>
         </div>
+
+        {bookRunViews.length > 0 && (
+          <div className="rounded-md border border-border/70 p-3 space-y-2">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
+              {t("rc.multiBookRuns")}
+            </div>
+            <div className="space-y-2">
+              {bookRunViews.map((item) => {
+                const statusText = item.status === "running"
+                  ? t("rc.bookStatus.running")
+                  : item.status === "success" || item.status === "done" || item.status === "completed"
+                    ? t("rc.bookStatus.completed")
+                    : item.status === "error" || item.status === "failed" || item.status === "fail"
+                      ? t("rc.bookStatus.failed")
+                      : t("rc.bookStatus.waiting");
+                return (
+                  <div
+                    key={item.bookId}
+                    className={`rounded-md border p-3 ${item.isCurrent ? "border-primary/40 bg-primary/5" : "border-border/70"}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-medium break-all">{item.title}</div>
+                      {item.isCurrent && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/15 text-primary">
+                          {t("rc.currentBookBadge")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                      <div>
+                        <div className="text-muted-foreground">{t("rc.summaryCurrentChapter")}</div>
+                        <div className="font-medium">{item.chapter}</div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground">{t("rc.summaryCompleted")}</div>
+                        <div className="font-medium">{item.completedCount}</div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground">{t("book.status")}</div>
+                        <div className="font-medium">{statusText}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {!isRunning && (
           <div className="space-y-3 border border-border/70 rounded-md p-4">

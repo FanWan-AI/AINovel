@@ -441,7 +441,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     const status = bookCreateStatus.get(id);
     if (!status) {
-      return c.json({ status: "missing" }, 404);
+      return c.json({ status: "missing" });
     }
     return c.json(status);
   });
@@ -860,19 +860,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     state: "idle",
     running: false,
     updatedAt: new Date().toISOString(),
+    completedCount: 0,
+    failedCount: 0,
   };
 
   function updateDaemonSession(
     state: DaemonSessionState,
-    options?: { lastError?: DaemonSessionErrorSummary },
+    options?: Partial<Omit<DaemonSessionSummary, "state" | "running" | "updatedAt">>,
   ): DaemonSessionSummary {
-    const lastError = options?.lastError ?? daemonSession.lastError;
-
     daemonSession = {
+      ...daemonSession,
+      ...(options ?? {}),
       state,
       running: activeDaemonStates.has(state),
       updatedAt: new Date().toISOString(),
-      ...(lastError !== undefined ? { lastError } : {}),
     };
     return daemonSession;
   }
@@ -890,22 +891,35 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const daemonError = (code: string, message: string) =>
     ({ error: { code, message } }) as const;
 
-  const buildSchedulerConfig = async () => {
+  const buildSchedulerConfig = async (plan?: RunPlan) => {
     const currentConfig = await loadCurrentProjectConfig();
+    const schedule = plan?.schedule;
+    const writeCron = schedule?.everyMinutes ? `*/${Math.max(1, schedule.everyMinutes)} * * * *` : currentConfig.daemon.schedule.writeCron;
+    const cooldownAfterChapterMs = schedule?.cooldownSeconds !== undefined
+      ? Math.max(0, schedule.cooldownSeconds) * 1000
+      : currentConfig.daemon.cooldownAfterChapterMs;
+    const maxConcurrentBooks = plan?.maxConcurrentBooks ?? currentConfig.daemon.maxConcurrentBooks;
     return {
       ...(await buildPipelineConfig()),
       radarCron: currentConfig.daemon.schedule.radarCron,
-      writeCron: currentConfig.daemon.schedule.writeCron,
-      maxConcurrentBooks: currentConfig.daemon.maxConcurrentBooks,
+      writeCron,
+      maxConcurrentBooks,
       chaptersPerCycle: currentConfig.daemon.chaptersPerCycle,
       retryDelayMs: currentConfig.daemon.retryDelayMs,
-      cooldownAfterChapterMs: currentConfig.daemon.cooldownAfterChapterMs,
+      cooldownAfterChapterMs,
       maxChaptersPerDay: currentConfig.daemon.maxChaptersPerDay,
       onChapterComplete: (bookId: string, chapter: number, status: string) => {
+        updateDaemonSession("running", {
+          currentBookId: bookId,
+          currentChapter: chapter,
+          completedCount: (daemonSession.completedCount ?? 0) + 1,
+        });
         broadcast("daemon:chapter", { bookId, chapter, status });
       },
       onError: (bookId: string, error: Error) => {
         updateDaemonSession("error", {
+          currentBookId: bookId === "scheduler" ? daemonSession.currentBookId : bookId,
+          failedCount: (daemonSession.failedCount ?? 0) + 1,
           lastError: { message: error.message, timestamp: new Date().toISOString() },
         });
         broadcast("daemon:error", { bookId, error: error.message });
@@ -915,11 +929,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   const startDaemonWithPlan = async (plan: RunPlan | undefined, planId: string | undefined) => {
     const { Scheduler } = await import("@actalk/inkos-core");
-    const scheduler = new Scheduler(await buildSchedulerConfig());
+    const scheduler = new Scheduler(await buildSchedulerConfig(plan));
     schedulerInstance = scheduler;
     activeRunPlan = plan;
     activePlanId = planId;
-    updateDaemonSession("running");
+    const activeBookIds = plan?.bookScope.type === "book-list" ? plan.bookScope.bookIds : undefined;
+    const currentBookId = activeBookIds?.[0];
+    updateDaemonSession("running", {
+      mode: plan?.mode ?? "managed-default",
+      activePlanId: planId,
+      activeBookIds,
+      currentBookId,
+      currentChapter: undefined,
+      completedCount: 0,
+      failedCount: 0,
+      lastError: undefined,
+    });
     broadcast("daemon:started", { ...(planId !== undefined ? { planId } : {}), mode: plan?.mode ?? "managed-default" });
     void scheduler.start(plan).catch((e) => {
       const error = e instanceof Error ? e : new Error(String(e));
@@ -929,6 +954,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         broadcast("daemon:stopped", {});
       }
       updateDaemonSession("error", {
+        failedCount: (daemonSession.failedCount ?? 0) + 1,
         lastError: { message: error.message, timestamp: new Date().toISOString() },
       });
       broadcast("daemon:error", { bookId: "scheduler", error: error.message });
@@ -966,7 +992,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json(daemonError("DAEMON_PLAN_NOT_FOUND", `Daemon plan "${requestedPlanId}" not found.`), 404);
     }
 
-    updateDaemonSession("planning");
+    updateDaemonSession("planning", {
+      mode: requestedPlan?.mode ?? "managed-default",
+      activePlanId: requestedPlanId,
+    });
     try {
       await startDaemonWithPlan(requestedPlan, requestedPlanId);
       return c.json({

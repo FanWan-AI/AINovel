@@ -65,8 +65,8 @@ export async function waitForBookReady(
   bookId: string,
   options: WaitForBookReadyOptions = {},
 ): Promise<void> {
-  const fetchBook = options.fetchBook ?? ((id: string) => fetchJson(`/books/${id}`));
-  const fetchStatus = options.fetchStatus ?? ((id: string) => fetchJson<{ status: string; error?: string }>(`/books/${id}/create-status`));
+  const fetchBook = options.fetchBook ?? ((id: string) => fetchJson(`/books/${encodeURIComponent(id)}`));
+  const fetchStatus = options.fetchStatus ?? ((id: string) => fetchJson<{ status: string; error?: string }>(`/books/${encodeURIComponent(id)}/create-status`));
   const maxAttempts = options.maxAttempts ?? DEFAULT_BOOK_READY_MAX_ATTEMPTS;
   const delayMs = options.delayMs ?? DEFAULT_BOOK_READY_DELAY_MS;
   const waitImpl = options.waitImpl ?? ((ms: number) => new Promise<void>((resolve) => {

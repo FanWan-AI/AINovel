@@ -17,8 +17,22 @@ export const STUDIO_SSE_EVENTS = [
   "draft:start",
   "draft:complete",
   "draft:error",
+  "plan:start",
+  "plan:success",
+  "plan:fail",
+  "compose:start",
+  "compose:success",
+  "compose:fail",
+  "write-next:start",
+  "write-next:success",
+  "write-next:fail",
+  "resync:start",
+  "resync:complete",
+  "resync:error",
   "daemon:chapter",
   "daemon:started",
+  "daemon:paused",
+  "daemon:resumed",
   "daemon:stopped",
   "daemon:error",
   "agent:start",
@@ -66,6 +80,9 @@ export function useSSE(url = "/api/events") {
     es.onerror = () => setConnected(false);
 
     const handleEvent = (e: MessageEvent) => {
+      if (e.type === "ping") {
+        return;
+      }
       try {
         const data = e.data ? JSON.parse(e.data) : null;
         setMessages((prev) => [...prev.slice(-99), { event: e.type, data, timestamp: Date.now() }]);

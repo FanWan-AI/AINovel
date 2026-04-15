@@ -101,8 +101,10 @@ describe("shouldRefetchBookCollections", () => {
 describe("shouldRefetchDaemonStatus", () => {
   it("refreshes daemon status for daemon terminal events", () => {
     expect(shouldRefetchDaemonStatus(msg("daemon:started", {}, 1))).toBe(true);
+    expect(shouldRefetchDaemonStatus(msg("daemon:paused", {}, 1))).toBe(true);
+    expect(shouldRefetchDaemonStatus(msg("daemon:resumed", {}, 1))).toBe(true);
     expect(shouldRefetchDaemonStatus(msg("daemon:stopped", {}, 1))).toBe(true);
     expect(shouldRefetchDaemonStatus(msg("daemon:error", {}, 1))).toBe(true);
-    expect(shouldRefetchDaemonStatus(msg("daemon:chapter", {}, 1))).toBe(false);
+    expect(shouldRefetchDaemonStatus(msg("daemon:chapter", {}, 1))).toBe(true);
   });
 });

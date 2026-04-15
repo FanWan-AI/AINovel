@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatBar";
 import { Dashboard } from "./pages/Dashboard";
@@ -27,6 +27,7 @@ import { useI18n } from "./hooks/use-i18n";
 import { postApi, useApi } from "./hooks/use-api";
 import { useCreateFlow } from "./hooks/use-create-flow";
 import { Sun, Moon, Bell, MessageSquare } from "lucide-react";
+import type { SSEMessage } from "./hooks/use-sse";
 
 export type Route =
   | { page: "dashboard" }
@@ -62,6 +63,61 @@ export function deriveActiveBookId(route: Route): string | undefined {
     : undefined;
 }
 
+type AppNotificationLevel = "info" | "success" | "error";
+
+interface AppNotification {
+  readonly id: string;
+  readonly timestamp: number;
+  readonly level: AppNotificationLevel;
+  readonly title: string;
+  readonly detail: string;
+}
+
+function toNotification(msg: SSEMessage, index: number): AppNotification | null {
+  const data = msg.data as Record<string, unknown> | null;
+  const bookId = typeof data?.bookId === "string" ? data.bookId : "";
+  const bookPrefix = bookId ? `【${bookId}】` : "";
+
+  const byEvent: Record<string, { level: AppNotificationLevel; title: string }> = {
+    "book:creating": { level: "info", title: "书籍创建中" },
+    "book:created": { level: "success", title: "书籍创建完成" },
+    "book:error": { level: "error", title: "书籍创建失败" },
+    "write:start": { level: "info", title: "章节写作已启动" },
+    "write:complete": { level: "success", title: "章节写作完成" },
+    "write:error": { level: "error", title: "章节写作失败" },
+    "draft:start": { level: "info", title: "草稿任务已启动" },
+    "draft:complete": { level: "success", title: "草稿任务完成" },
+    "draft:error": { level: "error", title: "草稿任务失败" },
+    "daemon:started": { level: "success", title: "守护进程已启动" },
+    "daemon:stopped": { level: "info", title: "守护进程已停止" },
+    "daemon:error": { level: "error", title: "守护进程错误" },
+    "daemon:chapter": { level: "info", title: "守护进程章节进度" },
+  };
+
+  const mapped = byEvent[msg.event];
+  if (!mapped) {
+    return null;
+  }
+
+  const fallbackDetail = typeof data?.message === "string" ? data.message : msg.event;
+  const chapter = typeof data?.chapter === "number"
+    ? `第 ${data.chapter} 章`
+    : typeof data?.chapterNumber === "number"
+      ? `第 ${data.chapterNumber} 章`
+      : "";
+  const errorText = typeof data?.error === "string" ? data.error : "";
+  const status = typeof data?.status === "string" ? data.status : "";
+  const detail = [bookPrefix, chapter, errorText || status || fallbackDetail].filter(Boolean).join(" ");
+
+  return {
+    id: `${msg.timestamp}-${msg.event}-${index}`,
+    timestamp: msg.timestamp,
+    level: mapped.level,
+    title: mapped.title,
+    detail,
+  };
+}
+
 export function App() {
   const [route, setRoute] = useState<Route>({ page: "dashboard" });
   const sse = useSSE();
@@ -71,7 +127,10 @@ export function App() {
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notificationReadAt, setNotificationReadAt] = useState(Date.now());
   const createFlow = useCreateFlow();
+  const notificationPanelRef = useRef<HTMLDivElement | null>(null);
 
   const isDark = theme === "dark";
 
@@ -120,6 +179,37 @@ export function App() {
     route.page === "truth"
       ? "max-w-[1400px] mx-auto px-4 py-8 md:px-6 lg:px-8 lg:py-10 fade-in"
       : "max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in";
+  const notifications = useMemo(
+    () => sse.messages
+      .slice(-80)
+      .map((msg, index) => toNotification(msg, index))
+      .filter((item): item is AppNotification => item !== null)
+      .reverse(),
+    [sse.messages],
+  );
+  const unreadNotifications = notifications.filter((item) => item.timestamp > notificationReadAt).length;
+
+  useEffect(() => {
+    if (!notificationOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (notificationPanelRef.current && !notificationPanelRef.current.contains(target)) {
+        setNotificationOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [notificationOpen]);
+
+  useEffect(() => {
+    if (notificationOpen) {
+      setNotificationReadAt(Date.now());
+    }
+  }, [notificationOpen]);
 
   if (!ready) {
     return (
@@ -166,10 +256,69 @@ export function App() {
               {isDark ? <Sun size={16} /> : <Moon size={16} />}
             </button>
 
-            <button className="w-8 h-8 flex items-center justify-center rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-all relative">
-              <Bell size={16} />
-              <span className="absolute top-1 right-1 w-2 h-2 bg-primary rounded-full border-2 border-background" />
-            </button>
+            <div className="relative" ref={notificationPanelRef}>
+              <button
+                onClick={() => setNotificationOpen((prev) => !prev)}
+                className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all relative ${notificationOpen
+                  ? "bg-primary/10 text-primary"
+                  : "bg-secondary text-muted-foreground hover:text-foreground"
+                }`}
+                title="通知中心"
+                aria-label="打开通知中心"
+              >
+                <Bell size={16} />
+                {(unreadNotifications > 0 || !sse.connected) && (
+                  <span className={`absolute top-0.5 right-0.5 min-w-4 h-4 px-1 rounded-full border text-[10px] leading-4 text-center font-semibold ${sse.connected
+                    ? "bg-primary text-primary-foreground border-background"
+                    : "bg-destructive text-destructive-foreground border-background"
+                  }`}>
+                    {unreadNotifications > 0 ? Math.min(unreadNotifications, 99) : "!"}
+                  </span>
+                )}
+              </button>
+
+              {notificationOpen && (
+                <div className="absolute right-0 top-10 w-[380px] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-card shadow-xl z-50">
+                  <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">通知中心</div>
+                      <div className="text-xs text-muted-foreground">
+                        {sse.connected ? "实时连接已建立" : "实时连接中断，正在重连"}
+                      </div>
+                    </div>
+                    <button
+                      className="text-xs px-2 py-1 rounded-md bg-secondary text-muted-foreground hover:text-foreground"
+                      onClick={() => setNotificationReadAt(Date.now())}
+                    >
+                      全部标记已读
+                    </button>
+                  </div>
+                  <div className="max-h-[360px] overflow-y-auto p-2">
+                    {notifications.length > 0 ? notifications.map((item) => (
+                      <div
+                        key={item.id}
+                        className={`rounded-lg px-3 py-2.5 mb-1 border ${item.level === "error"
+                          ? "border-destructive/30 bg-destructive/5"
+                          : item.level === "success"
+                            ? "border-emerald-500/20 bg-emerald-500/5"
+                            : "border-border/60 bg-background/40"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium">{item.title}</span>
+                          <span className="text-[11px] text-muted-foreground tabular-nums">
+                            {new Date(item.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1 break-all">{item.detail}</div>
+                      </div>
+                    )) : (
+                      <div className="text-sm text-muted-foreground text-center py-8">暂无通知</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Chat Panel Toggle */}
             <button

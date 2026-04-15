@@ -194,6 +194,13 @@ export interface DaemonSessionSummary {
   readonly state: DaemonSessionState;
   readonly running: boolean;
   readonly updatedAt: string;
+  readonly mode?: "managed-default" | "custom-plan";
+  readonly activePlanId?: string;
+  readonly activeBookIds?: ReadonlyArray<string>;
+  readonly currentBookId?: string;
+  readonly currentChapter?: number;
+  readonly completedCount?: number;
+  readonly failedCount?: number;
   readonly lastError?: DaemonSessionErrorSummary;
 }
 

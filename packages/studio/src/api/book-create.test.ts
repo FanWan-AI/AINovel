@@ -50,6 +50,30 @@ describe("buildStudioBookConfig", () => {
     expect(config.language).toBe("en");
     expect(config.id).toBe("english-book");
   });
+
+  it("trims leading and trailing separators when deriving id", () => {
+    const config = buildStudioBookConfig(
+      {
+        title: "  《多子多福》  ",
+        genre: "xuanhuan",
+      },
+      "2026-03-30T00:00:00.000Z",
+    );
+
+    expect(config.id).toBe("多子多福");
+  });
+
+  it("uses deterministic fallback id when title does not contain valid characters", () => {
+    const config = buildStudioBookConfig(
+      {
+        title: "@@@",
+        genre: "other",
+      },
+      "2026-03-30T00:00:00.000Z",
+    );
+
+    expect(config.id).toBe("book-202603300000");
+  });
 });
 
 describe("waitForStudioBookReady", () => {
