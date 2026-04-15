@@ -2,7 +2,7 @@ import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import { useEffect, useMemo, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import type { SSEMessage } from "../hooks/use-sse";
+import { normalizeStudioEventName, type SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -61,11 +61,32 @@ type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
 type ActionNoticeTone = "success" | "error" | "info";
+type ChapterLifecycleAction = "revise" | "rewrite" | "anti-detect" | "resync";
+type ChapterLifecycleStage = "start" | "progress" | "success" | "fail" | "unchanged";
 
 interface ChapterActionState {
   readonly kind: ChapterActionKind;
   readonly chapterNum: number;
   readonly mode?: ReviseMode;
+}
+
+export function parseChapterLifecycleEvent(event: string): { action: ChapterLifecycleAction; stage: ChapterLifecycleStage } | null {
+  const normalizedEvent = normalizeStudioEventName(event);
+  const [action, stage] = normalizedEvent.split(":");
+  if (!action || !stage) return null;
+  if (action !== "revise" && action !== "rewrite" && action !== "anti-detect" && action !== "resync") return null;
+  if (stage !== "start" && stage !== "progress" && stage !== "success" && stage !== "fail" && stage !== "unchanged") return null;
+  return { action, stage };
+}
+
+function resolveChapterLifecycleStage(
+  stage: ChapterLifecycleStage | undefined,
+  decision: string | undefined,
+): ChapterLifecycleStage | undefined {
+  if (stage === "success" && decision === "unchanged") {
+    return "unchanged";
+  }
+  return stage;
 }
 
 interface Nav {
@@ -146,46 +167,61 @@ export function BookDetail({
     const recent = sse.messages.at(-1);
     if (!recent) return;
 
-    const data = recent.data as { bookId?: string; chapter?: number; error?: string; fixedCount?: number } | null;
+    const data = recent.data as {
+      bookId?: string;
+      chapter?: number;
+      chapterNumber?: number;
+      decision?: string;
+      error?: string;
+      message?: string;
+      fixedCount?: number;
+    } | null;
     if (data?.bookId !== bookId) return;
+    const normalizedEvent = normalizeStudioEventName(recent.event);
 
-    if (recent.event === "write:start") {
+    if (normalizedEvent === "write:start") {
       setWriteRequestPending(false);
       return;
     }
 
-    if (recent.event === "draft:start") {
+    if (normalizedEvent === "draft:start") {
       setDraftRequestPending(false);
       return;
     }
 
-    if (recent.event === "revise:complete") {
-      setActionNotice({
-        tone: "success",
-        message: `${t("chapterAction.noticeReviseDone")} #${data?.chapter ?? "-"}`,
-        detail: typeof data?.fixedCount === "number"
-          ? `${data.fixedCount}${t("chapterAction.noticeIssuesUnit")}`
-          : undefined,
-      });
-    }
-    if (recent.event === "rewrite:complete") {
-      setActionNotice({
-        tone: "success",
-        message: t("chapterAction.noticeRewriteDone"),
-      });
-    }
-    if (recent.event === "resync:complete") {
-      setActionNotice({
-        tone: "success",
-        message: t("chapterAction.noticeResyncDone"),
-      });
-    }
-    if (recent.event === "revise:error" || recent.event === "rewrite:error" || recent.event === "resync:error") {
+    const chapterEvent = parseChapterLifecycleEvent(recent.event);
+    const chapterNumber = data?.chapterNumber ?? data?.chapter;
+    const stage = resolveChapterLifecycleStage(chapterEvent?.stage, data?.decision);
+    if (stage === "fail") {
       setActionNotice({
         tone: "error",
         message: t("chapterAction.noticeFailed"),
-        detail: data?.error,
+        detail: data?.error ?? data?.message,
       });
+    } else if ((stage === "success" || stage === "unchanged") && chapterEvent) {
+      if (chapterEvent.action === "rewrite") {
+        setActionNotice({
+          tone: stage === "unchanged" ? "info" : "success",
+          message: chapterNumber ? `${t("chapterAction.noticeRewriteDone")} #${chapterNumber}` : t("chapterAction.noticeRewriteDone"),
+          detail: stage === "unchanged" ? data?.message : undefined,
+        });
+      } else if (chapterEvent.action === "resync") {
+        setActionNotice({
+          tone: stage === "unchanged" ? "info" : "success",
+          message: chapterNumber ? `${t("chapterAction.noticeResyncDone")} #${chapterNumber}` : t("chapterAction.noticeResyncDone"),
+          detail: stage === "unchanged" ? data?.message : undefined,
+        });
+      } else {
+        setActionNotice({
+          tone: stage === "unchanged" ? "info" : "success",
+          message: chapterNumber ? `${t("chapterAction.noticeReviseDone")} #${chapterNumber}` : t("chapterAction.noticeReviseDone"),
+          detail: stage === "unchanged"
+            ? data?.message
+            : typeof data?.fixedCount === "number"
+              ? `${data.fixedCount}${t("chapterAction.noticeIssuesUnit")}`
+              : undefined,
+        });
+      }
     }
 
     if (shouldRefetchBookView(recent, bookId)) {

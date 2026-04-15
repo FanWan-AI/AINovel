@@ -40,9 +40,19 @@ describe("deriveEventLevel", () => {
     expect(deriveEventLevel(makeMsg("daemon:error"))).toBe("error");
   });
 
+  it("maps legacy chapter action lifecycle suffixes to semantic levels", () => {
+    expect(deriveEventLevel(makeMsg("rewrite:error"))).toBe("error");
+    expect(deriveEventLevel(makeMsg("resync:complete"))).toBe("info");
+  });
+
   it("infers error from semantic fail events", () => {
     expect(deriveEventLevel(makeMsg("rewrite:fail"))).toBe("error");
     expect(deriveEventLevel(makeMsg("revise:fail"))).toBe("error");
+  });
+
+  it("treats progress and unchanged lifecycle events as info", () => {
+    expect(deriveEventLevel(makeMsg("anti-detect:progress"))).toBe("info");
+    expect(deriveEventLevel(makeMsg("resync:unchanged"))).toBe("info");
   });
 
   it("infers info from events ending in :complete or :start", () => {

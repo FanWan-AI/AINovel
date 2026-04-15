@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
-import type { SSEMessage } from "../hooks/use-sse";
+import { normalizeStudioEventName, type SSEMessage } from "../hooks/use-sse";
 import { shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 import type { DaemonSessionState, DaemonSessionSummary } from "../shared/contracts";
 import { BookScopePicker } from "../components/daemon/BookScopePicker";
@@ -78,14 +78,17 @@ const COMPLETED_STATUSES = ["done", "complete", "completed", "success"];
  */
 export function deriveEventLevel(msg: SSEMessage): string {
   const data = msg.data as Record<string, unknown> | null;
+  const normalizedEvent = normalizeStudioEventName(msg.event);
   if (msg.event === "log" && typeof data?.level === "string") {
     return data.level.toLowerCase();
   }
-  if (msg.event.endsWith(":error")) return "error";
-  if (msg.event.endsWith(":fail")) return "error";
-  if (msg.event.endsWith(":complete")) return "info";
-  if (msg.event.endsWith(":success")) return "info";
-  if (msg.event.endsWith(":start")) return "info";
+  if (normalizedEvent.endsWith(":error")) return "error";
+  if (normalizedEvent.endsWith(":fail")) return "error";
+  if (normalizedEvent.endsWith(":complete")) return "info";
+  if (normalizedEvent.endsWith(":success")) return "info";
+  if (normalizedEvent.endsWith(":start")) return "info";
+  if (normalizedEvent.endsWith(":progress")) return "info";
+  if (normalizedEvent.endsWith(":unchanged")) return "info";
   return "debug";
 }
 
