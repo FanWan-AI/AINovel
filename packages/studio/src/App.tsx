@@ -24,7 +24,7 @@ import { useTheme } from "./hooks/use-theme";
 import { useI18n } from "./hooks/use-i18n";
 import { postApi, useApi } from "./hooks/use-api";
 import { useCreateFlow } from "./hooks/use-create-flow";
-import { Sun, Moon, Bell, MessageSquare } from "lucide-react";
+import { Sun, Moon, Bell, MessageSquare, Settings as SettingsIcon } from "lucide-react";
 import type { SSEMessage } from "./hooks/use-sse";
 
 export type Route =
@@ -97,6 +97,33 @@ export function mapRouteToActivePage(route: Route, activeBookId?: string): strin
   }
 
   return route.page;
+}
+
+interface HeaderQuickAction {
+  key: "assistant" | "settings";
+  active: boolean;
+  onClick: () => void;
+}
+
+export function buildHeaderQuickActions({
+  currentRoute,
+  nav,
+}: {
+  currentRoute: Route;
+  nav: { toAssistant: () => void; toSettings: () => void };
+}): ReadonlyArray<HeaderQuickAction> {
+  return [
+    {
+      key: "assistant",
+      active: currentRoute.page === "assistant",
+      onClick: nav.toAssistant,
+    },
+    {
+      key: "settings",
+      active: currentRoute.page === "settings",
+      onClick: nav.toSettings,
+    },
+  ];
 }
 
 type AppNotificationLevel = "info" | "success" | "error";
@@ -200,6 +227,7 @@ export function App() {
     toDaemon: () => setRoute(routeToRuntimeCenterFromLegacy("daemon")),
     toLogs: () => setRoute(routeToRuntimeCenterFromLegacy("logs")),
     toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
+    toSettings: () => setRoute({ page: "settings" }),
     toGenres: () => setRoute(routeToSettingsFromLegacy("genres")),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
@@ -208,6 +236,7 @@ export function App() {
   }), [setRoute]);
 
   const currentRoute = resolveLegacyRoute(rawRoute);
+  const headerQuickActions = buildHeaderQuickActions({ currentRoute, nav });
   const activeBookId = deriveActiveBookId(currentRoute);
   const activePage = mapRouteToActivePage(currentRoute, activeBookId);
   const contentContainerClass =
@@ -355,18 +384,20 @@ export function App() {
               )}
             </div>
 
-            {/* Chat Panel Toggle */}
-            <button
-              onClick={nav.toAssistant}
-              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shadow-sm ${
-                currentRoute.page === "assistant"
-                  ? "bg-primary text-primary-foreground shadow-primary/20"
-                  : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
-              }`}
-              title="Toggle AI Assistant"
-            >
-              <MessageSquare size={16} />
-            </button>
+            {headerQuickActions.map((action) => (
+              <button
+                key={action.key}
+                onClick={action.onClick}
+                className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shadow-sm ${
+                  action.active
+                    ? "bg-primary text-primary-foreground shadow-primary/20"
+                    : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
+                }`}
+                title={action.key === "assistant" ? "Open AI Assistant" : "Open Settings"}
+              >
+                {action.key === "assistant" ? <MessageSquare size={16} /> : <SettingsIcon size={16} />}
+              </button>
+            ))}
           </div>
         </header>
 

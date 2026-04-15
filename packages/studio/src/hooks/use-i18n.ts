@@ -7,6 +7,7 @@ export const strings = {
   "nav.books": { zh: "书籍", en: "Books" },
   "nav.newBook": { zh: "新建书籍", en: "New Book" },
   "nav.config": { zh: "配置", en: "Config" },
+  "nav.assistant": { zh: "AI助手", en: "AI Assistant" },
   "nav.connected": { zh: "已连接", en: "Connected" },
   "nav.disconnected": { zh: "未连接", en: "Disconnected" },
 
