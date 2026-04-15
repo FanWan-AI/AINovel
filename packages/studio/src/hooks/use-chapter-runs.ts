@@ -43,7 +43,7 @@ interface LifecycleUpdateInput {
 
 const STORAGE_PREFIX = "inkos-chapter-runs-v1";
 const MAX_STORED_RUNS = 200;
-const DEDUP_WINDOW_MS = 60_000;
+const RECENT_RUN_MATCH_WINDOW_MS = 60_000;
 
 function keyForBook(bookId: string): string {
   return `${STORAGE_PREFIX}:${bookId}`;
@@ -90,10 +90,12 @@ function normalizeRuns(data: unknown): ReadonlyArray<ChapterRunRecord> {
 
 export function loadChapterRuns(
   bookId: string,
-  storage: Pick<Storage, "getItem"> = localStorage,
+  storage?: Pick<Storage, "getItem">,
 ): { runs: ReadonlyArray<ChapterRunRecord>; error: StringKey | null } {
   try {
-    const raw = storage.getItem(keyForBook(bookId));
+    const safeStorage = storage ?? (typeof window !== "undefined" ? window.localStorage : null);
+    if (!safeStorage) return { runs: [], error: null };
+    const raw = safeStorage.getItem(keyForBook(bookId));
     if (!raw) return { runs: [], error: null };
     return { runs: normalizeRuns(JSON.parse(raw)), error: null };
   } catch {
@@ -104,10 +106,12 @@ export function loadChapterRuns(
 export function saveChapterRuns(
   bookId: string,
   runs: ReadonlyArray<ChapterRunRecord>,
-  storage: Pick<Storage, "setItem"> = localStorage,
+  storage?: Pick<Storage, "setItem">,
 ): StringKey | null {
   try {
-    storage.setItem(keyForBook(bookId), JSON.stringify(runs.slice(0, MAX_STORED_RUNS)));
+    const safeStorage = storage ?? (typeof window !== "undefined" ? window.localStorage : null);
+    if (!safeStorage) return null;
+    safeStorage.setItem(keyForBook(bookId), JSON.stringify(runs.slice(0, MAX_STORED_RUNS)));
     return null;
   } catch {
     return "chapterTaskCenter.storageWriteFailed";
@@ -127,7 +131,10 @@ function asRunStatus(stage: ChapterLifecycleStage): Exclude<ChapterRunStatus, "r
 }
 
 export function createChapterRunId(): string {
-  return `chapter-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `chapter-run-${crypto.randomUUID()}`;
+  }
+  return `chapter-run-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function upsertLifecycleRun(
@@ -151,7 +158,7 @@ export function upsertLifecycleRun(
     : prev.findIndex((run) => (
       run.chapterNumber === input.chapterNumber
       && actionTypes.includes(run.actionType)
-      && Math.abs(finishedAt - run.startedAt) <= DEDUP_WINDOW_MS
+      && Math.abs(finishedAt - run.startedAt) <= RECENT_RUN_MATCH_WINDOW_MS
     ));
 
   if (recentIndex >= 0) {
@@ -169,7 +176,8 @@ export function upsertLifecycleRun(
     return merged.sort((a, b) => b.startedAt - a.startedAt);
   }
 
-  const actionType = actionTypes[0] ?? "spot-fix";
+  const actionType = actionTypes[0];
+  if (!actionType) return prev;
   const newRun: ChapterRunRecord = {
     id: createChapterRunId(),
     chapterNumber: input.chapterNumber,

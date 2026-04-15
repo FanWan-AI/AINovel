@@ -165,7 +165,9 @@ export function ChapterTaskCenter({
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-muted-foreground">
                 <div><span className="font-semibold">{t("chapterTaskCenter.fieldDuration")}</span> {formatRunDuration(run.durationMs, t)}</div>
                 <div className="md:col-span-2"><span className="font-semibold">{t("chapterTaskCenter.fieldSummary")}</span> {run.briefSummary ?? t("chapterTaskCenter.noSummary")}</div>
-                <div className="md:col-span-3"><span className="font-semibold">{t("chapterTaskCenter.fieldReason")}</span> {run.reason ?? t("chapterTaskCenter.noReason")}</div>
+                {(run.status === "failed" || run.status === "unchanged") && (
+                  <div className="md:col-span-3"><span className="font-semibold">{t("chapterTaskCenter.fieldReason")}</span> {run.reason ?? t("chapterTaskCenter.noReason")}</div>
+                )}
               </div>
             </article>
           ))}
