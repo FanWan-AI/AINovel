@@ -76,6 +76,25 @@ export const strings = {
   "config.model": { zh: "模型", en: "Model" },
   "config.editHint": { zh: "通过 CLI 编辑配置：", en: "Edit via CLI:" },
 
+  // Settings Center
+  "settings.title": { zh: "设置中心", en: "Settings Center" },
+  "settings.subtitle": { zh: "统一管理系统级配置，后续业务能力将逐步迁移到此页面。", en: "Manage system-level configuration in one place. More capabilities will be migrated here incrementally." },
+  "settings.tab.locale": { zh: "语言与地区", en: "Language & Region" },
+  "settings.tab.provider": { zh: "LLM Provider", en: "LLM Provider" },
+  "settings.tab.genre": { zh: "题材设置", en: "Genre Settings" },
+  "settings.tab.appearance": { zh: "外观与体验", en: "Appearance & Experience" },
+  "settings.tab.writing": { zh: "写作偏好", en: "Writing Preferences" },
+  "settings.placeholder.locale.title": { zh: "语言与地区（占位）", en: "Language & Region (Placeholder)" },
+  "settings.placeholder.locale.desc": { zh: "后续将迁移 UI 语言、时间格式、数字格式等跨项目配置。", en: "UI language, time format, and number format will be migrated here in upcoming iterations." },
+  "settings.placeholder.provider.title": { zh: "LLM Provider 设置（占位）", en: "LLM Provider Settings (Placeholder)" },
+  "settings.placeholder.provider.desc": { zh: "将逐步承接原 ConfigView 的提供方、模型与路由配置。", en: "Provider, model, and routing options from ConfigView will be moved here incrementally." },
+  "settings.placeholder.genre.title": { zh: "题材设置（占位）", en: "Genre Settings (Placeholder)" },
+  "settings.placeholder.genre.desc": { zh: "将迁移题材清单、详情与生命周期管理能力。", en: "Genre catalog, details, and lifecycle management capabilities will be migrated here." },
+  "settings.placeholder.appearance.title": { zh: "外观与体验（占位）", en: "Appearance & Experience (Placeholder)" },
+  "settings.placeholder.appearance.desc": { zh: "预留主题、动效密度与通知级别等系统体验项。", en: "Reserved for theme mode, motion density, notification level, and other UX controls." },
+  "settings.placeholder.writing.title": { zh: "写作偏好（占位）", en: "Writing Preferences (Placeholder)" },
+  "settings.placeholder.writing.desc": { zh: "将承接跨书生效的写作风格与审校偏好治理配置。", en: "Cross-book writing style and review governance preferences will be supported here." },
+
   // Assistant
   "assistant.title": { zh: "AI 助手", en: "AI Assistant" },
   "assistant.workspace": { zh: "主工作区", en: "Main Workspace" },

@@ -3,7 +3,9 @@ import {
   buildHeaderQuickActions,
   deriveActiveBookId,
   mapRouteToActivePage,
+  parseSettingsTabFromQuery,
   resolveLegacyRoute,
+  resolveInitialRouteFromSearch,
   routeToRuntimeCenterFromLegacy,
   routeToSettingsFromLegacy,
 } from "./App";
@@ -45,6 +47,23 @@ describe("routeToSettingsFromLegacy", () => {
 
   it("redirects genres entry to settings genre tab", () => {
     expect(routeToSettingsFromLegacy("genres")).toEqual({ page: "settings", tab: "genre" });
+  });
+});
+
+describe("settings tab query parsing", () => {
+  it("parses valid settings tab from search params", () => {
+    expect(parseSettingsTabFromQuery("?tab=genre")).toBe("genre");
+    expect(parseSettingsTabFromQuery("?tab=writing")).toBe("writing");
+  });
+
+  it("returns provider tab for invalid tab values and undefined when missing", () => {
+    expect(parseSettingsTabFromQuery("?tab=unknown")).toBe("provider");
+    expect(parseSettingsTabFromQuery("")).toBeUndefined();
+  });
+
+  it("resolves initial route to settings when tab query exists", () => {
+    expect(resolveInitialRouteFromSearch("?tab=appearance")).toEqual({ page: "settings", tab: "appearance" });
+    expect(resolveInitialRouteFromSearch("")).toEqual({ page: "dashboard" });
   });
 });
 
