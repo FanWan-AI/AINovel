@@ -1,3 +1,5 @@
+import { useEffect, useMemo, useState } from "react";
+import { putApi, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { ConfigView } from "./ConfigView";
@@ -85,11 +87,11 @@ export function buildSettingsTabItems({
   }));
 }
 
-export type SettingsTabContent = "provider" | "genre" | "placeholder";
+export type SettingsTabContent = "provider" | "genre" | "writing" | "placeholder";
 
 export function resolveSettingsTabContent(tab?: SettingsTab): SettingsTabContent {
   const activeTab = normalizeSettingsTab(tab);
-  if (activeTab === "provider" || activeTab === "genre") {
+  if (activeTab === "provider" || activeTab === "genre" || activeTab === "writing") {
     return activeTab;
   }
   return "placeholder";
@@ -97,6 +99,88 @@ export function resolveSettingsTabContent(tab?: SettingsTab): SettingsTabContent
 
 interface Nav {
   toDashboard: () => void;
+}
+
+export type WritingStyleTemplate = "narrative-balance" | "dialogue-driven" | "cinematic";
+export type ReviewStrictnessBaseline = "balanced" | "strict" | "strict-plus";
+export type AntiAiTraceStrength = "medium" | "high" | "max";
+
+export interface WritingGovernanceSettings {
+  readonly schemaVersion: number;
+  readonly styleTemplate: WritingStyleTemplate;
+  readonly reviewStrictnessBaseline: ReviewStrictnessBaseline;
+  readonly antiAiTraceStrength: AntiAiTraceStrength;
+  readonly updatedAt: string;
+  readonly extensions?: Record<string, unknown>;
+}
+
+export interface WritingGovernanceForm {
+  readonly styleTemplate: WritingStyleTemplate;
+  readonly reviewStrictnessBaseline: ReviewStrictnessBaseline;
+  readonly antiAiTraceStrength: AntiAiTraceStrength;
+}
+
+export const DEFAULT_WRITING_GOVERNANCE_FORM: WritingGovernanceForm = {
+  styleTemplate: "narrative-balance",
+  reviewStrictnessBaseline: "balanced",
+  antiAiTraceStrength: "medium",
+};
+
+export const BOOK_DETAIL_OPERATION_KEYS = [
+  "plan-next-and-write",
+  "quick-write",
+  "draft",
+  "chapter-rewrite",
+  "chapter-revise",
+  "chapter-anti-detect",
+] as const;
+
+export const WRITING_GOVERNANCE_KEYS = [
+  "style-template-global",
+  "review-strictness-baseline",
+  "anti-ai-trace-strength",
+] as const;
+
+export function normalizeWritingGovernanceForm(
+  settings?: Partial<WritingGovernanceSettings> | null,
+): WritingGovernanceForm {
+  return {
+    styleTemplate:
+      settings?.styleTemplate === "dialogue-driven" || settings?.styleTemplate === "cinematic"
+        ? settings.styleTemplate
+        : DEFAULT_WRITING_GOVERNANCE_FORM.styleTemplate,
+    reviewStrictnessBaseline:
+      settings?.reviewStrictnessBaseline === "strict" || settings?.reviewStrictnessBaseline === "strict-plus"
+        ? settings.reviewStrictnessBaseline
+        : DEFAULT_WRITING_GOVERNANCE_FORM.reviewStrictnessBaseline,
+    antiAiTraceStrength:
+      settings?.antiAiTraceStrength === "high" || settings?.antiAiTraceStrength === "max"
+        ? settings.antiAiTraceStrength
+        : DEFAULT_WRITING_GOVERNANCE_FORM.antiAiTraceStrength,
+  };
+}
+
+interface SaveWritingGovernanceOptions {
+  readonly putApiImpl?: typeof putApi;
+}
+
+export async function saveWritingGovernance(
+  form: WritingGovernanceForm,
+  options: SaveWritingGovernanceOptions = {},
+): Promise<void> {
+  const putApiImpl = options.putApiImpl ?? putApi;
+  await putApiImpl("/project/writing-governance", form);
+}
+
+export function collectWritingDuplicateKeys({
+  governanceKeys = WRITING_GOVERNANCE_KEYS,
+  bookDetailKeys = BOOK_DETAIL_OPERATION_KEYS,
+}: {
+  governanceKeys?: ReadonlyArray<string>;
+  bookDetailKeys?: ReadonlyArray<string>;
+} = {}): ReadonlyArray<string> {
+  const bookDetailSet = new Set(bookDetailKeys);
+  return governanceKeys.filter((key) => bookDetailSet.has(key));
 }
 
 export function SettingsView({
@@ -115,6 +199,133 @@ export function SettingsView({
   const activeTab = normalizeSettingsTab(tab);
   const tabItems = buildSettingsTabItems({ tab: activeTab, onTabChange, t });
   const activeTabDefinition = SETTINGS_TAB_DEFINITIONS.find((item) => item.key === activeTab) ?? SETTINGS_TAB_DEFINITIONS[0];
+  const { data: writingGovernanceData, loading: writingGovernanceLoading, error: writingGovernanceError, refetch: refetchWritingGovernance } = useApi<{
+    readonly settings: WritingGovernanceSettings;
+  }>("/project/writing-governance");
+  const [writingForm, setWritingForm] = useState<WritingGovernanceForm>(DEFAULT_WRITING_GOVERNANCE_FORM);
+  const [savingWritingGovernance, setSavingWritingGovernance] = useState(false);
+  const duplicateKeys = useMemo(() => collectWritingDuplicateKeys(), []);
+
+  useEffect(() => {
+    setWritingForm(normalizeWritingGovernanceForm(writingGovernanceData?.settings));
+  }, [writingGovernanceData?.settings]);
+
+  const renderWritingGovernancePanel = () => {
+    if (writingGovernanceLoading) {
+      return <p className="text-sm text-muted-foreground">加载写作偏好中...</p>;
+    }
+    if (writingGovernanceError) {
+      return <p className="text-sm text-destructive">写作偏好加载失败：{writingGovernanceError}</p>;
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <h2 className="text-base font-semibold text-foreground">写作偏好全局治理</h2>
+          <p className="text-sm text-muted-foreground">系统级治理，不影响单次手动操作优先级。</p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">写作风格模板全局偏好</span>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              value={writingForm.styleTemplate}
+              onChange={(e) => setWritingForm((prev) => ({ ...prev, styleTemplate: e.target.value as WritingStyleTemplate }))}
+            >
+              <option value="narrative-balance">叙事均衡</option>
+              <option value="dialogue-driven">对话驱动</option>
+              <option value="cinematic">电影感镜头</option>
+            </select>
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">审查严格程度基线</span>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              value={writingForm.reviewStrictnessBaseline}
+              onChange={(e) => setWritingForm((prev) => ({ ...prev, reviewStrictnessBaseline: e.target.value as ReviewStrictnessBaseline }))}
+            >
+              <option value="balanced">平衡</option>
+              <option value="strict">严格</option>
+              <option value="strict-plus">严格+</option>
+            </select>
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">反 AI 痕迹强度策略</span>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              value={writingForm.antiAiTraceStrength}
+              onChange={(e) => setWritingForm((prev) => ({ ...prev, antiAiTraceStrength: e.target.value as AntiAiTraceStrength }))}
+            >
+              <option value="medium">中</option>
+              <option value="high">高</option>
+              <option value="max">极高</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              {writingGovernanceData?.settings?.updatedAt
+                ? `最近保存：${new Date(writingGovernanceData.settings.updatedAt).toLocaleString()}`
+                : "尚未保存过写作配置。"}
+            </div>
+          <button
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-60"
+            disabled={savingWritingGovernance}
+            onClick={async () => {
+              setSavingWritingGovernance(true);
+              try {
+                await saveWritingGovernance(writingForm);
+                await refetchWritingGovernance();
+              } finally {
+                setSavingWritingGovernance(false);
+              }
+            }}
+          >
+            {savingWritingGovernance ? "保存中..." : "保存全局策略"}
+          </button>
+        </div>
+
+        <div className="space-y-3 rounded-md border border-border/70 bg-card/40 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-foreground">重复项对照表（写作偏好 vs BookDetail）</h3>
+            <span className={`text-xs font-medium ${duplicateKeys.length === 0 ? "text-emerald-500" : "text-destructive"}`}>
+              {duplicateKeys.length === 0 ? "无重复项" : `发现 ${duplicateKeys.length} 项重复`}
+            </span>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border/60 text-muted-foreground">
+                <th className="px-2 py-2 text-left font-medium">治理项</th>
+                <th className="px-2 py-2 text-left font-medium">BookDetail 动作</th>
+                <th className="px-2 py-2 text-left font-medium">结论</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { policy: "写作风格模板全局偏好", bookAction: "写下一章 / 快速写（单次执行）" },
+                { policy: "审查严格程度基线", bookAction: "章节审校 / 修订（单次执行）" },
+                { policy: "反 AI 痕迹强度策略", bookAction: "anti-detect（章节级动作）" },
+              ].map((item) => (
+                <tr key={item.policy} className="border-b border-border/40 last:border-b-0">
+                  <td className="px-2 py-2">{item.policy}</td>
+                  <td className="px-2 py-2 text-muted-foreground">{item.bookAction}</td>
+                  <td className="px-2 py-2 text-emerald-500">职责分层，避免重复</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="rounded-md border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+          后续可扩展策略点：支持更细粒度风格模板版本、题材差异化基线与按模型提供方的治理覆盖。
+        </div>
+      </div>
+    );
+  };
   const tabContent = resolveSettingsTabContent(activeTab);
 
   return (
@@ -150,6 +361,11 @@ export function SettingsView({
 
       {tabContent === "provider" && <ConfigView nav={nav} theme={theme} t={t} />}
       {tabContent === "genre" && <GenreManager nav={nav} theme={theme} t={t} />}
+      {tabContent === "writing" && (
+        <div className="rounded-lg border border-border px-6 py-6">
+          {renderWritingGovernancePanel()}
+        </div>
+      )}
       {tabContent === "placeholder" && (
         <div className="rounded-lg border border-dashed border-border px-6 py-10">
           <h2 className="text-base font-semibold text-foreground">{t(activeTabDefinition.placeholderTitleKey)}</h2>

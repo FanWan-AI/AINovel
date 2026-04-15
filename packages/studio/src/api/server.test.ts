@@ -2194,4 +2194,48 @@ describe("runtimeEventStore integration via server broadcast", () => {
       }
     }
   });
+
+  it("writes and echoes project-level writing governance settings", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const initialResponse = await app.request("http://localhost/api/project/writing-governance");
+    expect(initialResponse.status).toBe(200);
+    await expect(initialResponse.json()).resolves.toMatchObject({
+      settings: {
+        styleTemplate: "narrative-balance",
+        reviewStrictnessBaseline: "balanced",
+        antiAiTraceStrength: "medium",
+      },
+    });
+
+    const saveResponse = await app.request("http://localhost/api/project/writing-governance", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        styleTemplate: "cinematic",
+        reviewStrictnessBaseline: "strict-plus",
+        antiAiTraceStrength: "max",
+      }),
+    });
+    expect(saveResponse.status).toBe(200);
+    await expect(saveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      settings: {
+        styleTemplate: "cinematic",
+        reviewStrictnessBaseline: "strict-plus",
+        antiAiTraceStrength: "max",
+      },
+    });
+
+    const echoResponse = await app.request("http://localhost/api/project/writing-governance");
+    expect(echoResponse.status).toBe(200);
+    await expect(echoResponse.json()).resolves.toMatchObject({
+      settings: {
+        styleTemplate: "cinematic",
+        reviewStrictnessBaseline: "strict-plus",
+        antiAiTraceStrength: "max",
+      },
+    });
+  });
 });

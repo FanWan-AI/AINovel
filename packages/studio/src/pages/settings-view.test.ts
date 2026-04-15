@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildSettingsTabItems,
+  collectWritingDuplicateKeys,
   normalizeSettingsTab,
+  normalizeWritingGovernanceForm,
   resolveSettingsTabContent,
+  saveWritingGovernance,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
 
@@ -50,16 +53,57 @@ describe("buildSettingsTabItems", () => {
   });
 });
 
+describe("writing governance helpers", () => {
+  it("normalizes missing settings to defaults", () => {
+    expect(normalizeWritingGovernanceForm()).toEqual({
+      styleTemplate: "narrative-balance",
+      reviewStrictnessBaseline: "balanced",
+      antiAiTraceStrength: "medium",
+    });
+  });
+
+  it("saves governance form to project endpoint", async () => {
+    const putApiImpl = vi.fn().mockResolvedValue(undefined);
+    await saveWritingGovernance({
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    }, { putApiImpl });
+    expect(putApiImpl).toHaveBeenCalledWith("/project/writing-governance", {
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    });
+  });
+
+  it("rethrows save errors from API call", async () => {
+    const putApiImpl = vi.fn().mockRejectedValue(new Error("save failed"));
+    await expect(saveWritingGovernance({
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    }, { putApiImpl })).rejects.toThrow("save failed");
+  });
+
+  it("guards duplicate keys against BookDetail operation keys", () => {
+    expect(collectWritingDuplicateKeys()).toEqual([]);
+    expect(collectWritingDuplicateKeys({
+      governanceKeys: ["plan-next-and-write", "style-template-global"],
+      bookDetailKeys: ["plan-next-and-write", "quick-write"],
+    })).toEqual(["plan-next-and-write"]);
+  });
+});
+
 describe("resolveSettingsTabContent", () => {
-  it("maps provider and genre tabs to migrated content panels", () => {
+  it("maps provider, genre and writing tabs to content panels", () => {
     expect(resolveSettingsTabContent("provider")).toBe("provider");
     expect(resolveSettingsTabContent("genre")).toBe("genre");
+    expect(resolveSettingsTabContent("writing")).toBe("writing");
   });
 
   it("keeps non-migrated tabs on placeholder content", () => {
     expect(resolveSettingsTabContent("locale")).toBe("placeholder");
     expect(resolveSettingsTabContent("appearance")).toBe("placeholder");
-    expect(resolveSettingsTabContent("writing")).toBe("placeholder");
   });
 
   it("falls back unknown tab input to provider content via normalizeSettingsTab", () => {
