@@ -791,9 +791,53 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(rewriteResponse.status).toBe(200);
     expect(resyncResponse.status).toBe(200);
 
-    const reviseData = await reviseResponse.json() as { runId: string };
-    const antiDetectData = await antiDetectResponse.json() as { runId: string };
-    const rewriteData = await rewriteResponse.json() as { runId: string };
+    const reviseData = await reviseResponse.json() as {
+      status: string;
+      runId: string;
+      bookId: string;
+      chapter: number;
+      mode: string;
+      appliedBrief: string | null;
+    };
+    const antiDetectData = await antiDetectResponse.json() as {
+      status: string;
+      runId: string;
+      bookId: string;
+      chapter: number;
+      mode: string;
+      appliedBrief: string | null;
+    };
+    const rewriteData = await rewriteResponse.json() as {
+      status: string;
+      runId: string;
+      bookId: string;
+      chapter: number;
+      rolledBackTo: number;
+      discarded: number[];
+      appliedBrief: string | null;
+    };
+    expect(reviseData).toMatchObject({
+      status: "revising",
+      bookId: "demo-book",
+      chapter: 3,
+      mode: "rewrite",
+      appliedBrief: "回收伏笔",
+    });
+    expect(antiDetectData).toMatchObject({
+      status: "revising",
+      bookId: "demo-book",
+      chapter: 3,
+      mode: "anti-detect",
+      appliedBrief: "降低AI痕迹",
+    });
+    expect(rewriteData).toMatchObject({
+      status: "rewriting",
+      bookId: "demo-book",
+      chapter: 3,
+      rolledBackTo: 2,
+      discarded: [],
+      appliedBrief: "保留人物动机",
+    });
     const resyncData = await resyncResponse.json() as { runId: string };
 
     await vi.waitFor(async () => {
@@ -938,6 +982,16 @@ describe("createStudioServer daemon lifecycle", () => {
       const data = await response.json() as { status: string; decision: string | null };
       expect(data.status).toBe("succeeded");
       expect(data.decision).toBe("unchanged");
+    });
+
+    const reviseEventsResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}/events`);
+    expect(reviseEventsResponse.status).toBe(200);
+    await expect(reviseEventsResponse.json()).resolves.toMatchObject({
+      runId: reviseData.runId,
+      events: [
+        { type: "start", status: "running" },
+        { type: "success", status: "succeeded" },
+      ],
     });
 
     const reviseDiffResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}/diff`);
