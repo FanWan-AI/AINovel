@@ -4,8 +4,8 @@
 
 文档入口：
 
-- `/home/runner/work/AINovel/AINovel/DevDocs/08-测试策略与验收标准.md`（验收流程与测试映射）
-- `/home/runner/work/AINovel/AINovel/DevDocs/10-运维部署与可观测性.md`（运维排障与字段对齐）
+- `DevDocs/08-测试策略与验收标准.md`（验收流程与测试映射）
+- `DevDocs/10-运维部署与可观测性.md`（运维排障与字段对齐）
 
 一键验收命令（提交建议 → runId → 事件流 → 最终状态 → diff）：
 
