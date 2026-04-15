@@ -53,6 +53,9 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Opening Pattern Repetition", "开头同构",
   "Ending Pattern Repetition", "结尾同构",
 ]);
+const APPLIED_BRIEF_MAX_ITEMS = 2;
+const APPLIED_BRIEF_SEPARATOR = "；";
+const APPLIED_BRIEF_ELLIPSIS = "…";
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
@@ -240,15 +243,15 @@ export class PipelineRunner {
 
   private buildAppliedBrief(fixedIssues: ReadonlyArray<string>): string | undefined {
     const normalized = fixedIssues
-      .map((issue) => issue.replace(/^[-*]\s*/u, "").trim())
+      .map((issue) => issue.replace(/^([-*•]|\d+[.)])\s*/u, "").trim())
       .filter((issue) => issue.length > 0);
     if (normalized.length === 0) {
       return undefined;
     }
-    if (normalized.length <= 2) {
-      return normalized.join("；");
+    if (normalized.length <= APPLIED_BRIEF_MAX_ITEMS) {
+      return normalized.join(APPLIED_BRIEF_SEPARATOR);
     }
-    return `${normalized.slice(0, 2).join("；")}…`;
+    return `${normalized.slice(0, APPLIED_BRIEF_MAX_ITEMS).join(APPLIED_BRIEF_SEPARATOR)}${APPLIED_BRIEF_ELLIPSIS}`;
   }
 
   private async tryGenerateStyleGuide(
