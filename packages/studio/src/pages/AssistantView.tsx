@@ -48,6 +48,15 @@ export interface AssistantConfirmationDraft {
 }
 
 const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
+const BOOK_STATUS_ACTIVE = "active";
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
+const AUDIT_ACTION_PATTERN = /审计|audit/iu;
+const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
+const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit"> = {
+  "write-next": "assistant.actionWriteNext",
+  audit: "assistant.actionAudit",
+};
 
 export const ASSISTANT_QUICK_ACTIONS: ReadonlyArray<AssistantQuickAction> = [
   { id: "outline", label: "生成大纲", prompt: "请帮我生成下一章节的大纲。" },
@@ -123,13 +132,15 @@ export function resolveAssistantScopeBookIds(
   selectedBookIds: ReadonlyArray<string>,
   activeBookIds: ReadonlyArray<string>,
 ): string[] {
+  const activeBookSet = new Set(activeBookIds);
   if (scopeMode === "all-active") {
     return [...activeBookIds];
   }
   if (scopeMode === "single") {
-    return selectedBookIds[0] ? [selectedBookIds[0]] : [];
+    const selected = selectedBookIds.find((id) => activeBookSet.has(id));
+    return selected ? [selected] : [];
   }
-  return Array.from(new Set(selectedBookIds));
+  return Array.from(new Set(selectedBookIds.filter((id) => activeBookSet.has(id))));
 }
 
 export function canRunScopedBookAction(
@@ -143,15 +154,15 @@ export function canRunScopedBookAction(
 export function detectAssistantBookAction(prompt: string): AssistantBookActionType | null {
   const normalized = prompt.trim().toLowerCase();
   if (!normalized) return null;
-  if (/写下一章|write[-\s]?next/u.test(normalized)) return "write-next";
-  if (/审计|audit/u.test(normalized)) return "audit";
+  if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return "write-next";
+  if (AUDIT_ACTION_PATTERN.test(normalized)) return "audit";
   return null;
 }
 
 export function extractAssistantAuditChapter(prompt: string): number | undefined {
-  const zhMatch = prompt.match(/第\s*(\d+)\s*章/u);
+  const zhMatch = prompt.match(AUDIT_CHAPTER_ZH_PATTERN);
   if (zhMatch?.[1]) return Number.parseInt(zhMatch[1], 10);
-  const enMatch = prompt.match(/chapter\s*(\d+)/iu);
+  const enMatch = prompt.match(AUDIT_CHAPTER_EN_PATTERN);
   if (enMatch?.[1]) return Number.parseInt(enMatch[1], 10);
   return undefined;
 }
@@ -261,7 +272,10 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
 export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const [state, setState] = useState<AssistantComposerState>(() => createAssistantInitialState());
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
-  const activeBooks = useMemo(() => (booksData?.books ?? []).filter((book) => book.status === "active"), [booksData?.books]);
+  const activeBooks = useMemo(
+    () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
+    [booksData?.books],
+  );
   const [scopeMode, setScopeMode] = useState<AssistantBookScopeMode>("all-active");
   const [selectedBookIds, setSelectedBookIds] = useState<ReadonlyArray<string>>([]);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
@@ -274,7 +288,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
   );
   const selectedBookTitles = useMemo(() => {
     const titleById = new Map(activeBooks.map((book) => [book.id, book.title] as const));
-    return selectedScopeBookIds.map((id) => titleById.get(id) ?? id);
+    return selectedScopeBookIds.map((id) => titleById.get(id) ?? t("assistant.scopeUnknownBook"));
   }, [activeBooks, selectedScopeBookIds]);
 
   const sendPrompt = (rawPrompt: string) => {
@@ -336,8 +350,10 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
                 onChange={() => {
                   setScopeMode("single");
                   setState((prev) => cancelAssistantPendingAction(prev));
-                  const nextBookId = selectedBookIds[0] ?? activeBookIds[0] ?? "";
-                  setSelectedBookIds(nextBookId ? [nextBookId] : []);
+                  setSelectedBookIds((prev) => {
+                    const selected = prev.find((id) => activeBookIds.includes(id));
+                    return selected ? [selected] : [];
+                  });
                 }}
               />
               <span>{t("assistant.scopeSingle")}</span>
@@ -349,9 +365,6 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
                 onChange={() => {
                   setScopeMode("multi");
                   setState((prev) => cancelAssistantPendingAction(prev));
-                  if (selectedBookIds.length === 0 && activeBookIds[0]) {
-                    setSelectedBookIds([activeBookIds[0]]);
-                  }
                 }}
               />
               <span>{t("assistant.scopeMulti")}</span>
@@ -422,7 +435,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
           <div className="mt-3 rounded-xl border border-primary/40 bg-card p-4 space-y-2" data-testid="assistant-confirmation-card">
             <div className="text-sm font-medium">{t("assistant.confirmTitle")}</div>
             <div className="text-xs text-muted-foreground">
-              {state.pendingConfirmation.action === "write-next" ? t("assistant.actionWriteNext") : t("assistant.actionAudit")}
+              {t(ACTION_LABEL_KEY_BY_TYPE[state.pendingConfirmation.action])}
               {state.pendingConfirmation.chapterNumber ? ` · ${t("assistant.confirmChapterPrefix")}${state.pendingConfirmation.chapterNumber}` : ""}
             </div>
             <div className="text-xs text-muted-foreground">

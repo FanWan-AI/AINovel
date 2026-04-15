@@ -87,6 +87,7 @@ export const strings = {
   "assistant.scopeSelectBook": { zh: "请选择书籍", en: "Select a book" },
   "assistant.scopeNoBooks": { zh: "暂无活跃书籍可选。", en: "No active books available." },
   "assistant.scopeNoneSelected": { zh: "尚未选中书籍", en: "No books selected" },
+  "assistant.scopeUnknownBook": { zh: "未知书籍", en: "Unknown Book" },
   "assistant.scopeBlocked": { zh: "请先选择书籍范围，再执行书籍级动作。", en: "Select book scope before running book-level actions." },
   "assistant.confirmTitle": { zh: "参数确认", en: "Confirm Parameters" },
   "assistant.actionWriteNext": { zh: "写下一章", en: "Write Next Chapter" },
