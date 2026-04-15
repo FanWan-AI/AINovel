@@ -76,6 +76,28 @@ export const strings = {
   "config.model": { zh: "模型", en: "Model" },
   "config.editHint": { zh: "通过 CLI 编辑配置：", en: "Edit via CLI:" },
 
+  // Assistant
+  "assistant.title": { zh: "AI 助手", en: "AI Assistant" },
+  "assistant.workspace": { zh: "主工作区", en: "Main Workspace" },
+  "assistant.backHome": { zh: "返回首页", en: "Back Home" },
+  "assistant.scopeLabel": { zh: "书籍范围", en: "Book Scope" },
+  "assistant.scopeSingle": { zh: "单本书", en: "Single Book" },
+  "assistant.scopeMulti": { zh: "多本书", en: "Multiple Books" },
+  "assistant.scopeAllActive": { zh: "全部活跃书", en: "All Active Books" },
+  "assistant.scopeSelectBook": { zh: "请选择书籍", en: "Select a book" },
+  "assistant.scopeNoBooks": { zh: "暂无活跃书籍可选。", en: "No active books available." },
+  "assistant.scopeNoneSelected": { zh: "尚未选中书籍", en: "No books selected" },
+  "assistant.scopeUnknownBook": { zh: "未知书籍", en: "Unknown Book" },
+  "assistant.scopeBlocked": { zh: "请先选择书籍范围，再执行书籍级动作。", en: "Select book scope before running book-level actions." },
+  "assistant.confirmTitle": { zh: "参数确认", en: "Confirm Parameters" },
+  "assistant.actionWriteNext": { zh: "写下一章", en: "Write Next Chapter" },
+  "assistant.actionAudit": { zh: "审计章节", en: "Audit Chapter" },
+  "assistant.confirmChapterPrefix": { zh: "第", en: "Chapter " },
+  "assistant.confirmTargets": { zh: "目标书籍", en: "Target Books" },
+  "assistant.confirm": { zh: "确认执行", en: "Confirm" },
+  "assistant.cancel": { zh: "取消", en: "Cancel" },
+  "assistant.inputPlaceholder": { zh: "输入你的问题或需求…", en: "Ask anything about your writing task…" },
+
   // Sidebar
   "nav.system": { zh: "系统", en: "System" },
   "nav.daemon": { zh: "守护进程", en: "Daemon" },

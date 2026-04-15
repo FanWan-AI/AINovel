@@ -7,8 +7,13 @@ import {
   AssistantView,
   applyAssistantInput,
   applyAssistantQuickAction,
+  buildAssistantConfirmationDraft,
+  cancelAssistantPendingAction,
+  confirmAssistantPendingAction,
   completeAssistantResponse,
   createAssistantInitialState,
+  requestAssistantConfirmation,
+  resolveAssistantScopeBookIds,
   submitAssistantInput,
 } from "./AssistantView";
 
@@ -22,6 +27,7 @@ describe("AssistantView", () => {
     }));
 
     expect(html).toContain("assistant-context-bar");
+    expect(html).toContain("assistant-scope-selector");
     expect(html).toContain("assistant-message-list");
     expect(html).toContain("assistant-input-panel");
     expect(html).toContain("assistant-empty-state");
@@ -56,5 +62,39 @@ describe("AssistantView", () => {
     expect(next.messages).toEqual([
       { id: "msg-1", role: "user", content: "请帮我生成下一章节的大纲。", timestamp: 2000 },
     ]);
+  });
+
+  it("resolves scope selections for single, multi and all-active modes", () => {
+    expect(resolveAssistantScopeBookIds("single", ["book-1", "book-2"], ["book-1", "book-2", "book-3"]))
+      .toEqual(["book-1"]);
+    expect(resolveAssistantScopeBookIds("multi", ["book-1", "book-2", "book-1"], ["book-1", "book-2", "book-3"]))
+      .toEqual(["book-1", "book-2"]);
+    expect(resolveAssistantScopeBookIds("all-active", [], ["book-1", "book-2"]))
+      .toEqual(["book-1", "book-2"]);
+  });
+
+  it("creates, confirms and cancels parameter confirmation cards for book actions", () => {
+    const state = createAssistantInitialState();
+    const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1", "book-2"]);
+    expect(draft).not.toBeNull();
+
+    const pending = requestAssistantConfirmation(state, draft!, 3000);
+    expect(pending.pendingConfirmation?.action).toBe("write-next");
+    expect(pending.messages[0]?.content).toBe("请写下一章");
+    expect(pending.loading).toBe(false);
+
+    const confirmed = confirmAssistantPendingAction(pending);
+    expect(confirmed.pendingConfirmation).toBeNull();
+    expect(confirmed.loading).toBe(true);
+
+    const pendingAgain = requestAssistantConfirmation(state, draft!, 4000);
+    const canceled = cancelAssistantPendingAction(pendingAgain);
+    expect(canceled.pendingConfirmation).toBeNull();
+    expect(canceled.loading).toBe(false);
+  });
+
+  it("blocks book-level action draft when no scoped books are selected", () => {
+    expect(buildAssistantConfirmationDraft("请写下一章", "single", [], [])).toBeNull();
+    expect(buildAssistantConfirmationDraft("audit chapter 12", "all-active", [], [])).toBeNull();
   });
 });
