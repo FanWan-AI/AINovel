@@ -110,7 +110,7 @@ export function buildHeaderQuickActions({
   nav,
 }: {
   currentRoute: Route;
-  nav: Pick<{ toAssistant: () => void; toSettings: () => void }, "toAssistant" | "toSettings">;
+  nav: { toAssistant: () => void; toSettings: () => void };
 }): ReadonlyArray<HeaderQuickAction> {
   return [
     {
