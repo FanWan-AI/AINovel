@@ -52,6 +52,12 @@ iOS/Android/Windows/macOS 架构、分发、账号同步与商店上架流程。
 14. [14-VSCode-Copilot-Agent持续开发操作手册.md](./14-VSCode-Copilot-Agent%E6%8C%81%E7%BB%AD%E5%BC%80%E5%8F%91%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C.md)  
 VS Code 中使用 Copilot Agent 连续开发的配置、节奏与故障恢复。
 
+15. [15-AI助手中枢化与设置中心重构详细设计.md](./15-AI%E5%8A%A9%E6%89%8B%E4%B8%AD%E6%9E%A2%E5%8C%96%E4%B8%8E%E8%AE%BE%E7%BD%AE%E4%B8%AD%E5%BF%83%E9%87%8D%E6%9E%84%E8%AF%A6%E7%BB%86%E8%AE%BE%E8%AE%A1.md)  
+AI助手从右侧面板升级为中间主页面智能体工作台，并完成设置中心重构方案。
+
+16. [16-AI助手中枢化升级-并行Issue包.md](./16-AI%E5%8A%A9%E6%89%8B%E4%B8%AD%E6%9E%A2%E5%8C%96%E5%8D%87%E7%BA%A7-%E5%B9%B6%E8%A1%8CIssue%E5%8C%85.md)  
+可并行派发给 Copilot Agents 的 8 个标准化 Issue，包含派发评论模板。
+
 ## 当前代码基线（用于对照）
 
 - Studio 前端：`packages/studio/src`

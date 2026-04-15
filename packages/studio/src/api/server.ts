@@ -15,7 +15,7 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
@@ -81,6 +81,19 @@ interface ChapterRunDiffData {
   readonly beforeContent: string | null;
   readonly afterContent: string | null;
   readonly briefTrace: ReadonlyArray<BriefTraceEntry>;
+  readonly pendingApproval: boolean;
+}
+
+interface ManualCandidateRevision {
+  readonly content: string;
+  readonly wordCount: number;
+  readonly updatedState: string;
+  readonly updatedLedger: string;
+  readonly updatedHooks: string;
+  readonly status: "ready-for-review" | "audit-failed";
+  readonly auditIssues: ReadonlyArray<string>;
+  readonly lengthWarnings?: ReadonlyArray<string>;
+  readonly lengthTelemetry?: unknown;
 }
 
 function broadcast(event: string, data: unknown): void {
@@ -399,6 +412,101 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   }
 
+  function isManualCandidateRevision(value: unknown): value is ManualCandidateRevision {
+    if (!value || typeof value !== "object") return false;
+    const record = value as Record<string, unknown>;
+    if (typeof record["content"] !== "string") return false;
+    if (typeof record["wordCount"] !== "number") return false;
+    if (typeof record["updatedState"] !== "string") return false;
+    if (typeof record["updatedLedger"] !== "string") return false;
+    if (typeof record["updatedHooks"] !== "string") return false;
+    if (record["status"] !== "ready-for-review" && record["status"] !== "audit-failed") return false;
+    if (!Array.isArray(record["auditIssues"])) return false;
+    return true;
+  }
+
+  function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
+    for (const event of [...run.events].reverse()) {
+      if (event.type !== "success" && event.type !== "fail") continue;
+      const data = event.data as Record<string, unknown> | undefined;
+      if (!data) continue;
+      const candidate = data["candidateRevision"];
+      if (isManualCandidateRevision(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  function shouldSkipTruthFileUpdate(value: string | undefined): boolean {
+    const trimmed = value?.trim();
+    if (!trimmed) return true;
+    if (/^\(.*未更新.*\)$/.test(trimmed)) return true;
+    if (/^\(.*not\s+updated.*\)$/i.test(trimmed)) return true;
+    return false;
+  }
+
+  async function applyApprovedCandidateRevision(params: {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+    readonly candidate: ManualCandidateRevision;
+  }): Promise<void> {
+    const { bookId, chapterNumber, candidate } = params;
+    const bookDir = state.bookDir(bookId);
+    const chapterIndex = await state.loadChapterIndex(bookId);
+    const chapterMeta = chapterIndex.find((chapter) => chapter.number === chapterNumber);
+    if (!chapterMeta) {
+      throw new Error(`Chapter ${chapterNumber} not found in index`);
+    }
+
+    const chaptersDir = join(bookDir, "chapters");
+    const chapterPrefix = String(chapterNumber).padStart(4, "0");
+    const chapterFiles = await readdir(chaptersDir);
+    const chapterFile = chapterFiles.find((file) => file.startsWith(chapterPrefix) && file.endsWith(".md"));
+    if (!chapterFile) {
+      throw new Error(`Chapter ${chapterNumber} file not found`);
+    }
+    const chapterPath = join(chaptersDir, chapterFile);
+
+    const currentRaw = await readFile(chapterPath, "utf-8").catch(() => "");
+    const firstLine = currentRaw.split(/\r?\n/)[0]?.trim() ?? "";
+    const heading = firstLine.startsWith("# ") ? firstLine : `# 第${chapterNumber}章 ${chapterMeta.title}`;
+    await writeFile(chapterPath, `${heading}\n\n${candidate.content}`, "utf-8");
+
+    const storyDir = join(bookDir, "story");
+    if (!shouldSkipTruthFileUpdate(candidate.updatedState)) {
+      await writeFile(join(storyDir, "current_state.md"), candidate.updatedState, "utf-8");
+    }
+    if (!shouldSkipTruthFileUpdate(candidate.updatedLedger)) {
+      await writeFile(join(storyDir, "particle_ledger.md"), candidate.updatedLedger, "utf-8");
+    }
+    if (!shouldSkipTruthFileUpdate(candidate.updatedHooks)) {
+      await writeFile(join(storyDir, "pending_hooks.md"), candidate.updatedHooks, "utf-8");
+    }
+
+    const now = new Date().toISOString();
+    const updatedIndex = chapterIndex.map((chapter) =>
+      chapter.number === chapterNumber
+        ? {
+            ...chapter,
+            status: candidate.status,
+            wordCount: candidate.wordCount,
+            updatedAt: now,
+            auditIssues: [...candidate.auditIssues],
+            lengthWarnings: candidate.lengthWarnings ? [...candidate.lengthWarnings] : [],
+            ...(candidate.lengthTelemetry ? { lengthTelemetry: candidate.lengthTelemetry as never } : {}),
+          }
+        : chapter,
+    );
+    await state.saveChapterIndex(bookId, updatedIndex);
+    const snapshotState = (state as unknown as {
+      snapshotState?: (bookId: string, chapterNumber: number) => Promise<void>;
+    }).snapshotState;
+    if (typeof snapshotState === "function") {
+      await snapshotState.call(state, bookId, chapterNumber).catch(() => undefined);
+    }
+  }
+
   function parseDiffData(run: ChapterRunRecord): ChapterRunDiffData {
     const terminalEvent = [...run.events]
       .reverse()
@@ -414,12 +522,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const matched = traceItem["matched"] === true;
       return text ? [{ text, matched }] : [];
     });
+    const pendingApproval = run.decision === "unchanged" && extractCandidateRevision(run) !== null;
     return {
       beforeContent,
       afterContent,
       briefTrace: briefTrace.length > 0
         ? briefTrace
         : buildBriefTrace(run.appliedBrief ?? undefined, beforeContent, afterContent, run.decision),
+      pendingApproval,
     };
   }
 
@@ -1310,8 +1420,86 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       beforeContent: diff.beforeContent,
       afterContent: diff.afterContent,
       briefTrace: diff.briefTrace,
+      pendingApproval: diff.pendingApproval,
       unchangedReason,
     });
+  });
+
+  app.post("/api/books/:id/chapter-runs/:runId/approve", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const run = await chapterRunStore.getRun(id, runId);
+    if (!run) {
+      return c.json({ error: "Run not found" }, 404);
+    }
+    if (run.status !== "succeeded" || run.decision !== "unchanged") {
+      return c.json({ error: "Only unchanged succeeded runs can be approved" }, 409);
+    }
+
+    const candidate = extractCandidateRevision(run);
+    if (!candidate) {
+      return c.json({ error: "No candidate revision available for approval" }, 409);
+    }
+
+    try {
+      await applyApprovedCandidateRevision({
+        bookId: id,
+        chapterNumber: run.chapter,
+        candidate,
+      });
+
+      const diff = parseDiffData(run);
+      await completeChapterRun({
+        bookId: id,
+        runId,
+        status: "succeeded",
+        decision: "applied",
+        unchangedReason: null,
+        message: "Candidate revision approved by user.",
+        data: {
+          beforeContent: diff.beforeContent,
+          afterContent: candidate.content,
+          briefTrace: diff.briefTrace,
+          approvedFromUnchangedRun: true,
+        },
+      });
+
+      const action: RuntimeAction = run.actionType === "rewrite"
+        ? "rewrite"
+        : run.actionType === "anti-detect"
+          ? "anti-detect"
+          : "revise";
+      emitActionEvent(action, "success", {
+        bookId: id,
+        chapterNumber: run.chapter,
+        briefUsed: run.appliedBrief !== null,
+        details: {
+          approvedFromRunId: runId,
+          decision: "applied",
+          message: "Candidate revision approved by user.",
+        },
+      });
+
+      return c.json({
+        ok: true,
+        runId,
+        chapter: run.chapter,
+        decision: "applied",
+        message: "Candidate revision approved and persisted.",
+      });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.delete("/api/books/:id/chapter-runs/:runId", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const removed = await chapterRunStore.deleteRun(id, runId);
+    if (!removed) {
+      return c.json({ error: "Run not found" }, 404);
+    }
+    return c.json({ ok: true, runId });
   });
 
   app.post("/api/runtime/clear", (c) => {
@@ -1440,9 +1628,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ).then(
         async (result) => {
           const decision = inferRunDecision("succeeded", result.applied);
-          const afterContent = await readChapterContentSnapshot(id, chapterNum);
+          const candidateRevision = result.candidateRevision;
+          const afterContent = decision === "unchanged" && candidateRevision
+            ? candidateRevision.content
+            : await readChapterContentSnapshot(id, chapterNum);
           const briefTrace = buildBriefTrace(appliedBrief, beforeContent, afterContent, decision);
           const unmatchedBrief = briefUsed && briefTrace.length > 0 && briefTrace.every((item) => !item.matched);
+          const pendingApproval = decision === "unchanged" && Boolean(candidateRevision);
           const unchangedReason = decision === "unchanged"
             ? ((result.unchangedReason ?? result.skippedReason ?? "").trim() || NO_REVISIONS_APPLIED_MESSAGE)
             : null;
@@ -1454,6 +1646,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               fixedCount: result.fixedIssues.length,
               status: result.status,
               ...(decision === "unchanged" && unmatchedBrief ? { reasonCode: "brief-unmatched" } : {}),
+              ...(pendingApproval ? { reasonCode: "pending-approval" } : {}),
               ...(decision === "unchanged" ? { message: unchangedReason } : {}),
             },
           });
@@ -1469,11 +1662,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               beforeContent,
               afterContent,
               briefTrace,
+              pendingApproval,
+              ...(candidateRevision ? { candidateRevision } : {}),
             },
           });
         },
         async (e) => {
           const error = e instanceof Error ? e.message : String(e);
+          // Keep stack traces in server console for actionable debugging.
+          // Runtime event payload stays concise for UI.
+          console.error("[studio][revise] failed", e);
           emitActionEvent(action, "fail", {
             bookId: id,
             chapterNumber: chapterNum,

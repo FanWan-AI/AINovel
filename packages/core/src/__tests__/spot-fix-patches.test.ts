@@ -72,6 +72,27 @@ describe("spot-fix patches", () => {
     expect(result.rejectedReason).toContain("exactly once");
   });
 
+  it("rejects patches with empty replacement text", () => {
+    const original = [
+      "第一句。",
+      "第二句。",
+      "第三句，保留不动。",
+      "第四句，保留不动。",
+      "第五句，保留不动。",
+    ].join("\n");
+
+    const result = applySpotFixPatches(original, [
+      {
+        targetText: "第二句。",
+        replacementText: "",
+      },
+    ]);
+
+    expect(result.applied).toBe(false);
+    expect(result.revisedContent).toBe(original);
+    expect(result.rejectedReason).toContain("must not be empty");
+  });
+
   it("rejects oversized patch sets that touch too much of the chapter", () => {
     const original = [
       "第一段很长，需要保留原样。",

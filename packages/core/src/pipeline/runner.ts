@@ -56,6 +56,13 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
 const APPLIED_BRIEF_MAX_ITEMS = 2;
 const APPLIED_BRIEF_SEPARATOR = "；";
 const APPLIED_BRIEF_ELLIPSIS = "…";
+const INTENT_DRIVEN_BLOCKING_DRIFT_TOLERANCE_BY_MODE: Readonly<Record<ReviseMode, number>> = {
+  "spot-fix": 0,
+  polish: 1,
+  rewrite: 2,
+  rework: 2,
+  "anti-detect": 2,
+};
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
@@ -128,6 +135,18 @@ export interface ChapterActionResult {
   readonly unchangedReason?: string;
 }
 
+export interface ReviseCandidateRevision {
+  readonly content: string;
+  readonly wordCount: number;
+  readonly updatedState: string;
+  readonly updatedLedger: string;
+  readonly updatedHooks: string;
+  readonly status: "ready-for-review" | "audit-failed";
+  readonly auditIssues: ReadonlyArray<string>;
+  readonly lengthWarnings?: ReadonlyArray<string>;
+  readonly lengthTelemetry?: LengthTelemetry;
+}
+
 export interface ReviseResult extends ChapterActionResult {
   readonly chapterNumber: number;
   readonly wordCount: number;
@@ -137,6 +156,8 @@ export interface ReviseResult extends ChapterActionResult {
   readonly skippedReason?: string;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
+  readonly reviewRequired?: boolean;
+  readonly candidateRevision?: ReviseCandidateRevision;
 }
 
 export interface TruthFiles {
@@ -847,15 +868,19 @@ export class PipelineRunner {
   /** Revise the latest (or specified) chapter based on audit issues. */
   async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = DEFAULT_REVISE_MODE): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
+    let targetChapter = chapterNumber ?? 0;
+    let fallbackCountingMode = resolveLengthCountingMode("zh");
+    let lastKnownContent = "";
     try {
       const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
-      const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
+      targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
       if (targetChapter < 1) {
         throw new Error(`No chapters to revise for "${bookId}"`);
       }
 
       const stageLanguage = await this.resolveBookLanguage(book);
+      fallbackCountingMode = resolveLengthCountingMode(book.language ?? stageLanguage);
       // Read the current audit issues from index
       this.logStage(stageLanguage, {
         zh: `加载第${targetChapter}章修订上下文`,
@@ -869,10 +894,12 @@ export class PipelineRunner {
 
       // Re-audit to get structured issues (index only stores strings)
       const content = await this.readChapterContent(bookDir, targetChapter);
+      lastKnownContent = content;
       const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
       const { profile: gp } = await this.loadGenreProfile(book.genre);
       const language = book.language ?? gp.language;
       const countingMode = resolveLengthCountingMode(language);
+      fallbackCountingMode = countingMode;
       const reviseControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
         ? undefined
         : await this.createGovernedArtifacts(
@@ -1030,15 +1057,20 @@ export class PipelineRunner {
       const improvedBlocking = effectivePostRevision.blockingCount < preRevision.blockingCount;
       const improvedAITells = effectivePostRevision.aiTellCount < preRevision.aiTellCount;
       const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
+      const intentBlockingTolerance = INTENT_DRIVEN_BLOCKING_DRIFT_TOLERANCE_BY_MODE[mode] ?? 1;
+      const blockingWithinIntentTolerance = effectivePostRevision.blockingCount
+        <= preRevision.blockingCount + intentBlockingTolerance;
       const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
       const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
+      const blockingDelta = effectivePostRevision.blockingCount - preRevision.blockingCount;
+      const criticalDelta = effectivePostRevision.criticalCount - preRevision.criticalCount;
+      const aiTellDelta = effectivePostRevision.aiTellCount - preRevision.aiTellCount;
       const normalizedSource = content.trim();
       const normalizedRevised = normalizedRevision.content.trim();
       const contentChanged = normalizedSource !== normalizedRevised;
       const shouldApplyRevision = allowIntentDrivenRevision
-        ? blockingDidNotWorsen
+        ? blockingWithinIntentTolerance
           && criticalDidNotWorsen
-          && aiDidNotWorsen
           && contentChanged
         : blockingDidNotWorsen
           && criticalDidNotWorsen
@@ -1046,11 +1078,32 @@ export class PipelineRunner {
           && (improvedBlocking || improvedAITells);
       const preAuditTrace = `pre(blocking=${preRevision.blockingCount},critical=${preRevision.criticalCount},aiTell=${preRevision.aiTellCount})`;
       const postAuditTrace = `post(blocking=${effectivePostRevision.blockingCount},critical=${effectivePostRevision.criticalCount},aiTell=${effectivePostRevision.aiTellCount})`;
+      const deltaTrace = `delta(blocking=${blockingDelta >= 0 ? `+${blockingDelta}` : String(blockingDelta)},critical=${criticalDelta >= 0 ? `+${criticalDelta}` : String(criticalDelta)},aiTell=${aiTellDelta >= 0 ? `+${aiTellDelta}` : String(aiTellDelta)})`;
+      const intentToleranceTrace = `intentBlockingTolerance=+${intentBlockingTolerance}`;
+      const reviewRequired = contentChanged;
+      const candidateRevision: ReviseCandidateRevision | undefined = reviewRequired
+        ? {
+            content: normalizedRevision.content,
+            wordCount: normalizedRevision.wordCount,
+            updatedState: reviseOutput.updatedState,
+            updatedLedger: reviseOutput.updatedLedger,
+            updatedHooks: reviseOutput.updatedHooks,
+            status: effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed",
+            auditIssues: effectivePostRevision.auditResult.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
+            lengthWarnings,
+            lengthTelemetry,
+          }
+        : undefined;
 
       if (!shouldApplyRevision) {
-        const unchangedReason = allowIntentDrivenRevision
-          ? "Manual revision produced no stable textual change under current safeguards; kept original chapter."
-          : "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.";
+        let unchangedReason = "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.";
+        if (allowIntentDrivenRevision) {
+          if (!contentChanged) {
+            unchangedReason = "Manual revision produced no stable textual change under current safeguards; kept original chapter.";
+          } else if (!criticalDidNotWorsen || !blockingWithinIntentTolerance) {
+            unchangedReason = `Manual revision changed text, but safeguards rejected metric drift (blocking ${preRevision.blockingCount}->${effectivePostRevision.blockingCount}, critical ${preRevision.criticalCount}->${effectivePostRevision.criticalCount}; mode=${mode}, intent tolerance allows blocking drift <= +${intentBlockingTolerance}).`;
+          }
+        }
         return {
           chapterNumber: targetChapter,
           wordCount: revisionBaseCount,
@@ -1062,12 +1115,16 @@ export class PipelineRunner {
             `intentDriven=${allowIntentDrivenRevision}`,
             preAuditTrace,
             postAuditTrace,
+            deltaTrace,
+            intentToleranceTrace,
             "gate=rollback:not-improved",
           ],
           unchangedReason,
           applied: false,
           status: "unchanged",
           skippedReason: unchangedReason,
+          reviewRequired,
+          ...(candidateRevision ? { candidateRevision } : {}),
         };
       }
       this.logLengthWarnings(lengthWarnings);
@@ -1160,6 +1217,8 @@ export class PipelineRunner {
           `intentDriven=${allowIntentDrivenRevision}`,
           preAuditTrace,
           postAuditTrace,
+          deltaTrace,
+          intentToleranceTrace,
           "gate=applied",
         ],
         applied: true,
@@ -1167,6 +1226,27 @@ export class PipelineRunner {
         lengthWarnings,
         lengthTelemetry,
       };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/Cannot read properties of undefined \(reading '0'\)/.test(message)) {
+        const unchangedReason = "Revision parser hit malformed intermediate data; kept original chapter.";
+        return {
+          chapterNumber: targetChapter > 0 ? targetChapter : (chapterNumber ?? 0),
+          wordCount: countChapterLength(lastKnownContent, fallbackCountingMode),
+          fixedIssues: [],
+          actionType: mode,
+          decision: "unchanged",
+          briefTrace: [
+            `mode=${mode}`,
+            "gate=rollback:parser-guard",
+          ],
+          unchangedReason,
+          applied: false,
+          status: "unchanged",
+          skippedReason: unchangedReason,
+        };
+      }
+      throw error;
     } finally {
       await releaseLock();
     }

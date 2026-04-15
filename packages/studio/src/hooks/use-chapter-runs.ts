@@ -247,6 +247,10 @@ export function useChapterRuns(bookId: string) {
     setErrorKey(loaded.error);
   }, [bookId]);
 
+  const removeRun = useCallback((runId: string) => {
+    setRuns((prev) => prev.filter((run) => run.id !== runId));
+  }, []);
+
   return {
     runs,
     loading,
@@ -256,5 +260,6 @@ export function useChapterRuns(bookId: string) {
     finishRun,
     applyLifecycleUpdate,
     retryLoad,
+    removeRun,
   };
 }

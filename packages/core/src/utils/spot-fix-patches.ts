@@ -60,6 +60,16 @@ export function applySpotFixPatches(
   let current = original;
 
   for (const patch of patches) {
+    if (patch.replacementText.trim().length === 0) {
+      return {
+        applied: false,
+        revisedContent: original,
+        rejectedReason: "REPLACEMENT_TEXT must not be empty.",
+        appliedPatchCount: 0,
+        touchedChars,
+      };
+    }
+
     const start = current.indexOf(patch.targetText);
     if (start === -1) {
       return {

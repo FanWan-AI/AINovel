@@ -4235,6 +4235,8 @@ describe("PipelineRunner", () => {
       ]));
       expect(result.unchangedReason).toContain("did not improve");
       expect(result.skippedReason).toContain("did not improve");
+      expect(result.reviewRequired).toBe(true);
+      expect(result.candidateRevision?.content).toContain("修订后收束更利落");
       expect(savedChapter).toContain(originalBody);
       expect(savedChapter).not.toContain("修订后收束更利落");
       expect(savedIndex[0]?.status).toBe("audit-failed");
@@ -4728,6 +4730,352 @@ describe("PipelineRunner", () => {
         "gate=applied",
       ]));
       expect(savedChapter).toContain(rewrittenBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("applies polish when text changes and blocking drift stays within intent tolerance", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "万凡收住脚步，先摸门栓，再听门外的雨点。";
+    const polishedBody = "万凡先把脚步压住，指尖摸过门栓，雨点在门外敲出更细的节拍。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "青石巷",
+        protagonistState: "万凡仍在躲避追兵。",
+        goal: "确认门后是否安全。",
+        conflict: "追兵已逼近巷口。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [{
+            severity: "warning",
+            category: "节奏",
+            description: "句式有些僵硬。",
+            suggestion: "放松句式节拍。",
+          }],
+          summary: "needs polish",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [
+            {
+              severity: "warning",
+              category: "节奏",
+              description: "句式有些僵硬。",
+              suggestion: "放松句式节拍。",
+            },
+            {
+              severity: "warning",
+              category: "语句",
+              description: "个别句子略长。",
+              suggestion: "拆句。",
+            },
+          ],
+          summary: "minor drift",
+        }),
+      );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: polishedBody,
+        wordCount: polishedBody.length,
+        fixedIssues: ["- 调整了动作句节拍。"],
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "青石巷",
+          protagonistState: "万凡仍在躲避追兵。",
+          goal: "确认门后是否安全。",
+          conflict: "追兵已逼近巷口。",
+        }),
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "polish");
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(result.actionType).toBe("polish");
+      expect(result.decision).toBe("applied");
+      expect(result.applied).toBe(true);
+      expect(result.briefTrace).toEqual(expect.arrayContaining([
+        "mode=polish",
+        "intentDriven=true",
+        "delta(blocking=+1,critical=+0,aiTell=+0)",
+        "gate=applied",
+      ]));
+      expect(savedChapter).toContain(polishedBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("applies rewrite when blocking drift is +2 under mode-based intent tolerance", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "万凡靠墙停住，先听雨，再数脚步。";
+    const rewrittenBody = "万凡背贴湿墙把呼吸压低，雨脚敲在檐角，他顺着第三串脚步声判断巡逻换线。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "青石巷",
+        protagonistState: "万凡仍在躲避追兵。",
+        goal: "确认巡逻路线。",
+        conflict: "巷口追兵持续逼近。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [{
+            severity: "warning",
+            category: "节奏",
+            description: "推进偏平。",
+            suggestion: "增强动作层次。",
+          }],
+          summary: "needs rewrite",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [
+            {
+              severity: "warning",
+              category: "节奏",
+              description: "推进偏平。",
+              suggestion: "增强动作层次。",
+            },
+            {
+              severity: "warning",
+              category: "语句",
+              description: "个别句子略长。",
+              suggestion: "拆句。",
+            },
+            {
+              severity: "warning",
+              category: "视角",
+              description: "视角切换略快。",
+              suggestion: "增加过渡。",
+            },
+          ],
+          summary: "acceptable drift for rewrite",
+        }),
+      );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: rewrittenBody,
+        wordCount: rewrittenBody.length,
+        fixedIssues: ["- 重组了动作推进链。"],
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "青石巷",
+          protagonistState: "万凡仍在躲避追兵。",
+          goal: "确认巡逻路线。",
+          conflict: "巷口追兵持续逼近。",
+        }),
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rewrite");
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(result.actionType).toBe("rewrite");
+      expect(result.decision).toBe("applied");
+      expect(result.applied).toBe(true);
+      expect(result.briefTrace).toEqual(expect.arrayContaining([
+        "mode=rewrite",
+        "intentDriven=true",
+        "delta(blocking=+2,critical=+0,aiTell=+0)",
+        "intentBlockingTolerance=+2",
+        "gate=applied",
+      ]));
+      expect(savedChapter).toContain(rewrittenBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns candidate revision for manual approval when rewrite is rejected by safeguards", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "万凡把呼吸压低，靠墙等雨声盖过脚步。";
+    const rewrittenBody = "万凡背贴砖墙压住呼吸，等雨脚砸进巷口，他才顺着回声错开巡逻视线。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "青石巷",
+        protagonistState: "万凡仍在躲避追兵。",
+        goal: "摸清巡逻换岗规律。",
+        conflict: "追兵持续压进巷口。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [{
+            severity: "warning",
+            category: "节奏",
+            description: "推进偏平。",
+            suggestion: "增强动作层次。",
+          }],
+          summary: "needs rewrite",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [
+            {
+              severity: "warning",
+              category: "节奏",
+              description: "推进偏平。",
+              suggestion: "增强动作层次。",
+            },
+            {
+              severity: "critical",
+              category: "连续性",
+              description: "关键动机表达不稳定。",
+              suggestion: "收束动机描述。",
+            },
+          ],
+          summary: "rejected by safeguards",
+        }),
+      );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: rewrittenBody,
+        wordCount: rewrittenBody.length,
+        fixedIssues: ["- 重组了动作推进链。"],
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "青石巷",
+          protagonistState: "万凡仍在躲避追兵。",
+          goal: "摸清巡逻换岗规律。",
+          conflict: "追兵持续压进巷口。",
+        }),
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rewrite");
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(result.decision).toBe("unchanged");
+      expect(result.applied).toBe(false);
+      expect(result.reviewRequired).toBe(true);
+      expect(result.candidateRevision).toBeDefined();
+      expect(result.candidateRevision?.content).toContain("回声错开巡逻视线");
+      expect(result.candidateRevision?.status).toBe("audit-failed");
+      expect(savedChapter).toContain(originalBody);
+      expect(savedChapter).not.toContain("回声错开巡逻视线");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to unchanged when internal revise parser crashes with undefined[0]", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "万凡在门口停住，先听动静，再确认仓库里的脚步声。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "仓储区",
+        protagonistState: "万凡准备继续推进旧书分拣。",
+        goal: "确认关键线索来源。",
+        conflict: "线索信息杂乱且有外部干扰。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: false,
+        issues: [CRITICAL_ISSUE],
+        summary: "needs revision",
+      }),
+    );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockRejectedValue(
+      new TypeError("Cannot read properties of undefined (reading '0')"),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rework");
+      expect(result.decision).toBe("unchanged");
+      expect(result.status).toBe("unchanged");
+      expect(result.unchangedReason).toContain("parser hit malformed intermediate data");
+      expect(result.briefTrace).toContain("gate=rollback:parser-guard");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

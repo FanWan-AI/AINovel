@@ -458,6 +458,11 @@ export const strings = {
   "chapterTaskCenter.empty": { zh: "暂无章节任务记录。", en: "No chapter task runs yet." },
   "chapterTaskCenter.emptyFiltered": { zh: "当前筛选下暂无匹配任务。", en: "No runs match current filters." },
   "chapterTaskCenter.retry": { zh: "重试", en: "Retry" },
+  "chapterTaskCenter.expand": { zh: "展开", en: "Expand" },
+  "chapterTaskCenter.collapse": { zh: "收起", en: "Collapse" },
+  "chapterTaskCenter.collapsedSummary": { zh: "已收起，当前可见 {count} 条匹配任务。", en: "Collapsed. {count} matching task runs." },
+  "chapterTaskCenter.deleteEntry": { zh: "删除条目", en: "Delete Entry" },
+  "chapterTaskCenter.confirmDeleteEntry": { zh: "确认删除这条任务记录？", en: "Delete this task record?" },
   "chapterTaskCenter.storageReadFailed": { zh: "任务记录读取失败，请重试。", en: "Failed to read task runs. Please retry." },
   "chapterTaskCenter.storageWriteFailed": { zh: "任务记录写入失败（将仅本次会话可见）。", en: "Failed to persist task runs (visible for this session only)." },
 
@@ -475,8 +480,13 @@ export const strings = {
   "chapterDiff.briefTraceEmpty": { zh: "本次未提供补充想法。", en: "No brief provided for this run." },
   "chapterDiff.traceMatched": { zh: "命中", en: "Matched" },
   "chapterDiff.traceMissed": { zh: "未命中", en: "Missed" },
+  "chapterDiff.approveCandidate": { zh: "人工通过并落盘", en: "Approve and Apply" },
   "chapterDiff.unchangedReasonLabel": { zh: "未改动原因：", en: "Unchanged reason: " },
   "chapterDiff.unchangedReasonFallback": { zh: "本次运行未产生可应用改动。", en: "This run produced no applicable changes." },
+  "chapterDiff.expand": { zh: "展开", en: "Expand" },
+  "chapterDiff.collapse": { zh: "收起", en: "Collapse" },
+  "chapterDiff.collapsedSummary": { zh: "已收起，当前可查看 {count} 条 Diff 记录。", en: "Collapsed. {count} diff-ready runs." },
+  "chapterDiff.confirmDeleteEntry": { zh: "确认删除这条 Diff 记录？", en: "Delete this diff record?" },
 
   // Quality-gate error shown when AI output is too generic
   "book.planLowConfidence": { zh: "建议生成失败，请补充关键冲突后再试", en: "Suggestion failed — please add more conflict context and try again." },

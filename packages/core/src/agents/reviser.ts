@@ -307,12 +307,23 @@ ${chapterContent}`;
       };
     }
 
-    const revisedContent = extract("REVISED_CONTENT");
+    let revisedContent = extract("REVISED_CONTENT");
+    if (revisedContent.length === 0) {
+      const patches = parseSpotFixPatches(extract("PATCHES"));
+      const patchResult = applySpotFixPatches(originalChapter, patches);
+      if (patchResult.applied && patchResult.revisedContent.trim().length > 0) {
+        revisedContent = patchResult.revisedContent;
+      }
+    }
+    if (revisedContent.length === 0) {
+      revisedContent = originalChapter;
+    }
+    const hasEffectiveChange = revisedContent.trim() !== originalChapter.trim();
 
     return {
       revisedContent,
       wordCount: revisedContent.length,
-      fixedIssues,
+      fixedIssues: hasEffectiveChange ? fixedIssues : [],
       updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",
       updatedLedger: gp.numericalSystem
         ? (extract("UPDATED_LEDGER") || "(账本未更新)")

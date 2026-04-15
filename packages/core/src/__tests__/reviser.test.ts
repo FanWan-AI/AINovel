@@ -300,6 +300,59 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("falls back to original chapter when non-spot-fix output misses REVISED_CONTENT", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-empty-guard-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "- repaired",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    const original = "原始正文。";
+    try {
+      const result = await agent.reviseChapter(
+        bookDir,
+        original,
+        1,
+        [CRITICAL_ISSUE],
+        "rewrite",
+        "xuanhuan",
+      );
+
+      expect(result.revisedContent).toBe(original);
+      expect(result.fixedIssues).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses selected summary and hook evidence instead of full long-history markdown in governed mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-governed-test-"));
     const bookDir = join(root, "book");

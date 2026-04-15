@@ -16,15 +16,18 @@ export interface ChapterRunDiffPayload {
   readonly beforeContent: string | null;
   readonly afterContent: string | null;
   readonly briefTrace: ReadonlyArray<ChapterRunBriefTraceItem>;
+  readonly pendingApproval?: boolean;
 }
 
 interface ChapterDiffDialogProps {
   readonly open: boolean;
   readonly loading: boolean;
+  readonly approving?: boolean;
   readonly error: string | null;
   readonly payload: ChapterRunDiffPayload | null;
   readonly t: TFunction;
   readonly onClose: () => void;
+  readonly onApprove?: (runId: string) => Promise<void>;
 }
 
 type SegmentKind = "same" | "add" | "remove";
@@ -236,10 +239,12 @@ function segmentClass(kind: SegmentKind): string {
 export function ChapterDiffDialog({
   open,
   loading,
+  approving = false,
   error,
   payload,
   t,
   onClose,
+  onApprove,
 }: ChapterDiffDialogProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const diffRows = payload ? buildDiffRows(payload.beforeContent ?? "", payload.afterContent ?? "") : [];
@@ -304,8 +309,21 @@ export function ChapterDiffDialog({
             <>
               {payload.decision === "unchanged" && (
                 <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-700">
-                  <span className="font-semibold">{t("chapterDiff.unchangedReasonLabel")}</span>{" "}
-                  {payload.unchangedReason ?? t("chapterDiff.unchangedReasonFallback")}
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <span className="font-semibold">{t("chapterDiff.unchangedReasonLabel")}</span>{" "}
+                      {payload.unchangedReason ?? t("chapterDiff.unchangedReasonFallback")}
+                    </div>
+                    {payload.pendingApproval && onApprove && (
+                      <button
+                        onClick={() => { void onApprove(payload.runId); }}
+                        disabled={approving}
+                        className="px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 disabled:opacity-50"
+                      >
+                        {approving ? t("common.loading") : t("chapterDiff.approveCandidate")}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 

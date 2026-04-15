@@ -30,7 +30,9 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
-  Save
+  Save,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 
 interface ChapterMeta {
@@ -200,8 +202,12 @@ export function BookDetail({
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
   const [chapterDiffOpen, setChapterDiffOpen] = useState(false);
   const [chapterDiffLoading, setChapterDiffLoading] = useState(false);
+  const [chapterDiffApproving, setChapterDiffApproving] = useState(false);
+  const [chapterDiffDeletingRunId, setChapterDiffDeletingRunId] = useState<string | null>(null);
   const [chapterDiffError, setChapterDiffError] = useState<string | null>(null);
   const [chapterDiffPayload, setChapterDiffPayload] = useState<ChapterRunDiffPayload | null>(null);
+  const [chapterTaskCenterCollapsed, setChapterTaskCenterCollapsed] = useState(true);
+  const [chapterDiffCollapsed, setChapterDiffCollapsed] = useState(true);
   const {
     runs: chapterRuns,
     loading: chapterRunsLoading,
@@ -211,6 +217,7 @@ export function BookDetail({
     finishRun,
     applyLifecycleUpdate,
     retryLoad: retryChapterRunsLoad,
+    removeRun: removeChapterTaskRun,
   } = useChapterRuns(bookId);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
@@ -434,6 +441,7 @@ export function BookDetail({
   const openChapterDiffDialog = async (runId: string) => {
     setChapterDiffOpen(true);
     setChapterDiffLoading(true);
+    setChapterDiffApproving(false);
     setChapterDiffError(null);
     try {
       const diff = await fetchJson<ChapterRunDiffPayload>(`/books/${bookId}/chapter-runs/${runId}/diff`);
@@ -450,6 +458,40 @@ export function BookDetail({
       setChapterDiffError(e instanceof Error ? e.message : String(e));
     } finally {
       setChapterDiffLoading(false);
+    }
+  };
+
+  const approveChapterDiffRun = async (runId: string) => {
+    setChapterDiffApproving(true);
+    setChapterDiffError(null);
+    try {
+      await postApi(`/books/${bookId}/chapter-runs/${runId}/approve`);
+      await openChapterDiffDialog(runId);
+      await refetchChapterRunSummary();
+      refetch();
+    } catch (e) {
+      setChapterDiffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChapterDiffApproving(false);
+    }
+  };
+
+  const deleteChapterDiffRun = async (runId: string) => {
+    const confirmed = window.confirm(t("chapterDiff.confirmDeleteEntry"));
+    if (!confirmed) return;
+    setChapterDiffDeletingRunId(runId);
+    setChapterDiffError(null);
+    try {
+      await fetchJson<{ ok: boolean; runId: string }>(`/books/${bookId}/chapter-runs/${runId}`, { method: "DELETE" });
+      if (chapterDiffPayload?.runId === runId) {
+        setChapterDiffOpen(false);
+        setChapterDiffPayload(null);
+      }
+      await refetchChapterRunSummary();
+    } catch (e) {
+      setChapterDiffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChapterDiffDeletingRunId(null);
     }
   };
 
@@ -863,25 +905,44 @@ export function BookDetail({
         loading={chapterRunsLoading}
         errorKey={chapterRunsErrorKey}
         onRetry={retryChapterRunsLoad}
+        onDeleteRun={removeChapterTaskRun}
+        collapsed={chapterTaskCenterCollapsed}
+        onToggleCollapsed={() => setChapterTaskCenterCollapsed((prev) => !prev)}
         t={t}
       />
 
       <section className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.title")}</h2>
-          <span className="text-xs text-muted-foreground">{t("chapterDiff.hint")}</span>
+          <div className="space-y-1">
+            <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.title")}</h2>
+            <span className="text-xs text-muted-foreground">{t("chapterDiff.hint")}</span>
+          </div>
+          <button
+            onClick={() => setChapterDiffCollapsed((prev) => !prev)}
+            className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60 transition-colors"
+          >
+            {chapterDiffCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            {chapterDiffCollapsed ? t("chapterDiff.expand") : t("chapterDiff.collapse")}
+          </button>
         </div>
-        {chapterRunSummaryLoading && (
+
+        {chapterDiffCollapsed && (
+          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-3 text-xs text-muted-foreground">
+            {t("chapterDiff.collapsedSummary").replace("{count}", String(diffEnabledRuns.length))}
+          </div>
+        )}
+
+        {!chapterDiffCollapsed && chapterRunSummaryLoading && (
           <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
             {t("chapterDiff.loading")}
           </div>
         )}
-        {!chapterRunSummaryLoading && diffEnabledRuns.length === 0 && (
+        {!chapterDiffCollapsed && !chapterRunSummaryLoading && diffEnabledRuns.length === 0 && (
           <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
             {t("chapterDiff.empty")}
           </div>
         )}
-        {!chapterRunSummaryLoading && diffEnabledRuns.length > 0 && (
+        {!chapterDiffCollapsed && !chapterRunSummaryLoading && diffEnabledRuns.length > 0 && (
           <div className="space-y-2">
             {diffEnabledRuns.map((run) => (
               <div key={run.runId} className="rounded-xl border border-border/40 bg-card/50 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
@@ -889,12 +950,21 @@ export function BookDetail({
                   <span className="font-semibold">{t("chapter.label").replace("{n}", String(run.chapter))}</span>
                   <span className="text-muted-foreground"> · {run.actionType}</span>
                 </div>
-                <button
-                  onClick={() => { openChapterDiffDialog(run.runId); }}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
-                >
-                  {t("chapterDiff.viewButton")}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { openChapterDiffDialog(run.runId); }}
+                    className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
+                  >
+                    {t("chapterDiff.viewButton")}
+                  </button>
+                  <button
+                    onClick={() => { void deleteChapterDiffRun(run.runId); }}
+                    disabled={chapterDiffDeletingRunId === run.runId}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg border border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive hover:text-white transition-colors disabled:opacity-50"
+                  >
+                    {chapterDiffDeletingRunId === run.runId ? t("common.loading") : t("common.delete")}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -953,11 +1023,13 @@ export function BookDetail({
       <ChapterDiffDialog
         open={chapterDiffOpen}
         loading={chapterDiffLoading}
+        approving={chapterDiffApproving}
         error={chapterDiffError}
         payload={chapterDiffPayload}
         t={t}
+        onApprove={approveChapterDiffRun}
         onClose={() => {
-          if (chapterDiffLoading) return;
+          if (chapterDiffLoading || chapterDiffApproving) return;
           setChapterDiffOpen(false);
           setChapterDiffError(null);
           setChapterDiffPayload(null);

@@ -116,6 +116,16 @@ export class ChapterRunStore {
     return [...run.events].sort((a, b) => a.index - b.index);
   }
 
+  async deleteRun(bookId: string, runId: string): Promise<boolean> {
+    let removed = false;
+    await this.mutateRuns(bookId, (runs) => {
+      const next = runs.filter((run) => run.runId !== runId);
+      removed = next.length !== runs.length;
+      return next;
+    });
+    return removed;
+  }
+
   private async mutateRuns(bookId: string, updater: (runs: ChapterRunRecord[]) => ChapterRunRecord[]): Promise<void> {
     await this.enqueueMutation(bookId, async () => {
       const ledger = await this.readLedger(bookId);

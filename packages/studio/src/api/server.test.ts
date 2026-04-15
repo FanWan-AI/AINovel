@@ -902,6 +902,34 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(eventsData.events.map((event) => event.status)).toEqual(["running", "succeeded"]);
   });
 
+  it("supports deleting a chapter run record", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const reviseResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite", brief: "删除测试" }),
+    });
+    expect(reviseResponse.status).toBe(200);
+    const reviseData = await reviseResponse.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}`);
+      const runBody = await runResponse.json() as { status: string };
+      expect(runBody.status).toBe("succeeded");
+    });
+
+    const deleteResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}`, {
+      method: "DELETE",
+    });
+    expect(deleteResponse.status).toBe(200);
+    await expect(deleteResponse.json()).resolves.toMatchObject({ ok: true, runId: reviseData.runId });
+
+    const lookupAfterDelete = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}`);
+    expect(lookupAfterDelete.status).toBe(404);
+  });
+
   it("exposes run-level before/after diff and briefTrace for revise/rewrite/anti-detect", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -1111,6 +1139,91 @@ describe("createStudioServer daemon lifecycle", () => {
     };
     const unchangedEvent = runtimeData.entries.find((entry) => entry.event === "revise:unchanged");
     expect(unchangedEvent?.data?.reasonCode).toBe("brief-unmatched");
+  });
+
+  it("allows approving unchanged revise runs when candidate revision is available", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    await writeFile(chapterPath, "# 第3章\n原文。", "utf-8");
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "Demo",
+        status: "audit-failed",
+        wordCount: 1200,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+
+    reviseDraftMock.mockResolvedValue({
+      chapterNumber: 3,
+      wordCount: 1200,
+      fixedIssues: [],
+      applied: false,
+      status: "unchanged",
+      unchangedReason: "Manual revision changed text, but safeguards rejected metric drift.",
+      reviewRequired: true,
+      candidateRevision: {
+        content: "候选稿：主线冲突前置并收紧转场。",
+        wordCount: 1222,
+        updatedState: "(状态卡未更新)",
+        updatedLedger: "(账本未更新)",
+        updatedHooks: "(伏笔池未更新)",
+        status: "audit-failed",
+        auditIssues: ["[critical] 动机承接偏弱"],
+        lengthWarnings: [],
+      },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const startResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite", brief: "强化师债主线" }),
+    });
+    expect(startResponse.status).toBe(200);
+    const { runId } = await startResponse.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}`);
+      const run = await runResponse.json() as { status: string; decision: string | null };
+      expect(run.status).toBe("succeeded");
+      expect(run.decision).toBe("unchanged");
+    });
+
+    const diffBeforeApprove = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/diff`);
+    expect(diffBeforeApprove.status).toBe(200);
+    await expect(diffBeforeApprove.json()).resolves.toMatchObject({
+      runId,
+      decision: "unchanged",
+      pendingApproval: true,
+      afterContent: expect.stringContaining("候选稿"),
+    });
+
+    const approveResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/approve`, {
+      method: "POST",
+    });
+    expect(approveResponse.status).toBe(200);
+    await expect(approveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      runId,
+      decision: "applied",
+    });
+
+    const approvedRunResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}`);
+    expect(approvedRunResponse.status).toBe(200);
+    await expect(approvedRunResponse.json()).resolves.toMatchObject({
+      runId,
+      decision: "applied",
+    });
+
+    await expect(readFile(chapterPath, "utf-8")).resolves.toContain("候选稿：主线冲突前置并收紧转场");
   });
 
   it("returns chapter-run validation and not-found errors for invalid queries", async () => {
