@@ -17,7 +17,12 @@ import { ImportManager } from "./pages/ImportManager";
 import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
 import { AssistantView } from "./pages/AssistantView";
-import { SettingsView, type SettingsTab } from "./pages/SettingsView";
+import {
+  SettingsView,
+  type SettingsTab,
+  DEFAULT_SETTINGS_TAB,
+  normalizeSettingsTab,
+} from "./pages/SettingsView";
 import { LanguageSelector } from "./pages/LanguageSelector";
 import { useSSE } from "./hooks/use-sse";
 import { useTheme } from "./hooks/use-theme";
@@ -75,6 +80,22 @@ export function resolveLegacyRoute(route: Route): Route {
   }
 
   return route;
+}
+
+export function parseSettingsTabFromQuery(search: string): SettingsTab | undefined {
+  const rawTab = new URLSearchParams(search).get("tab");
+  if (rawTab === null) {
+    return undefined;
+  }
+  return normalizeSettingsTab(rawTab);
+}
+
+export function resolveInitialRouteFromSearch(search: string): Route {
+  const tab = parseSettingsTabFromQuery(search);
+  if (tab) {
+    return { page: "settings", tab };
+  }
+  return { page: "dashboard" };
 }
 
 export function deriveActiveBookId(route: Route): string | undefined {
@@ -182,7 +203,7 @@ function toNotification(msg: SSEMessage, index: number): AppNotification | null 
 }
 
 export function App() {
-  const [rawRoute, setRoute] = useState<Route>({ page: "dashboard" });
+  const [rawRoute, setRoute] = useState<Route>(() => resolveInitialRouteFromSearch(window.location.search));
   const sse = useSSE();
   const { theme, setTheme } = useTheme();
   const { t } = useI18n();
@@ -227,7 +248,7 @@ export function App() {
     toDaemon: () => setRoute(routeToRuntimeCenterFromLegacy("daemon")),
     toLogs: () => setRoute(routeToRuntimeCenterFromLegacy("logs")),
     toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
-    toSettings: () => setRoute({ page: "settings" }),
+    toSettings: () => setRoute({ page: "settings", tab: DEFAULT_SETTINGS_TAB }),
     toGenres: () => setRoute(routeToSettingsFromLegacy("genres")),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
@@ -274,6 +295,28 @@ export function App() {
       setNotificationReadAt(Date.now());
     }
   }, [notificationOpen]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const currentTab = params.get("tab");
+
+    if (currentRoute.page === "settings") {
+      const nextTab = normalizeSettingsTab(currentRoute.tab);
+      if (currentTab !== nextTab) {
+        params.set("tab", nextTab);
+      } else {
+        return;
+      }
+    } else if (currentTab !== null) {
+      params.delete("tab");
+    } else {
+      return;
+    }
+
+    const nextQuery = params.toString();
+    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [currentRoute]);
 
   if (!ready) {
     return (
@@ -414,7 +457,15 @@ export function App() {
             {currentRoute.page === "book-create-pro" && <BookCreatePro nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "chapter" && <ChapterReader bookId={currentRoute.bookId} chapterNumber={currentRoute.chapterNumber} nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "analytics" && <Analytics bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} />}
-            {currentRoute.page === "settings" && <SettingsView nav={nav} theme={theme} t={t} tab={currentRoute.tab} />}
+            {currentRoute.page === "settings" && (
+              <SettingsView
+                nav={nav}
+                theme={theme}
+                t={t}
+                tab={currentRoute.tab}
+                onTabChange={(nextTab) => setRoute({ page: "settings", tab: nextTab })}
+              />
+            )}
             {currentRoute.page === "truth" && <TruthFiles bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "runtime-center" && <RuntimeCenter nav={nav} theme={theme} t={t} sse={sse} />}
             {currentRoute.page === "style" && <StyleManager nav={nav} theme={theme} t={t} />}
