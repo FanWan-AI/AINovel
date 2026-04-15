@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTopActionIds, parseChapterLifecycleEvent, translateChapterStatus } from "./BookDetail";
+import { getTopActionIds, parseChapterLifecycleEvent, resolveChapterTaskActionType, translateChapterStatus } from "./BookDetail";
 import type { TFunction } from "../hooks/use-i18n";
 
 // Minimal stub that echoes the translation key so tests stay readable without
@@ -113,5 +113,20 @@ describe("parseChapterLifecycleEvent", () => {
       action: "rewrite",
       stage: "fail",
     });
+  });
+});
+
+describe("resolveChapterTaskActionType", () => {
+  it("maps rewrite and resync dialog kinds directly", () => {
+    expect(resolveChapterTaskActionType("rewrite")).toBe("rewrite");
+    expect(resolveChapterTaskActionType("resync")).toBe("resync");
+  });
+
+  it("maps revise modes to task action types", () => {
+    expect(resolveChapterTaskActionType("revise", "spot-fix")).toBe("spot-fix");
+    expect(resolveChapterTaskActionType("revise", "polish")).toBe("polish");
+    expect(resolveChapterTaskActionType("revise", "rework")).toBe("rework");
+    expect(resolveChapterTaskActionType("revise", "rewrite")).toBe("rewrite");
+    expect(resolveChapterTaskActionType("revise", "anti-detect")).toBe("anti-detect");
   });
 });

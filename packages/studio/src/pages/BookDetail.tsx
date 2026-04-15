@@ -5,10 +5,12 @@ import type { TFunction } from "../hooks/use-i18n";
 import { normalizeStudioEventName, type SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
+import { useChapterRuns, type ChapterRunActionType } from "../hooks/use-chapter-runs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import { ChapterActionDialog, type ChapterActionKind } from "../components/chapter-actions/ChapterActionDialog";
+import { ChapterTaskCenter } from "../components/chapter-actions/ChapterTaskCenter";
 import {
   ChevronLeft,
   Zap,
@@ -60,7 +62,6 @@ interface BookCreateStatusData {
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
-type ActionNoticeTone = "success" | "error" | "info";
 type ChapterLifecycleAction = "revise" | "rewrite" | "anti-detect" | "resync";
 type ChapterLifecycleStage = "start" | "progress" | "success" | "fail" | "unchanged";
 
@@ -113,6 +114,13 @@ export function getTopActionIds(): ReadonlyArray<"planNextAndWrite" | "quickWrit
   return ["planNextAndWrite", "quickWrite"];
 }
 
+export function resolveChapterTaskActionType(kind: ChapterActionKind, mode?: ReviseMode): ChapterRunActionType {
+  if (kind === "rewrite") return "rewrite";
+  if (kind === "resync") return "resync";
+  if (mode === "polish" || mode === "rework" || mode === "rewrite" || mode === "anti-detect") return mode;
+  return "spot-fix";
+}
+
 const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = {
   "ready-for-review": { color: "text-amber-500 bg-amber-500/10", icon: <Eye size={12} /> },
   approved: { color: "text-emerald-500 bg-emerald-500/10", icon: <Check size={12} /> },
@@ -151,13 +159,22 @@ export function BookDetail({
   const [chapterActionDialog, setChapterActionDialog] = useState<ChapterActionState | null>(null);
   const [chapterActionBrief, setChapterActionBrief] = useState("");
   const [chapterActionRunning, setChapterActionRunning] = useState(false);
-  const [actionNotice, setActionNotice] = useState<{ tone: ActionNoticeTone; message: string; detail?: string } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsWordCount, setSettingsWordCount] = useState<number | null>(null);
   const [settingsTargetChapters, setSettingsTargetChapters] = useState<number | null>(null);
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const {
+    runs: chapterRuns,
+    loading: chapterRunsLoading,
+    errorKey: chapterRunsErrorKey,
+    chapterOptions: chapterRunOptions,
+    startRun,
+    finishRun,
+    applyLifecycleUpdate,
+    retryLoad: retryChapterRunsLoad,
+  } = useChapterRuns(bookId);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -175,6 +192,7 @@ export function BookDetail({
       error?: string;
       message?: string;
       fixedCount?: number;
+      appliedBrief?: string | null;
     } | null;
     if (data?.bookId !== bookId) return;
     const normalizedEvent = normalizeStudioEventName(recent.event);
@@ -192,36 +210,15 @@ export function BookDetail({
     const chapterEvent = parseChapterLifecycleEvent(recent.event);
     const chapterNumber = data?.chapterNumber ?? data?.chapter;
     const stage = resolveChapterLifecycleStage(chapterEvent?.stage, data?.decision);
-    if (stage === "fail") {
-      setActionNotice({
-        tone: "error",
-        message: t("chapterAction.noticeFailed"),
-        detail: data?.error ?? data?.message,
+    if (chapterEvent && chapterNumber && (stage === "success" || stage === "unchanged" || stage === "fail")) {
+      applyLifecycleUpdate({
+        chapterNumber,
+        action: chapterEvent.action,
+        stage,
+        reason: stage === "fail" || stage === "unchanged" ? (data?.error ?? data?.message) : undefined,
+        briefSummary: typeof data?.appliedBrief === "string" ? data.appliedBrief : undefined,
+        timestamp: recent.timestamp,
       });
-    } else if ((stage === "success" || stage === "unchanged") && chapterEvent) {
-      if (chapterEvent.action === "rewrite") {
-        setActionNotice({
-          tone: stage === "unchanged" ? "info" : "success",
-          message: chapterNumber ? `${t("chapterAction.noticeRewriteDone")} #${chapterNumber}` : t("chapterAction.noticeRewriteDone"),
-          detail: stage === "unchanged" ? data?.message : undefined,
-        });
-      } else if (chapterEvent.action === "resync") {
-        setActionNotice({
-          tone: stage === "unchanged" ? "info" : "success",
-          message: chapterNumber ? `${t("chapterAction.noticeResyncDone")} #${chapterNumber}` : t("chapterAction.noticeResyncDone"),
-          detail: stage === "unchanged" ? data?.message : undefined,
-        });
-      } else {
-        setActionNotice({
-          tone: stage === "unchanged" ? "info" : "success",
-          message: chapterNumber ? `${t("chapterAction.noticeReviseDone")} #${chapterNumber}` : t("chapterAction.noticeReviseDone"),
-          detail: stage === "unchanged"
-            ? data?.message
-            : typeof data?.fixedCount === "number"
-              ? `${data.fixedCount}${t("chapterAction.noticeIssuesUnit")}`
-              : undefined,
-        });
-      }
     }
 
     if (shouldRefetchBookView(recent, bookId)) {
@@ -229,7 +226,7 @@ export function BookDetail({
       setDraftRequestPending(false);
       refetch();
     }
-  }, [bookId, refetch, sse.messages]);
+  }, [applyLifecycleUpdate, bookId, refetch, sse.messages]);
 
   useEffect(() => {
     const isNotFound = typeof error === "string" && /not found/i.test(error);
@@ -358,38 +355,33 @@ export function BookDetail({
   const executeChapterAction = async () => {
     if (!chapterActionDialog) return;
     setChapterActionRunning(true);
-    setActionNotice(null);
     const brief = chapterActionBrief.trim() || undefined;
+    const runId = startRun({
+      chapterNumber: chapterActionDialog.chapterNum,
+      actionType: resolveChapterTaskActionType(chapterActionDialog.kind, chapterActionDialog.mode),
+      briefSummary: brief,
+    });
     try {
       if (chapterActionDialog.kind === "rewrite") {
         await handleRewrite(chapterActionDialog.chapterNum, brief);
-        setActionNotice({
-          tone: "info",
-          message: `${t("chapterAction.noticeRewriteStarted")} #${chapterActionDialog.chapterNum}`,
-          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
-        });
       } else if (chapterActionDialog.kind === "resync") {
-        await handleSync(chapterActionDialog.chapterNum, brief);
-        setActionNotice({
-          tone: "success",
-          message: `${t("chapterAction.noticeResyncDone")} #${chapterActionDialog.chapterNum}`,
-          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
+        const result = await handleSync(chapterActionDialog.chapterNum, brief);
+        finishRun({
+          runId,
+          status: "success",
+          briefSummary: typeof result?.appliedBrief === "string" ? result.appliedBrief : brief,
         });
       } else {
         await handleRevise(chapterActionDialog.chapterNum, chapterActionDialog.mode ?? "spot-fix", brief);
-        setActionNotice({
-          tone: "info",
-          message: `${t("chapterAction.noticeReviseStarted")} #${chapterActionDialog.chapterNum}`,
-          detail: brief ? `${t("chapterAction.noticeBriefApplied")}：${brief}` : t("chapterAction.noticeNoBrief"),
-        });
       }
       setChapterActionDialog(null);
       setChapterActionBrief("");
     } catch (e) {
-      setActionNotice({
-        tone: "error",
-        message: t("chapterAction.noticeFailed"),
-        detail: e instanceof Error ? e.message : String(e),
+      finishRun({
+        runId,
+        status: "failed",
+        reason: e instanceof Error ? e.message : String(e),
+        briefSummary: brief,
       });
     } finally {
       setChapterActionRunning(false);
@@ -553,22 +545,14 @@ export function BookDetail({
           )}
         </div>
       )}
-      {actionNotice && (
-        <div
-          className={`rounded-2xl border px-4 py-3 text-sm ${
-            actionNotice.tone === "success"
-              ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-600"
-              : actionNotice.tone === "error"
-                ? "border-destructive/30 bg-destructive/5 text-destructive"
-                : "border-primary/30 bg-primary/[0.05] text-foreground"
-          }`}
-        >
-          <div className="font-semibold">{actionNotice.message}</div>
-          {actionNotice.detail && (
-            <div className="text-xs mt-1 opacity-85">{actionNotice.detail}</div>
-          )}
-        </div>
-      )}
+      <ChapterTaskCenter
+        runs={chapterRuns}
+        chapterOptions={chapterRunOptions}
+        loading={chapterRunsLoading}
+        errorKey={chapterRunsErrorKey}
+        onRetry={retryChapterRunsLoad}
+        t={t}
+      />
 
       {/* Tool Strip */}
       <div className="flex flex-wrap items-center gap-2 py-1">
