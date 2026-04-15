@@ -10,16 +10,14 @@ import { BookCreateReview } from "./pages/BookCreateReview";
 import { BookCreatePro } from "./pages/BookCreatePro";
 import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
-import { ConfigView } from "./pages/ConfigView";
 import { TruthFiles } from "./pages/TruthFiles";
-import { DaemonControl } from "./pages/DaemonControl";
-import { LogViewer } from "./pages/LogViewer";
 import { RuntimeCenter } from "./pages/RuntimeCenter";
-import { GenreManager } from "./pages/GenreManager";
 import { StyleManager } from "./pages/StyleManager";
 import { ImportManager } from "./pages/ImportManager";
 import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
+import { AssistantView } from "./pages/AssistantView";
+import { SettingsView, type SettingsTab } from "./pages/SettingsView";
 import { LanguageSelector } from "./pages/LanguageSelector";
 import { useSSE } from "./hooks/use-sse";
 import { useTheme } from "./hooks/use-theme";
@@ -31,6 +29,7 @@ import type { SSEMessage } from "./hooks/use-sse";
 
 export type Route =
   | { page: "dashboard" }
+  | { page: "assistant" }
   | { page: "book"; bookId: string }
   | { page: "book-create" }
   | { page: "book-create-entry" }
@@ -44,6 +43,7 @@ export type Route =
   | { page: "daemon" }
   | { page: "logs" }
   | { page: "runtime-center" }
+  | { page: "settings"; tab?: SettingsTab }
   | { page: "genres" }
   | { page: "style" }
   | { page: "import" }
@@ -51,16 +51,52 @@ export type Route =
   | { page: "doctor" };
 
 export type LegacyRuntimePage = "daemon" | "logs";
+export type LegacySettingsPage = "config" | "genres";
 
 export function routeToRuntimeCenterFromLegacy(page: LegacyRuntimePage): Route {
-  void page;
-  return { page: "runtime-center" };
+  switch (page) {
+    case "daemon":
+    case "logs":
+      return { page: "runtime-center" };
+  }
+}
+
+export function routeToSettingsFromLegacy(page: LegacySettingsPage): Route {
+  return { page: "settings", tab: page === "config" ? "provider" : "genre" };
+}
+
+export function resolveLegacyRoute(route: Route): Route {
+  if (route.page === "config" || route.page === "genres") {
+    return routeToSettingsFromLegacy(route.page);
+  }
+
+  if (route.page === "daemon" || route.page === "logs") {
+    return routeToRuntimeCenterFromLegacy(route.page);
+  }
+
+  return route;
 }
 
 export function deriveActiveBookId(route: Route): string | undefined {
   return route.page === "book" || route.page === "chapter" || route.page === "truth" || route.page === "analytics"
     ? route.bookId
     : undefined;
+}
+
+export function mapRouteToActivePage(route: Route, activeBookId?: string): string {
+  if (activeBookId) {
+    return `book:${activeBookId}`;
+  }
+
+  if (route.page === "settings" && route.tab === "provider") {
+    return "config";
+  }
+
+  if (route.page === "settings" && route.tab === "genre") {
+    return "genres";
+  }
+
+  return route.page;
 }
 
 type AppNotificationLevel = "info" | "success" | "error";
@@ -119,7 +155,7 @@ function toNotification(msg: SSEMessage, index: number): AppNotification | null 
 }
 
 export function App() {
-  const [route, setRoute] = useState<Route>({ page: "dashboard" });
+  const [rawRoute, setRoute] = useState<Route>({ page: "dashboard" });
   const sse = useSSE();
   const { theme, setTheme } = useTheme();
   const { t } = useI18n();
@@ -149,6 +185,7 @@ export function App() {
 
   const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
+    toAssistant: () => setRoute({ page: "assistant" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookCreate: () => setRoute({ page: "book-create-entry" }),
     toBookCreateEntry: () => setRoute({ page: "book-create-entry" }),
@@ -158,25 +195,23 @@ export function App() {
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
-    toConfig: () => setRoute({ page: "config" }),
+    toConfig: () => setRoute(routeToSettingsFromLegacy("config")),
     toTruth: (bookId: string) => setRoute({ page: "truth", bookId }),
     toDaemon: () => setRoute(routeToRuntimeCenterFromLegacy("daemon")),
     toLogs: () => setRoute(routeToRuntimeCenterFromLegacy("logs")),
     toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
-    toGenres: () => setRoute({ page: "genres" }),
+    toGenres: () => setRoute(routeToSettingsFromLegacy("genres")),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
   }), [setRoute]);
 
-  const activeBookId = deriveActiveBookId(route);
-  const activePage =
-    activeBookId
-      ? `book:${activeBookId}`
-      : route.page;
+  const currentRoute = resolveLegacyRoute(rawRoute);
+  const activeBookId = deriveActiveBookId(currentRoute);
+  const activePage = mapRouteToActivePage(currentRoute, activeBookId);
   const contentContainerClass =
-    route.page === "truth"
+    currentRoute.page === "truth"
       ? "max-w-[1400px] mx-auto px-4 py-8 md:px-6 lg:px-8 lg:py-10 fade-in"
       : "max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in";
   const notifications = useMemo(
@@ -322,9 +357,9 @@ export function App() {
 
             {/* Chat Panel Toggle */}
             <button
-              onClick={() => setChatOpen((prev) => !prev)}
+              onClick={nav.toAssistant}
               className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shadow-sm ${
-                chatOpen
+                currentRoute.page === "assistant"
                   ? "bg-primary text-primary-foreground shadow-primary/20"
                   : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
               }`}
@@ -338,25 +373,23 @@ export function App() {
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto scroll-smooth">
           <div className={contentContainerClass}>
-            {route.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
-            {route.page === "book" && <BookDetail bookId={route.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
-            {route.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}
-            {route.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
-            {route.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} flow={createFlow} />}
-            {route.page === "book-create-review" && <BookCreateReview nav={nav} theme={theme} t={t} flow={createFlow} />}
-            {route.page === "book-create-pro" && <BookCreatePro nav={nav} theme={theme} t={t} />}
-            {route.page === "chapter" && <ChapterReader bookId={route.bookId} chapterNumber={route.chapterNumber} nav={nav} theme={theme} t={t} />}
-            {route.page === "analytics" && <Analytics bookId={route.bookId} nav={nav} theme={theme} t={t} />}
-            {route.page === "config" && <ConfigView nav={nav} theme={theme} t={t} />}
-            {route.page === "truth" && <TruthFiles bookId={route.bookId} nav={nav} theme={theme} t={t} />}
-            {route.page === "daemon" && <DaemonControl nav={nav} theme={theme} t={t} sse={sse} />}
-            {route.page === "logs" && <LogViewer nav={nav} theme={theme} t={t} />}
-            {route.page === "runtime-center" && <RuntimeCenter nav={nav} theme={theme} t={t} sse={sse} />}
-            {route.page === "genres" && <GenreManager nav={nav} theme={theme} t={t} />}
-            {route.page === "style" && <StyleManager nav={nav} theme={theme} t={t} />}
-            {route.page === "import" && <ImportManager nav={nav} theme={theme} t={t} />}
-            {route.page === "radar" && <RadarView nav={nav} theme={theme} t={t} />}
-            {route.page === "doctor" && <DoctorView nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
+            {currentRoute.page === "assistant" && <AssistantView nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "book" && <BookDetail bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
+            {currentRoute.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "book-create-simple" && <BookCreateSimple nav={nav} theme={theme} t={t} flow={createFlow} />}
+            {currentRoute.page === "book-create-review" && <BookCreateReview nav={nav} theme={theme} t={t} flow={createFlow} />}
+            {currentRoute.page === "book-create-pro" && <BookCreatePro nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "chapter" && <ChapterReader bookId={currentRoute.bookId} chapterNumber={currentRoute.chapterNumber} nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "analytics" && <Analytics bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "settings" && <SettingsView nav={nav} theme={theme} t={t} tab={currentRoute.tab} />}
+            {currentRoute.page === "truth" && <TruthFiles bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "runtime-center" && <RuntimeCenter nav={nav} theme={theme} t={t} sse={sse} />}
+            {currentRoute.page === "style" && <StyleManager nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "import" && <ImportManager nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "radar" && <RadarView nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "doctor" && <DoctorView nav={nav} theme={theme} t={t} />}
           </div>
         </main>
       </div>
