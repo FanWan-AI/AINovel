@@ -53,6 +53,9 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Opening Pattern Repetition", "开头同构",
   "Ending Pattern Repetition", "结尾同构",
 ]);
+const APPLIED_BRIEF_MAX_ITEMS = 2;
+const APPLIED_BRIEF_SEPARATOR = "；";
+const APPLIED_BRIEF_ELLIPSIS = "…";
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
@@ -115,7 +118,17 @@ export interface ComposeChapterResult extends PlanChapterResult {
   readonly tracePath: string;
 }
 
-export interface ReviseResult {
+export type ChapterActionDecision = "applied" | "unchanged" | "failed";
+
+export interface ChapterActionResult {
+  readonly actionType: ReviseMode;
+  readonly decision: ChapterActionDecision;
+  readonly appliedBrief?: string;
+  readonly briefTrace: ReadonlyArray<string>;
+  readonly unchangedReason?: string;
+}
+
+export interface ReviseResult extends ChapterActionResult {
   readonly chapterNumber: number;
   readonly wordCount: number;
   readonly fixedIssues: ReadonlyArray<string>;
@@ -226,6 +239,19 @@ export class PipelineRunner {
 
   private logWarn(language: LengthLanguage, message: { zh: string; en: string }): void {
     this.config.logger?.warn(this.localize(language, message));
+  }
+
+  private buildAppliedBrief(fixedIssues: ReadonlyArray<string>): string | undefined {
+    const normalized = fixedIssues
+      .map((issue) => issue.replace(/^([-*•]|\d+[.)])\s*/u, "").trim())
+      .filter((issue) => issue.length > 0);
+    if (normalized.length === 0) {
+      return undefined;
+    }
+    if (normalized.length <= APPLIED_BRIEF_MAX_ITEMS) {
+      return normalized.join(APPLIED_BRIEF_SEPARATOR);
+    }
+    return `${normalized.slice(0, APPLIED_BRIEF_MAX_ITEMS).join(APPLIED_BRIEF_SEPARATOR)}${APPLIED_BRIEF_ELLIPSIS}`;
   }
 
   private async tryGenerateStyleGuide(
@@ -873,13 +899,22 @@ export class PipelineRunner {
       });
 
       if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
+        const unchangedReason = "No warning, critical, or AI-tell issues to fix.";
         return {
           chapterNumber: targetChapter,
           wordCount: countChapterLength(content, countingMode),
           fixedIssues: [],
+          actionType: mode,
+          decision: "unchanged",
+          briefTrace: [
+            `mode=${mode}`,
+            "pre(blocking=0,critical=0,aiTell=0)",
+            "gate=skip:no-actionable-issues",
+          ],
+          unchangedReason,
           applied: false,
           status: "unchanged",
-          skippedReason: "No warning, critical, or AI-tell issues to fix.",
+          skippedReason: unchangedReason,
         };
       }
 
@@ -915,13 +950,22 @@ export class PipelineRunner {
       );
 
       if (reviseOutput.revisedContent.length === 0) {
+        const unchangedReason = "Manual revision returned empty content; kept original chapter.";
         return {
           chapterNumber: targetChapter,
           wordCount: countChapterLength(content, lengthSpec.countingMode),
           fixedIssues: [],
+          actionType: mode,
+          decision: "unchanged",
+          briefTrace: [
+            `mode=${mode}`,
+            `pre(blocking=${preRevision.blockingCount},critical=${preRevision.criticalCount},aiTell=${preRevision.aiTellCount})`,
+            "gate=rollback:empty-revision",
+          ],
+          unchangedReason,
           applied: false,
           status: "unchanged",
-          skippedReason: "Manual revision returned empty content; kept original chapter.",
+          skippedReason: unchangedReason,
         };
       }
       const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
@@ -987,15 +1031,27 @@ export class PipelineRunner {
         && criticalDidNotWorsen
         && aiDidNotWorsen
         && (improvedBlocking || improvedAITells);
+      const preAuditTrace = `pre(blocking=${preRevision.blockingCount},critical=${preRevision.criticalCount},aiTell=${preRevision.aiTellCount})`;
+      const postAuditTrace = `post(blocking=${effectivePostRevision.blockingCount},critical=${effectivePostRevision.criticalCount},aiTell=${effectivePostRevision.aiTellCount})`;
 
       if (!shouldApplyRevision) {
+        const unchangedReason = "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.";
         return {
           chapterNumber: targetChapter,
           wordCount: revisionBaseCount,
           fixedIssues: [],
+          actionType: mode,
+          decision: "unchanged",
+          briefTrace: [
+            `mode=${mode}`,
+            preAuditTrace,
+            postAuditTrace,
+            "gate=rollback:not-improved",
+          ],
+          unchangedReason,
           applied: false,
           status: "unchanged",
-          skippedReason: "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.",
+          skippedReason: unchangedReason,
         };
       }
       this.logLengthWarnings(lengthWarnings);
@@ -1080,6 +1136,15 @@ export class PipelineRunner {
         chapterNumber: targetChapter,
         wordCount: normalizedRevision.wordCount,
         fixedIssues: reviseOutput.fixedIssues,
+        actionType: mode,
+        decision: "applied",
+        appliedBrief: this.buildAppliedBrief(reviseOutput.fixedIssues),
+        briefTrace: [
+          `mode=${mode}`,
+          preAuditTrace,
+          postAuditTrace,
+          "gate=applied",
+        ],
         applied: true,
         status: effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed",
         lengthWarnings,

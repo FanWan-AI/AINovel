@@ -4225,8 +4225,15 @@ describe("PipelineRunner", () => {
           expect.objectContaining({ category: "列表式结构" }),
         ]),
       );
+      expect(result.actionType).toBe("spot-fix");
+      expect(result.decision).toBe("unchanged");
       expect(result.applied).toBe(false);
       expect(result.status).toBe("unchanged");
+      expect(result.briefTrace).toEqual(expect.arrayContaining([
+        "mode=spot-fix",
+        "gate=rollback:not-improved",
+      ]));
+      expect(result.unchangedReason).toContain("did not improve");
       expect(result.skippedReason).toContain("did not improve");
       expect(savedChapter).toContain(originalBody);
       expect(savedChapter).not.toContain("修订后收束更利落");
@@ -4306,7 +4313,14 @@ describe("PipelineRunner", () => {
       const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
       const savedIndex = await state.loadChapterIndex(bookId);
 
+      expect(result.actionType).toBe("spot-fix");
+      expect(result.decision).toBe("applied");
       expect(result.applied).toBe(true);
+      expect(result.appliedBrief).toContain("收紧了结尾节奏");
+      expect(result.briefTrace).toEqual(expect.arrayContaining([
+        "mode=spot-fix",
+        "gate=applied",
+      ]));
       expect(result.status).toBe("ready-for-review");
       expect(result.fixedIssues).toEqual(["- 收紧了结尾节奏。"]);
       expect(savedChapter).toContain(revisedBody);
@@ -4424,6 +4438,8 @@ describe("PipelineRunner", () => {
       const savedIndex = await state.loadChapterIndex(bookId);
 
       expect(auditChapter).toHaveBeenCalledTimes(2);
+      expect(result.actionType).toBe("spot-fix");
+      expect(result.decision).toBe("applied");
       expect(result.applied).toBe(true);
       expect(result.status).toBe("ready-for-review");
       expect(savedIndex[1]?.status).toBe("ready-for-review");
@@ -4636,13 +4652,16 @@ describe("PipelineRunner", () => {
     );
 
     try {
-      await runner.reviseDraft(bookId, 1, "polish");
+      const result = await runner.reviseDraft(bookId, 1, "polish");
 
       expect(reviseChapter).toHaveBeenCalledTimes(1);
       expect(reviseChapter.mock.calls[0]?.[6]?.lengthSpec).toMatchObject({
         target: 900,
         countingMode: "en_words",
       });
+      expect(result.actionType).toBe("polish");
+      expect(result.decision).toBe("applied");
+      expect(result.briefTrace).toContain("mode=polish");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
