@@ -70,6 +70,18 @@ type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | 
 type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged";
 const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
+const BRIEF_TRACE_MAX_ITEMS = 8;
+
+interface BriefTraceEntry {
+  readonly text: string;
+  readonly matched: boolean;
+}
+
+interface ChapterRunDiffData {
+  readonly beforeContent: string | null;
+  readonly afterContent: string | null;
+  readonly briefTrace: ReadonlyArray<BriefTraceEntry>;
+}
 
 function broadcast(event: string, data: unknown): void {
   runtimeEventStore.append(deriveRuntimeEvent(event, data));
@@ -82,6 +94,50 @@ function normalizeBriefValue(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeTraceText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[，。！？；：、“”‘’"'`~!?,.;:\-_=+()[\]{}<>/\\|]/g, "");
+}
+
+function extractBriefSegments(brief: string | undefined): string[] {
+  if (!brief) return [];
+  const entries = brief
+    .split(/[\n，。；;、]/g)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const deduped = [...new Set(entries)];
+  return deduped.slice(0, BRIEF_TRACE_MAX_ITEMS);
+}
+
+function buildBriefTrace(
+  appliedBrief: string | undefined,
+  beforeContent: string | null,
+  afterContent: string | null,
+  decision: "applied" | "unchanged" | "failed" | null | undefined,
+): BriefTraceEntry[] {
+  const segments = extractBriefSegments(appliedBrief);
+  if (segments.length === 0) return [];
+
+  const normalizedBefore = normalizeTraceText(beforeContent ?? "");
+  const normalizedAfter = normalizeTraceText(afterContent ?? "");
+  const defaultMatched = decision === "applied";
+
+  return segments.map((text, index) => {
+    const normalized = normalizeTraceText(text);
+    if (!normalized) {
+      return { text, matched: defaultMatched && index === 0 };
+    }
+    if (decision === "unchanged") {
+      return { text, matched: false };
+    }
+    const hitInAfter = normalizedAfter.includes(normalized);
+    const hitInBefore = normalizedBefore.includes(normalized);
+    return { text, matched: hitInAfter && (!hitInBefore || normalizedBefore !== normalizedAfter) };
+  });
 }
 
 // --- V2 confirm run-state store ---
@@ -325,6 +381,44 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
       error: run.error,
+    };
+  }
+
+  async function readChapterContentSnapshot(bookId: string, chapterNumber: number): Promise<string | null> {
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const chapterPrefix = String(chapterNumber).padStart(4, "0");
+    try {
+      const files = await readdir(chaptersDir);
+      const target = files
+        .filter((file) => file.startsWith(chapterPrefix) && file.endsWith(".md"))
+        .sort()[0];
+      if (!target) return null;
+      return await readFile(join(chaptersDir, target), "utf-8");
+    } catch {
+      return null;
+    }
+  }
+
+  function parseDiffData(run: ChapterRunRecord): ChapterRunDiffData {
+    const terminalEvent = [...run.events]
+      .reverse()
+      .find((event) => event.type === "success" || event.type === "fail");
+    const raw = terminalEvent?.data as Record<string, unknown> | undefined;
+    const beforeContent = typeof raw?.["beforeContent"] === "string" ? raw["beforeContent"] : null;
+    const afterContent = typeof raw?.["afterContent"] === "string" ? raw["afterContent"] : null;
+    const rawTrace = Array.isArray(raw?.["briefTrace"]) ? raw["briefTrace"] : [];
+    const briefTrace = rawTrace.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const text = typeof (entry as Record<string, unknown>)["text"] === "string" ? String((entry as Record<string, unknown>)["text"]) : "";
+      const matched = (entry as Record<string, unknown>)["matched"] === true;
+      return text ? [{ text, matched }] : [];
+    });
+    return {
+      beforeContent,
+      afterContent,
+      briefTrace: briefTrace.length > 0
+        ? briefTrace
+        : buildBriefTrace(run.appliedBrief ?? undefined, beforeContent, afterContent, run.decision),
     };
   }
 
@@ -1199,6 +1293,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ runId, events });
   });
 
+  app.get("/api/books/:id/chapter-runs/:runId/diff", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const run = await chapterRunStore.getRun(id, runId);
+    if (!run) {
+      return c.json({ error: "Run not found" }, 404);
+    }
+    const diff = parseDiffData(run);
+    const unchangedReason = run.decision === "unchanged"
+      ? (run.unchangedReason ?? NO_REVISIONS_APPLIED_MESSAGE)
+      : run.unchangedReason;
+    return c.json({
+      ...toChapterRunResponse(run),
+      beforeContent: diff.beforeContent,
+      afterContent: diff.afterContent,
+      briefTrace: diff.briefTrace,
+      unchangedReason,
+    });
+  });
+
   app.post("/api/runtime/clear", (c) => {
     const cleared = runtimeEvents.length;
     runtimeEvents.splice(0, runtimeEvents.length);
@@ -1299,6 +1413,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const briefUsed = appliedBrief !== undefined;
     const actionType: ChapterRunActionType = reviseMode === "anti-detect" ? "anti-detect" : "revise";
     let chapterRunId: string | undefined;
+    const beforeContent = await readChapterContentSnapshot(id, chapterNum);
 
     try {
       const chapterRun = await chapterRunStore.createRun({
@@ -1324,6 +1439,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ).then(
         async (result) => {
           const decision = inferRunDecision("succeeded", result.applied);
+          const afterContent = await readChapterContentSnapshot(id, chapterNum);
+          const briefTrace = buildBriefTrace(appliedBrief, beforeContent, afterContent, decision);
           emitActionEvent(action, decision === "unchanged" ? "unchanged" : "success", {
             bookId: id,
             chapterNumber: chapterNum,
@@ -1343,6 +1460,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             data: {
               fixedCount: result.fixedIssues.length,
               status: result.status,
+              beforeContent,
+              afterContent,
+              briefTrace,
             },
           });
         },
@@ -1704,6 +1824,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
     let chapterRunId: string | undefined;
+    const beforeContent = await readChapterContentSnapshot(id, chapterNum);
     try {
       const chapterRun = await chapterRunStore.createRun({
         bookId: id,
@@ -1724,6 +1845,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }));
       pipeline.writeNextChapter(id).then(
         async (result) => {
+          const afterContent = await readChapterContentSnapshot(id, chapterNum);
+          const briefTrace = buildBriefTrace(appliedBrief, beforeContent, afterContent, "applied");
           emitActionEvent("rewrite", "success", {
             bookId: id,
             chapterNumber: result.chapterNumber,
@@ -1738,6 +1861,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             data: {
               title: result.title,
               wordCount: result.wordCount,
+              beforeContent,
+              afterContent,
+              briefTrace,
             },
           });
         },
@@ -1789,6 +1915,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
     let chapterRunId: string | undefined;
+    const beforeContent = await readChapterContentSnapshot(id, chapterNum);
 
     try {
       const chapterRun = await chapterRunStore.createRun({
@@ -1833,6 +1960,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
       const revised = (result as { revised?: unknown } | null | undefined)?.revised;
       const decision = inferRunDecision("succeeded", revised);
+      const afterContent = await readChapterContentSnapshot(id, chapterNum);
+      const briefTrace = buildBriefTrace(appliedBrief, beforeContent, afterContent, decision);
       emitActionEvent("resync", "success", {
         bookId: id,
         chapterNumber: chapterNum,
@@ -1848,6 +1977,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         status: "succeeded",
         decision,
         unchangedReason: decision === "unchanged" ? NO_TRUTH_ARTIFACT_UPDATES_MESSAGE : null,
+        data: {
+          beforeContent,
+          afterContent,
+          briefTrace,
+        },
       });
       if (result && typeof result === "object") {
         return c.json({ ...(result as Record<string, unknown>), runId: chapterRunId, appliedBrief: appliedBrief ?? null });

@@ -10,6 +10,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
 import { ChapterActionDialog, type ChapterActionKind } from "../components/chapter-actions/ChapterActionDialog";
+import { ChapterDiffDialog, type ChapterRunDiffPayload } from "../components/chapter-actions/ChapterDiffDialog";
 import { ChapterTaskCenter } from "../components/chapter-actions/ChapterTaskCenter";
 import {
   ChevronLeft,
@@ -59,6 +60,18 @@ interface BookCreateStatusData {
   readonly error?: string;
 }
 
+interface ChapterRunSummaryData {
+  readonly runId: string;
+  readonly chapter: number;
+  readonly actionType: string;
+  readonly status: string;
+  readonly decision: string | null;
+  readonly unchangedReason: string | null;
+  readonly appliedBrief: string | null;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+}
+
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
@@ -69,6 +82,21 @@ interface ChapterActionState {
   readonly kind: ChapterActionKind;
   readonly chapterNum: number;
   readonly mode?: ReviseMode;
+}
+
+export function supportsRunDiff(actionType: string): boolean {
+  return actionType === "revise" || actionType === "rewrite" || actionType === "anti-detect";
+}
+
+export function resolveRunUnchangedReason(
+  decision: string | null | undefined,
+  unchangedReason: string | null | undefined,
+  fallback: string,
+): string | null {
+  const trimmed = typeof unchangedReason === "string" ? unchangedReason.trim() : "";
+  if (trimmed) return trimmed;
+  if (decision === "unchanged") return fallback;
+  return null;
 }
 
 export function parseChapterLifecycleEvent(event: string): { action: ChapterLifecycleAction; stage: ChapterLifecycleStage } | null {
@@ -148,6 +176,11 @@ export function BookDetail({
     data: createStatus,
     refetch: refetchCreateStatus,
   } = useApi<BookCreateStatusData>(`/books/${bookId}/create-status`);
+  const {
+    data: chapterRunSummaryData,
+    loading: chapterRunSummaryLoading,
+    refetch: refetchChapterRunSummary,
+  } = useApi<{ runs: ReadonlyArray<ChapterRunSummaryData> }>(`/books/${bookId}/chapter-runs?limit=30`);
   const [writeRequestPending, setWriteRequestPending] = useState(false);
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -165,6 +198,10 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const [chapterDiffOpen, setChapterDiffOpen] = useState(false);
+  const [chapterDiffLoading, setChapterDiffLoading] = useState(false);
+  const [chapterDiffError, setChapterDiffError] = useState<string | null>(null);
+  const [chapterDiffPayload, setChapterDiffPayload] = useState<ChapterRunDiffPayload | null>(null);
   const {
     runs: chapterRuns,
     loading: chapterRunsLoading,
@@ -179,6 +216,10 @@ export function BookDetail({
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
   const latestPersistedChapter = data ? data.nextChapter - 1 : 0;
+  const diffEnabledRuns = useMemo(
+    () => (chapterRunSummaryData?.runs ?? []).filter((run) => supportsRunDiff(run.actionType)),
+    [chapterRunSummaryData?.runs],
+  );
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
@@ -219,6 +260,7 @@ export function BookDetail({
         briefSummary: typeof data?.appliedBrief === "string" ? data.appliedBrief : undefined,
         timestamp: recent.timestamp,
       });
+      void refetchChapterRunSummary();
     }
 
     if (shouldRefetchBookView(recent, bookId)) {
@@ -226,7 +268,7 @@ export function BookDetail({
       setDraftRequestPending(false);
       refetch();
     }
-  }, [applyLifecycleUpdate, bookId, refetch, sse.messages]);
+  }, [applyLifecycleUpdate, bookId, refetch, refetchChapterRunSummary, sse.messages]);
 
   useEffect(() => {
     const isNotFound = typeof error === "string" && /not found/i.test(error);
@@ -385,6 +427,29 @@ export function BookDetail({
       });
     } finally {
       setChapterActionRunning(false);
+      void refetchChapterRunSummary();
+    }
+  };
+
+  const openChapterDiffDialog = async (runId: string) => {
+    setChapterDiffOpen(true);
+    setChapterDiffLoading(true);
+    setChapterDiffError(null);
+    try {
+      const diff = await fetchJson<ChapterRunDiffPayload>(`/books/${bookId}/chapter-runs/${runId}/diff`);
+      setChapterDiffPayload({
+        ...diff,
+        unchangedReason: resolveRunUnchangedReason(
+          diff.decision,
+          diff.unchangedReason,
+          t("chapterDiff.unchangedReasonFallback"),
+        ),
+      });
+    } catch (e) {
+      setChapterDiffPayload(null);
+      setChapterDiffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChapterDiffLoading(false);
     }
   };
 
@@ -553,6 +618,41 @@ export function BookDetail({
         onRetry={retryChapterRunsLoad}
         t={t}
       />
+
+      <section className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.title")}</h2>
+          <span className="text-xs text-muted-foreground">{t("chapterDiff.hint")}</span>
+        </div>
+        {chapterRunSummaryLoading && (
+          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
+            {t("chapterDiff.loading")}
+          </div>
+        )}
+        {!chapterRunSummaryLoading && diffEnabledRuns.length === 0 && (
+          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
+            {t("chapterDiff.empty")}
+          </div>
+        )}
+        {!chapterRunSummaryLoading && diffEnabledRuns.length > 0 && (
+          <div className="space-y-2">
+            {diffEnabledRuns.map((run) => (
+              <div key={run.runId} className="rounded-xl border border-border/40 bg-card/50 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm">
+                  <span className="font-semibold">{t("chapter.label").replace("{n}", String(run.chapter))}</span>
+                  <span className="text-muted-foreground"> · {run.actionType}</span>
+                </div>
+                <button
+                  onClick={() => { void openChapterDiffDialog(run.runId); }}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
+                >
+                  {t("chapterDiff.viewButton")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* Tool Strip */}
       <div className="flex flex-wrap items-center gap-2 py-1">
@@ -846,6 +946,20 @@ export function BookDetail({
           if (chapterActionRunning) return;
           setChapterActionDialog(null);
           setChapterActionBrief("");
+        }}
+      />
+
+      <ChapterDiffDialog
+        open={chapterDiffOpen}
+        loading={chapterDiffLoading}
+        error={chapterDiffError}
+        payload={chapterDiffPayload}
+        t={t}
+        onClose={() => {
+          if (chapterDiffLoading) return;
+          setChapterDiffOpen(false);
+          setChapterDiffError(null);
+          setChapterDiffPayload(null);
         }}
       />
     </div>
