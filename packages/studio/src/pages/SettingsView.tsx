@@ -1,5 +1,7 @@
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
+import { ConfigView } from "./ConfigView";
+import { GenreManager } from "./GenreManager";
 
 export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writing";
 
@@ -83,6 +85,16 @@ export function buildSettingsTabItems({
   }));
 }
 
+export type SettingsTabContent = "provider" | "genre" | "placeholder";
+
+export function resolveSettingsTabContent(tab?: SettingsTab): SettingsTabContent {
+  const activeTab = normalizeSettingsTab(tab);
+  if (activeTab === "provider" || activeTab === "genre") {
+    return activeTab;
+  }
+  return "placeholder";
+}
+
 interface Nav {
   toDashboard: () => void;
 }
@@ -91,7 +103,7 @@ export function SettingsView({
   nav,
   tab,
   onTabChange,
-  theme: _theme,
+  theme,
   t,
 }: {
   nav: Nav;
@@ -103,6 +115,7 @@ export function SettingsView({
   const activeTab = normalizeSettingsTab(tab);
   const tabItems = buildSettingsTabItems({ tab: activeTab, onTabChange, t });
   const activeTabDefinition = SETTINGS_TAB_DEFINITIONS.find((item) => item.key === activeTab) ?? SETTINGS_TAB_DEFINITIONS[0];
+  const tabContent = resolveSettingsTabContent(activeTab);
 
   return (
     <div className="space-y-6">
@@ -135,10 +148,14 @@ export function SettingsView({
         </div>
       </div>
 
-      <div className="rounded-lg border border-dashed border-border px-6 py-10">
-        <h2 className="text-base font-semibold text-foreground">{t(activeTabDefinition.placeholderTitleKey)}</h2>
-        <p className="mt-2 text-sm text-muted-foreground">{t(activeTabDefinition.placeholderDescKey)}</p>
-      </div>
+      {tabContent === "provider" && <ConfigView nav={nav} theme={theme} t={t} />}
+      {tabContent === "genre" && <GenreManager nav={nav} theme={theme} t={t} />}
+      {tabContent === "placeholder" && (
+        <div className="rounded-lg border border-dashed border-border px-6 py-10">
+          <h2 className="text-base font-semibold text-foreground">{t(activeTabDefinition.placeholderTitleKey)}</h2>
+          <p className="mt-2 text-sm text-muted-foreground">{t(activeTabDefinition.placeholderDescKey)}</p>
+        </div>
+      )}
     </div>
   );
 }
