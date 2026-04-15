@@ -98,6 +98,12 @@ export function resolveInitialRouteFromSearch(search: string): Route {
   return { page: "dashboard" };
 }
 
+function replaceSearchParams(params: URLSearchParams) {
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+  window.history.replaceState(window.history.state, "", nextUrl);
+}
+
 export function deriveActiveBookId(route: Route): string | undefined {
   return route.page === "book" || route.page === "chapter" || route.page === "truth" || route.page === "analytics"
     ? route.bookId
@@ -297,25 +303,25 @@ export function App() {
   }, [notificationOpen]);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const currentTab = params.get("tab");
-
     if (currentRoute.page === "settings") {
       const nextTab = normalizeSettingsTab(currentRoute.tab);
-      if (currentTab !== nextTab) {
-        params.set("tab", nextTab);
-      } else {
+      const params = new URLSearchParams(window.location.search);
+      const currentTab = params.get("tab");
+      if (currentTab === nextTab) {
         return;
       }
-    } else if (currentTab !== null) {
-      params.delete("tab");
-    } else {
+      params.set("tab", nextTab);
+      replaceSearchParams(params);
       return;
     }
 
-    const nextQuery = params.toString();
-    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
-    window.history.replaceState(window.history.state, "", nextUrl);
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has("tab")) {
+      return;
+    }
+
+    params.delete("tab");
+    replaceSearchParams(params);
   }, [currentRoute]);
 
   if (!ready) {
