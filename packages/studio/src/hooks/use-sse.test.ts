@@ -55,6 +55,8 @@ describe("STUDIO_SSE_EVENTS", () => {
       "revise:error",
       "rewrite:complete",
       "rewrite:error",
+      "anti-detect:complete",
+      "anti-detect:error",
       "agent:start",
       "agent:complete",
       "agent:error",

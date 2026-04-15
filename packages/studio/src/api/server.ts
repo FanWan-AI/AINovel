@@ -68,6 +68,8 @@ const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?:
 type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | "compose" | "write-next";
 // Common lifecycle stages for runtime actions.
 type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged";
+const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
+const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 
 function broadcast(event: string, data: unknown): void {
   runtimeEventStore.append(deriveRuntimeEvent(event, data));
@@ -296,6 +298,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       action,
       bookId: payload.bookId,
       chapterNumber: payload.chapterNumber,
+      // Keep `chapter` during migration for UI code still reading the legacy field.
       chapter: payload.chapterNumber,
       briefUsed: payload.briefUsed,
       level: stage === "fail" ? "error" : "info",
@@ -1328,7 +1331,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             details: {
               fixedCount: result.fixedIssues.length,
               status: result.status,
-              ...(decision === "unchanged" ? { message: "No revisions were applied." } : {}),
+              ...(decision === "unchanged" ? { message: NO_REVISIONS_APPLIED_MESSAGE } : {}),
             },
           });
           await completeChapterRun({
@@ -1336,7 +1339,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             runId: chapterRun.runId,
             status: "succeeded",
             decision,
-            unchangedReason: decision === "unchanged" ? "No revisions were applied." : null,
+            unchangedReason: decision === "unchanged" ? NO_REVISIONS_APPLIED_MESSAGE : null,
             data: {
               fixedCount: result.fixedIssues.length,
               status: result.status,
@@ -1836,7 +1839,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         details: {
           decision,
-          ...(decision === "unchanged" ? { message: "No truth artifacts required updates." } : {}),
+          ...(decision === "unchanged" ? { message: NO_TRUTH_ARTIFACT_UPDATES_MESSAGE } : {}),
         },
       });
       await completeChapterRun({
@@ -1844,7 +1847,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         runId: chapterRun.runId,
         status: "succeeded",
         decision,
-        unchangedReason: decision === "unchanged" ? "No truth artifacts required updates." : null,
+        unchangedReason: decision === "unchanged" ? NO_TRUTH_ARTIFACT_UPDATES_MESSAGE : null,
       });
       if (result && typeof result === "object") {
         return c.json({ ...(result as Record<string, unknown>), runId: chapterRunId, appliedBrief: appliedBrief ?? null });

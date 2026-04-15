@@ -79,6 +79,16 @@ export function parseChapterLifecycleEvent(event: string): { action: ChapterLife
   return { action, stage };
 }
 
+function resolveChapterLifecycleStage(
+  stage: ChapterLifecycleStage | undefined,
+  decision: string | undefined,
+): ChapterLifecycleStage | undefined {
+  if (stage === "success" && decision === "unchanged") {
+    return "unchanged";
+  }
+  return stage;
+}
+
 interface Nav {
   toDashboard: () => void;
   toChapter: (bookId: string, num: number) => void;
@@ -181,9 +191,7 @@ export function BookDetail({
 
     const chapterEvent = parseChapterLifecycleEvent(recent.event);
     const chapterNumber = data?.chapterNumber ?? data?.chapter;
-    const stage = chapterEvent?.stage === "success" && data?.decision === "unchanged"
-      ? "unchanged"
-      : chapterEvent?.stage;
+    const stage = resolveChapterLifecycleStage(chapterEvent?.stage, data?.decision);
     if (stage === "fail") {
       setActionNotice({
         tone: "error",
@@ -195,20 +203,20 @@ export function BookDetail({
         setActionNotice({
           tone: stage === "unchanged" ? "info" : "success",
           message: chapterNumber ? `${t("chapterAction.noticeRewriteDone")} #${chapterNumber}` : t("chapterAction.noticeRewriteDone"),
-          detail: stage === "unchanged" ? (data?.message ?? "No chapter content changed.") : undefined,
+          detail: stage === "unchanged" ? data?.message : undefined,
         });
       } else if (chapterEvent.action === "resync") {
         setActionNotice({
           tone: stage === "unchanged" ? "info" : "success",
           message: chapterNumber ? `${t("chapterAction.noticeResyncDone")} #${chapterNumber}` : t("chapterAction.noticeResyncDone"),
-          detail: stage === "unchanged" ? (data?.message ?? "No truth artifacts required updates.") : undefined,
+          detail: stage === "unchanged" ? data?.message : undefined,
         });
       } else {
         setActionNotice({
           tone: stage === "unchanged" ? "info" : "success",
-          message: `${t("chapterAction.noticeReviseDone")} #${chapterNumber ?? "-"}`,
+          message: chapterNumber ? `${t("chapterAction.noticeReviseDone")} #${chapterNumber}` : t("chapterAction.noticeReviseDone"),
           detail: stage === "unchanged"
-            ? (data?.message ?? "No revisions were applied.")
+            ? data?.message
             : typeof data?.fixedCount === "number"
               ? `${data.fixedCount}${t("chapterAction.noticeIssuesUnit")}`
               : undefined,
