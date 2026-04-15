@@ -9,6 +9,7 @@ interface Nav {
 }
 
 export interface AssistantMessage {
+  readonly id: string;
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly timestamp: number;
@@ -18,6 +19,7 @@ export interface AssistantComposerState {
   readonly input: string;
   readonly messages: ReadonlyArray<AssistantMessage>;
   readonly loading: boolean;
+  readonly nextMessageId: number;
 }
 
 export interface AssistantQuickAction {
@@ -25,6 +27,8 @@ export interface AssistantQuickAction {
   readonly label: string;
   readonly prompt: string;
 }
+
+const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
 
 export const ASSISTANT_QUICK_ACTIONS: ReadonlyArray<AssistantQuickAction> = [
   { id: "outline", label: "生成大纲", prompt: "请帮我生成下一章节的大纲。" },
@@ -37,6 +41,7 @@ export function createAssistantInitialState(): AssistantComposerState {
     input: "",
     messages: [],
     loading: false,
+    nextMessageId: 1,
   };
 }
 
@@ -60,7 +65,8 @@ export function submitAssistantInput(
   return {
     input: "",
     loading: true,
-    messages: [...state.messages, { role: "user", content: normalized, timestamp: now }],
+    messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalized, timestamp: now }],
+    nextMessageId: state.nextMessageId + 1,
   };
 }
 
@@ -72,7 +78,13 @@ export function completeAssistantResponse(
   return {
     ...state,
     loading: false,
-    messages: [...state.messages, { role: "assistant", content: generateAssistantSkeletonReply(prompt), timestamp: now }],
+    messages: [...state.messages, {
+      id: `msg-${state.nextMessageId}`,
+      role: "assistant",
+      content: generateAssistantSkeletonReply(prompt),
+      timestamp: now,
+    }],
+    nextMessageId: state.nextMessageId + 1,
   };
 }
 
@@ -113,7 +125,7 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
     <div className="space-y-3">
       {messages.map((message) => (
         <div
-          key={`${message.timestamp}-${message.role}`}
+          key={message.id}
           className={cn(
             "max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed border",
             message.role === "user"
@@ -143,7 +155,7 @@ export function AssistantView({ nav, theme: _theme, t: _t }: { nav: Nav; theme: 
 
     setTimeout(() => {
       setState((prev) => completeAssistantResponse(prev, normalizedPrompt));
-    }, 450);
+    }, MOCK_ASSISTANT_RESPONSE_DELAY_MS);
   };
 
   const showLoading = state.loading && state.messages.length === 0;

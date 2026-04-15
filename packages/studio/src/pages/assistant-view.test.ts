@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import type { TFunction } from "../hooks/use-i18n";
 import {
   ASSISTANT_QUICK_ACTIONS,
   AssistantView,
@@ -13,10 +14,11 @@ import {
 
 describe("AssistantView", () => {
   it("renders three-section layout with context bar, message area and input panel", () => {
+    const tMock: TFunction = (key) => String(key);
     const html = renderToStaticMarkup(createElement(AssistantView, {
       nav: { toDashboard: vi.fn() },
       theme: "light",
-      t: ((key: string) => key) as never,
+      t: tMock,
     }));
 
     expect(html).toContain("assistant-context-bar");
@@ -27,19 +29,20 @@ describe("AssistantView", () => {
   });
 
   it("updates input, submits message and appends assistant response", () => {
+    const prompt = "请帮我总结上一章";
     const state = createAssistantInitialState();
-    const typed = applyAssistantInput(state, "请帮我总结上一章");
+    const typed = applyAssistantInput(state, prompt);
 
-    expect(typed.input).toBe("请帮我总结上一章");
+    expect(typed.input).toBe(prompt);
 
     const submitting = submitAssistantInput(typed, typed.input, 1000);
     expect(submitting.loading).toBe(true);
     expect(submitting.input).toBe("");
     expect(submitting.messages).toEqual([
-      { role: "user", content: "请帮我总结上一章", timestamp: 1000 },
+      { id: "msg-1", role: "user", content: prompt, timestamp: 1000 },
     ]);
 
-    const completed = completeAssistantResponse(submitting, "请帮我总结上一章", 1200);
+    const completed = completeAssistantResponse(submitting, prompt, 1200);
     expect(completed.loading).toBe(false);
     expect(completed.messages).toHaveLength(2);
     expect(completed.messages[1]?.role).toBe("assistant");
@@ -51,7 +54,7 @@ describe("AssistantView", () => {
 
     expect(next.loading).toBe(true);
     expect(next.messages).toEqual([
-      { role: "user", content: "请帮我生成下一章节的大纲。", timestamp: 2000 },
+      { id: "msg-1", role: "user", content: "请帮我生成下一章节的大纲。", timestamp: 2000 },
     ]);
   });
 });
