@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { deriveActiveBookId, routeToRuntimeCenterFromLegacy } from "./App";
+import {
+  deriveActiveBookId,
+  resolveLegacyRoute,
+  routeToRuntimeCenterFromLegacy,
+  routeToSettingsFromLegacy,
+} from "./App";
 
 describe("deriveActiveBookId", () => {
   it("returns the current book across book-centered routes", () => {
@@ -11,7 +16,9 @@ describe("deriveActiveBookId", () => {
 
   it("returns undefined for non-book routes", () => {
     expect(deriveActiveBookId({ page: "dashboard" })).toBeUndefined();
+    expect(deriveActiveBookId({ page: "assistant" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "config" })).toBeUndefined();
+    expect(deriveActiveBookId({ page: "settings" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "style" })).toBeUndefined();
   });
 
@@ -27,5 +34,27 @@ describe("routeToRuntimeCenterFromLegacy", () => {
 
   it("redirects logs entry to runtime center", () => {
     expect(routeToRuntimeCenterFromLegacy("logs")).toEqual({ page: "runtime-center" });
+  });
+});
+
+describe("routeToSettingsFromLegacy", () => {
+  it("redirects config entry to settings provider tab", () => {
+    expect(routeToSettingsFromLegacy("config")).toEqual({ page: "settings", tab: "provider" });
+  });
+
+  it("redirects genres entry to settings genre tab", () => {
+    expect(routeToSettingsFromLegacy("genres")).toEqual({ page: "settings", tab: "genre" });
+  });
+});
+
+describe("resolveLegacyRoute", () => {
+  it("resolves config and genres legacy routes", () => {
+    expect(resolveLegacyRoute({ page: "config" })).toEqual({ page: "settings", tab: "provider" });
+    expect(resolveLegacyRoute({ page: "genres" })).toEqual({ page: "settings", tab: "genre" });
+  });
+
+  it("keeps non-legacy routes unchanged", () => {
+    expect(resolveLegacyRoute({ page: "assistant" })).toEqual({ page: "assistant" });
+    expect(resolveLegacyRoute({ page: "runtime-center" })).toEqual({ page: "runtime-center" });
   });
 });
