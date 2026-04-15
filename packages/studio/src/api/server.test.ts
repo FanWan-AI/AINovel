@@ -858,6 +858,116 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(eventsData.events.map((event) => event.status)).toEqual(["running", "succeeded"]);
   });
 
+  it("exposes run-level before/after diff and briefTrace for revise/rewrite/anti-detect", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    await writeFile(chapterPath, "# 第3章\n初始文本：主角继续试探。", "utf-8");
+
+    reviseDraftMock.mockImplementation(async (_bookId: string, _chapter: number, mode: string) => {
+      if (mode === "anti-detect") {
+        await writeFile(chapterPath, "# 第3章\n初始文本：主角继续试探。", "utf-8");
+        return {
+          chapterNumber: 3,
+          wordCount: 1800,
+          fixedIssues: [],
+          applied: false,
+          status: "ready-for-review",
+        };
+      }
+      await writeFile(chapterPath, "# 第3章\n把注意力拉回师债主线并增强冲突。", "utf-8");
+      return {
+        chapterNumber: 3,
+        wordCount: 1800,
+        fixedIssues: ["focus restored"],
+        applied: true,
+        status: "ready-for-review",
+      };
+    });
+    writeNextChapterMock.mockImplementation(async () => {
+      await writeFile(chapterPath, "# 第3章\n重写后保留人物动机并补充转折。", "utf-8");
+      return {
+        chapterNumber: 3,
+        title: "Rewritten Chapter",
+        wordCount: 1800,
+        revised: true,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "rewritten" },
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const reviseResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite", brief: "拉回师债主线" }),
+    });
+    const antiDetectResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "anti-detect", brief: "降低AI痕迹" }),
+    });
+    const rewriteResponse = await app.request("http://localhost/api/books/demo-book/rewrite/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "保留人物动机" }),
+    });
+
+    expect(reviseResponse.status).toBe(200);
+    expect(antiDetectResponse.status).toBe(200);
+    expect(rewriteResponse.status).toBe(200);
+
+    const reviseData = await reviseResponse.json() as { runId: string };
+    const antiDetectData = await antiDetectResponse.json() as { runId: string };
+    const rewriteData = await rewriteResponse.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const response = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}`);
+      const data = await response.json() as { status: string };
+      expect(data.status).toBe("succeeded");
+    });
+    await vi.waitFor(async () => {
+      const response = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${rewriteData.runId}`);
+      const data = await response.json() as { status: string };
+      expect(data.status).toBe("succeeded");
+    });
+    await vi.waitFor(async () => {
+      const response = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${antiDetectData.runId}`);
+      const data = await response.json() as { status: string; decision: string | null };
+      expect(data.status).toBe("succeeded");
+      expect(data.decision).toBe("unchanged");
+    });
+
+    const reviseDiffResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}/diff`);
+    expect(reviseDiffResponse.status).toBe(200);
+    await expect(reviseDiffResponse.json()).resolves.toMatchObject({
+      runId: reviseData.runId,
+      beforeContent: expect.stringContaining("初始文本"),
+      afterContent: expect.stringContaining("师债主线"),
+      briefTrace: [{ text: "拉回师债主线", matched: true }],
+    });
+
+    const antiDetectDiffResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${antiDetectData.runId}/diff`);
+    expect(antiDetectDiffResponse.status).toBe(200);
+    await expect(antiDetectDiffResponse.json()).resolves.toMatchObject({
+      runId: antiDetectData.runId,
+      decision: "unchanged",
+      unchangedReason: "No revisions were applied.",
+      briefTrace: [{ text: "降低AI痕迹", matched: false }],
+    });
+
+    const rewriteDiffResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${rewriteData.runId}/diff`);
+    expect(rewriteDiffResponse.status).toBe(200);
+    await expect(rewriteDiffResponse.json()).resolves.toMatchObject({
+      runId: rewriteData.runId,
+      beforeContent: expect.stringContaining("初始文本"),
+      afterContent: expect.stringContaining("重写后保留人物动机"),
+      briefTrace: [{ text: "保留人物动机", matched: true }],
+    });
+  });
+
   it("returns chapter-run validation and not-found errors for invalid queries", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1687,17 +1797,19 @@ describe("runtimeEventStore integration via server broadcast", () => {
     expect(response.status).toBe(200);
     await vi.waitFor(() => expect(reviseDraftMock).toHaveBeenCalled());
 
-    const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=50");
-    const runtimeData = await runtimeResponse.json() as {
-      entries: Array<{ event: string; data: unknown }>;
-    };
-    const reviseEvents = runtimeData.entries.filter((entry) => entry.event.startsWith("revise:"));
-    expect(reviseEvents.map((entry) => entry.event)).toEqual(["revise:start", "revise:success"]);
-    expect(reviseEvents[0]?.data).toMatchObject({
-      action: "revise",
-      chapterNumber: 3,
-      briefUsed: true,
-      bookId: "demo-book",
+    await vi.waitFor(async () => {
+      const runtimeResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=50");
+      const runtimeData = await runtimeResponse.json() as {
+        entries: Array<{ event: string; data: unknown }>;
+      };
+      const reviseEvents = runtimeData.entries.filter((entry) => entry.event.startsWith("revise:"));
+      expect(reviseEvents.map((entry) => entry.event)).toEqual(["revise:start", "revise:success"]);
+      expect(reviseEvents[0]?.data).toMatchObject({
+        action: "revise",
+        chapterNumber: 3,
+        briefUsed: true,
+        bookId: "demo-book",
+      });
     });
   });
 

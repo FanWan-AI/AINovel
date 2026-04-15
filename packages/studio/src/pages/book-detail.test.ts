@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getTopActionIds, parseChapterLifecycleEvent, resolveChapterTaskActionType, translateChapterStatus } from "./BookDetail";
+import {
+  getTopActionIds,
+  parseChapterLifecycleEvent,
+  resolveChapterTaskActionType,
+  resolveRunUnchangedReason,
+  supportsRunDiff,
+  translateChapterStatus,
+} from "./BookDetail";
 import type { TFunction } from "../hooks/use-i18n";
 
 // Minimal stub that echoes the translation key so tests stay readable without
@@ -128,5 +135,29 @@ describe("resolveChapterTaskActionType", () => {
     expect(resolveChapterTaskActionType("revise", "rework")).toBe("rework");
     expect(resolveChapterTaskActionType("revise", "rewrite")).toBe("rewrite");
     expect(resolveChapterTaskActionType("revise", "anti-detect")).toBe("anti-detect");
+  });
+});
+
+describe("supportsRunDiff", () => {
+  it("allows revise/rewrite/anti-detect runs", () => {
+    expect(supportsRunDiff("revise")).toBe(true);
+    expect(supportsRunDiff("rewrite")).toBe(true);
+    expect(supportsRunDiff("anti-detect")).toBe(true);
+  });
+
+  it("ignores unsupported action types", () => {
+    expect(supportsRunDiff("resync")).toBe(false);
+    expect(supportsRunDiff("spot-fix")).toBe(false);
+  });
+});
+
+describe("resolveRunUnchangedReason", () => {
+  it("returns explicit reason when provided", () => {
+    expect(resolveRunUnchangedReason("unchanged", "  no-op  ", "fallback")).toBe("no-op");
+  });
+
+  it("uses fallback reason only for unchanged runs", () => {
+    expect(resolveRunUnchangedReason("unchanged", null, "fallback")).toBe("fallback");
+    expect(resolveRunUnchangedReason("applied", null, "fallback")).toBeNull();
   });
 });

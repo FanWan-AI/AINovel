@@ -461,6 +461,23 @@ export const strings = {
   "chapterTaskCenter.storageReadFailed": { zh: "任务记录读取失败，请重试。", en: "Failed to read task runs. Please retry." },
   "chapterTaskCenter.storageWriteFailed": { zh: "任务记录写入失败（将仅本次会话可见）。", en: "Failed to persist task runs (visible for this session only)." },
 
+  // Chapter diff dialog
+  "chapterDiff.title": { zh: "操作 Diff", en: "Run Diff" },
+  "chapterDiff.hint": { zh: "支持 revise / rewrite / anti-detect 的改前改后对比。", en: "Compare before/after for revise / rewrite / anti-detect runs." },
+  "chapterDiff.viewButton": { zh: "查看改前/改后", en: "View Before/After" },
+  "chapterDiff.loading": { zh: "正在加载运行差异...", en: "Loading run diff..." },
+  "chapterDiff.empty": { zh: "暂无可查看差异的运行记录。", en: "No diff-ready runs yet." },
+  "chapterDiff.dialogTitle": { zh: "章节运行差异", en: "Chapter Run Diff" },
+  "chapterDiff.beforeTitle": { zh: "改前", en: "Before" },
+  "chapterDiff.afterTitle": { zh: "改后", en: "After" },
+  "chapterDiff.emptyContent": { zh: "（无可用内容）", en: "(No content available)" },
+  "chapterDiff.briefTraceTitle": { zh: "建议采纳轨迹", en: "Brief Trace" },
+  "chapterDiff.briefTraceEmpty": { zh: "本次未提供补充想法。", en: "No brief provided for this run." },
+  "chapterDiff.traceMatched": { zh: "命中", en: "Matched" },
+  "chapterDiff.traceMissed": { zh: "未命中", en: "Missed" },
+  "chapterDiff.unchangedReasonLabel": { zh: "未改动原因：", en: "Unchanged reason: " },
+  "chapterDiff.unchangedReasonFallback": { zh: "本次运行未产生可应用改动。", en: "This run produced no applicable changes." },
+
   // Quality-gate error shown when AI output is too generic
   "book.planLowConfidence": { zh: "建议生成失败，请补充关键冲突后再试", en: "Suggestion failed — please add more conflict context and try again." },
   "book.planLowConfidenceRetry": { zh: "重试", en: "Retry" },
