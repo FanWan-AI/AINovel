@@ -148,14 +148,6 @@ export function normalizeWritingGovernanceForm(
   };
 }
 
-export function buildWritingGovernancePayload(form: WritingGovernanceForm): WritingGovernanceForm {
-  return {
-    styleTemplate: form.styleTemplate,
-    reviewStrictnessBaseline: form.reviewStrictnessBaseline,
-    antiAiTraceStrength: form.antiAiTraceStrength,
-  };
-}
-
 interface SaveWritingGovernanceOptions {
   readonly putApiImpl?: typeof putApi;
 }
@@ -165,7 +157,7 @@ export async function saveWritingGovernance(
   options: SaveWritingGovernanceOptions = {},
 ): Promise<void> {
   const putApiImpl = options.putApiImpl ?? putApi;
-  await putApiImpl("/project/writing-governance", buildWritingGovernancePayload(form));
+  await putApiImpl("/project/writing-governance", form);
 }
 
 export function collectWritingDuplicateKeys({
@@ -263,11 +255,11 @@ export function SettingsView({
         </div>
 
         <div className="flex items-center justify-between gap-3">
-          <div className="text-xs text-muted-foreground">
-            {writingGovernanceData?.settings?.updatedAt
-              ? `最近保存：${new Date(writingGovernanceData.settings.updatedAt).toLocaleString()}`
-              : "尚未保存过写作偏好。"}
-          </div>
+            <div className="text-xs text-muted-foreground">
+              {writingGovernanceData?.settings?.updatedAt
+                ? `最近保存：${new Date(writingGovernanceData.settings.updatedAt).toLocaleString()}`
+                : "尚未保存过写作配置。"}
+            </div>
           <button
             className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-60"
             disabled={savingWritingGovernance}

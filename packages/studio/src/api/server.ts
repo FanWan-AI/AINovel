@@ -851,7 +851,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       await writeFileFs(join(chaptersDir, match), content, "utf-8");
       return c.json({ ok: true, chapterNumber: num });
     } catch (e) {
-      return c.json({ error: String(e) }, 500);
+      return c.json({ error: `Failed to write configuration: ${String(e)}` }, 500);
     }
   });
 
@@ -1201,7 +1201,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const settings = normalizeWritingGovernanceSettings(raw.writingGovernance, "");
       return c.json({ settings });
     } catch (e) {
-      return c.json({ error: String(e) }, 500);
+      return c.json({ error: `Failed to read writing governance settings: ${String(e)}` }, 500);
     }
   });
 
@@ -1218,14 +1218,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const nextSettings = {
         ...baseSettings,
         ...validation.value,
-        schemaVersion: WRITING_GOVERNANCE_SCHEMA_VERSION,
         updatedAt: new Date().toISOString(),
       };
       existing.writingGovernance = nextSettings;
       await writeFile(configPath, JSON.stringify(existing, null, 2), "utf-8");
       return c.json({ ok: true, settings: nextSettings });
     } catch (e) {
-      return c.json({ error: String(e) }, 500);
+      return c.json({ error: `Failed to save writing governance settings: ${String(e)}` }, 500);
     }
   });
 

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildSettingsTabItems,
-  buildWritingGovernancePayload,
   collectWritingDuplicateKeys,
   normalizeSettingsTab,
   normalizeWritingGovernanceForm,
@@ -62,18 +61,6 @@ describe("writing governance helpers", () => {
     });
   });
 
-  it("builds save payload from form", () => {
-    expect(buildWritingGovernancePayload({
-      styleTemplate: "cinematic",
-      reviewStrictnessBaseline: "strict-plus",
-      antiAiTraceStrength: "max",
-    })).toEqual({
-      styleTemplate: "cinematic",
-      reviewStrictnessBaseline: "strict-plus",
-      antiAiTraceStrength: "max",
-    });
-  });
-
   it("saves governance form to project endpoint", async () => {
     const putApiImpl = vi.fn().mockResolvedValue(undefined);
     await saveWritingGovernance({
@@ -86,6 +73,15 @@ describe("writing governance helpers", () => {
       reviewStrictnessBaseline: "strict",
       antiAiTraceStrength: "high",
     });
+  });
+
+  it("rethrows save errors from API call", async () => {
+    const putApiImpl = vi.fn().mockRejectedValue(new Error("save failed"));
+    await expect(saveWritingGovernance({
+      styleTemplate: "dialogue-driven",
+      reviewStrictnessBaseline: "strict",
+      antiAiTraceStrength: "high",
+    }, { putApiImpl })).rejects.toThrow("save failed");
   });
 
   it("guards duplicate keys against BookDetail operation keys", () => {
