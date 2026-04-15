@@ -409,8 +409,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const rawTrace = Array.isArray(raw?.["briefTrace"]) ? raw["briefTrace"] : [];
     const briefTrace = rawTrace.flatMap((entry) => {
       if (!entry || typeof entry !== "object") return [];
-      const text = typeof (entry as Record<string, unknown>)["text"] === "string" ? String((entry as Record<string, unknown>)["text"]) : "";
-      const matched = (entry as Record<string, unknown>)["matched"] === true;
+      const traceItem = entry as Record<string, unknown>;
+      const text = typeof traceItem["text"] === "string" ? String(traceItem["text"]) : "";
+      const matched = traceItem["matched"] === true;
       return text ? [{ text, matched }] : [];
     });
     return {

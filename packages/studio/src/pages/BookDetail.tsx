@@ -643,7 +643,7 @@ export function BookDetail({
                   <span className="text-muted-foreground"> · {run.actionType}</span>
                 </div>
                 <button
-                  onClick={() => { void openChapterDiffDialog(run.runId); }}
+                  onClick={() => { openChapterDiffDialog(run.runId); }}
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
                 >
                   {t("chapterDiff.viewButton")}

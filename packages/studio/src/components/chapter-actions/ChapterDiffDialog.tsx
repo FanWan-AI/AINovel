@@ -118,7 +118,7 @@ export function ChapterDiffDialog({
                 ) : (
                   <ul className="space-y-2">
                     {payload.briefTrace.map((item, index) => (
-                      <li key={`${item.text}-${index}`} className="rounded-xl border border-border/40 bg-secondary/20 px-3 py-2 flex items-center justify-between gap-3">
+                      <li key={index} className="rounded-xl border border-border/40 bg-secondary/20 px-3 py-2 flex items-center justify-between gap-3">
                         <span className="text-sm">{item.text}</span>
                         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold ${item.matched ? "bg-emerald-500/10 text-emerald-600" : "bg-muted text-muted-foreground"}`}>
                           {item.matched ? t("chapterDiff.traceMatched") : t("chapterDiff.traceMissed")}
