@@ -5,7 +5,7 @@ interface Nav {
   toDashboard: () => void;
 }
 
-export function AssistantView({ nav }: { nav: Nav; theme: Theme; t: TFunction }) {
+export function AssistantView({ nav, theme: _theme, t: _t }: { nav: Nav; theme: Theme; t: TFunction }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">

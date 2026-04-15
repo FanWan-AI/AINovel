@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   deriveActiveBookId,
+  mapRouteToActivePage,
   resolveLegacyRoute,
   routeToRuntimeCenterFromLegacy,
   routeToSettingsFromLegacy,
@@ -17,7 +18,6 @@ describe("deriveActiveBookId", () => {
   it("returns undefined for non-book routes", () => {
     expect(deriveActiveBookId({ page: "dashboard" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "assistant" })).toBeUndefined();
-    expect(deriveActiveBookId({ page: "config" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "settings" })).toBeUndefined();
     expect(deriveActiveBookId({ page: "style" })).toBeUndefined();
   });
@@ -56,5 +56,17 @@ describe("resolveLegacyRoute", () => {
   it("keeps non-legacy routes unchanged", () => {
     expect(resolveLegacyRoute({ page: "assistant" })).toEqual({ page: "assistant" });
     expect(resolveLegacyRoute({ page: "runtime-center" })).toEqual({ page: "runtime-center" });
+  });
+});
+
+describe("mapRouteToActivePage", () => {
+  it("maps settings tabs back to legacy active keys for sidebar highlighting", () => {
+    expect(mapRouteToActivePage({ page: "settings", tab: "provider" })).toBe("config");
+    expect(mapRouteToActivePage({ page: "settings", tab: "genre" })).toBe("genres");
+  });
+
+  it("keeps normal route page or active book key", () => {
+    expect(mapRouteToActivePage({ page: "assistant" })).toBe("assistant");
+    expect(mapRouteToActivePage({ page: "book", bookId: "book-a" }, "book-a")).toBe("book:book-a");
   });
 });

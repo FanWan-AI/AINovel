@@ -10,6 +10,8 @@ interface Nav {
 export function SettingsView({
   nav,
   tab,
+  theme: _theme,
+  t: _t,
 }: {
   nav: Nav;
   tab?: SettingsTab;

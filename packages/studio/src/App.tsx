@@ -54,8 +54,11 @@ export type LegacyRuntimePage = "daemon" | "logs";
 export type LegacySettingsPage = "config" | "genres";
 
 export function routeToRuntimeCenterFromLegacy(page: LegacyRuntimePage): Route {
-  void page;
-  return { page: "runtime-center" };
+  switch (page) {
+    case "daemon":
+    case "logs":
+      return { page: "runtime-center" };
+  }
 }
 
 export function routeToSettingsFromLegacy(page: LegacySettingsPage): Route {
@@ -78,6 +81,22 @@ export function deriveActiveBookId(route: Route): string | undefined {
   return route.page === "book" || route.page === "chapter" || route.page === "truth" || route.page === "analytics"
     ? route.bookId
     : undefined;
+}
+
+export function mapRouteToActivePage(route: Route, activeBookId?: string): string {
+  if (activeBookId) {
+    return `book:${activeBookId}`;
+  }
+
+  if (route.page === "settings" && route.tab === "provider") {
+    return "config";
+  }
+
+  if (route.page === "settings" && route.tab === "genre") {
+    return "genres";
+  }
+
+  return route.page;
 }
 
 type AppNotificationLevel = "info" | "success" | "error";
@@ -136,7 +155,7 @@ function toNotification(msg: SSEMessage, index: number): AppNotification | null 
 }
 
 export function App() {
-  const [route, setRoute] = useState<Route>({ page: "dashboard" });
+  const [rawRoute, setRoute] = useState<Route>({ page: "dashboard" });
   const sse = useSSE();
   const { theme, setTheme } = useTheme();
   const { t } = useI18n();
@@ -188,16 +207,9 @@ export function App() {
     toDoctor: () => setRoute({ page: "doctor" }),
   }), [setRoute]);
 
-  const currentRoute = resolveLegacyRoute(route);
+  const currentRoute = resolveLegacyRoute(rawRoute);
   const activeBookId = deriveActiveBookId(currentRoute);
-  const activePage =
-    activeBookId
-      ? `book:${activeBookId}`
-      : currentRoute.page === "settings" && currentRoute.tab === "provider"
-        ? "config"
-        : currentRoute.page === "settings" && currentRoute.tab === "genre"
-          ? "genres"
-          : currentRoute.page;
+  const activePage = mapRouteToActivePage(currentRoute, activeBookId);
   const contentContainerClass =
     currentRoute.page === "truth"
       ? "max-w-[1400px] mx-auto px-4 py-8 md:px-6 lg:px-8 lg:py-10 fade-in"
