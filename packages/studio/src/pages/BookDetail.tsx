@@ -610,49 +610,6 @@ export function BookDetail({
           )}
         </div>
       )}
-      <ChapterTaskCenter
-        runs={chapterRuns}
-        chapterOptions={chapterRunOptions}
-        loading={chapterRunsLoading}
-        errorKey={chapterRunsErrorKey}
-        onRetry={retryChapterRunsLoad}
-        t={t}
-      />
-
-      <section className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.title")}</h2>
-          <span className="text-xs text-muted-foreground">{t("chapterDiff.hint")}</span>
-        </div>
-        {chapterRunSummaryLoading && (
-          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
-            {t("chapterDiff.loading")}
-          </div>
-        )}
-        {!chapterRunSummaryLoading && diffEnabledRuns.length === 0 && (
-          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
-            {t("chapterDiff.empty")}
-          </div>
-        )}
-        {!chapterRunSummaryLoading && diffEnabledRuns.length > 0 && (
-          <div className="space-y-2">
-            {diffEnabledRuns.map((run) => (
-              <div key={run.runId} className="rounded-xl border border-border/40 bg-card/50 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm">
-                  <span className="font-semibold">{t("chapter.label").replace("{n}", String(run.chapter))}</span>
-                  <span className="text-muted-foreground"> · {run.actionType}</span>
-                </div>
-                <button
-                  onClick={() => { openChapterDiffDialog(run.runId); }}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
-                >
-                  {t("chapterDiff.viewButton")}
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
 
       {/* Tool Strip */}
       <div className="flex flex-wrap items-center gap-2 py-1">
@@ -899,6 +856,50 @@ export function BookDetail({
           </div>
         )}
       </div>
+
+      <ChapterTaskCenter
+        runs={chapterRuns}
+        chapterOptions={chapterRunOptions}
+        loading={chapterRunsLoading}
+        errorKey={chapterRunsErrorKey}
+        onRetry={retryChapterRunsLoad}
+        t={t}
+      />
+
+      <section className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.title")}</h2>
+          <span className="text-xs text-muted-foreground">{t("chapterDiff.hint")}</span>
+        </div>
+        {chapterRunSummaryLoading && (
+          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
+            {t("chapterDiff.loading")}
+          </div>
+        )}
+        {!chapterRunSummaryLoading && diffEnabledRuns.length === 0 && (
+          <div className="rounded-xl border border-border/40 bg-secondary/20 px-4 py-5 text-sm text-muted-foreground">
+            {t("chapterDiff.empty")}
+          </div>
+        )}
+        {!chapterRunSummaryLoading && diffEnabledRuns.length > 0 && (
+          <div className="space-y-2">
+            {diffEnabledRuns.map((run) => (
+              <div key={run.runId} className="rounded-xl border border-border/40 bg-card/50 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm">
+                  <span className="font-semibold">{t("chapter.label").replace("{n}", String(run.chapter))}</span>
+                  <span className="text-muted-foreground"> · {run.actionType}</span>
+                </div>
+                <button
+                  onClick={() => { openChapterDiffDialog(run.runId); }}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60"
+                >
+                  {t("chapterDiff.viewButton")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <ConfirmDialog
         open={confirmDeleteOpen}

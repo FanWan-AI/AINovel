@@ -4666,4 +4666,70 @@ describe("PipelineRunner", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("applies rewrite when content changes even if pre-audit has no actionable issues", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "万凡把账簿合上，先听门外脚步，再看巷口灯影。";
+    const rewrittenBody = "万凡把账簿压在袖口里，先稳住呼吸，再顺着巷灯反光找退路。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "青石巷",
+        protagonistState: "万凡仍在被债主围堵。",
+        goal: "先脱身再找账簿线索。",
+        conflict: "债主与暗处窥视者同时逼近。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "ready-for-review",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(createAuditResult({ passed: true, issues: [], summary: "clean pre-audit" }))
+      .mockResolvedValueOnce(createAuditResult({ passed: true, issues: [], summary: "clean post-audit" }));
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: rewrittenBody,
+        wordCount: rewrittenBody.length,
+        fixedIssues: ["- 按重写意图重构了场景动作链。"],
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "青石巷",
+          protagonistState: "万凡完成了第一轮脱身布局。",
+          goal: "反查窥视者身份。",
+          conflict: "账簿显影条件尚不完整。",
+        }),
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rewrite");
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(result.actionType).toBe("rewrite");
+      expect(result.decision).toBe("applied");
+      expect(result.applied).toBe(true);
+      expect(result.briefTrace).toEqual(expect.arrayContaining([
+        "mode=rewrite",
+        "intentDriven=true",
+        "gate=applied",
+      ]));
+      expect(savedChapter).toContain(rewrittenBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

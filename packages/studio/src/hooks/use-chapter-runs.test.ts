@@ -80,7 +80,7 @@ describe("upsertLifecycleRun", () => {
     });
   });
 
-  it("creates new run when no matching task exists", () => {
+  it("ignores orphan lifecycle events when no matching task exists", () => {
     const next = upsertLifecycleRun([], {
       chapterNumber: 8,
       action: "anti-detect",
@@ -89,12 +89,6 @@ describe("upsertLifecycleRun", () => {
       timestamp: 9_999,
     });
 
-    expect(next).toHaveLength(1);
-    expect(next[0]).toMatchObject({
-      chapterNumber: 8,
-      actionType: "anti-detect",
-      status: "failed",
-      reason: "model timeout",
-    });
+    expect(next).toHaveLength(0);
   });
 });

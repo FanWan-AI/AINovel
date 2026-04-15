@@ -1022,6 +1022,97 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("propagates unchanged reasons from core revise result into run records and events", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    reviseDraftMock.mockResolvedValue({
+      chapterNumber: 3,
+      wordCount: 1200,
+      fixedIssues: [],
+      applied: false,
+      status: "unchanged",
+      unchangedReason: "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rework", brief: "强化冲突" }),
+    });
+    expect(response.status).toBe(200);
+    const data = await response.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${data.runId}`);
+      const run = await runResponse.json() as { status: string; decision: string | null; unchangedReason: string | null };
+      expect(run.status).toBe("succeeded");
+      expect(run.decision).toBe("unchanged");
+      expect(run.unchangedReason).toContain("did not improve");
+    });
+
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?limit=50");
+    expect(runtimeResponse.status).toBe(200);
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event?: string; eventType?: string; message?: string; data?: { message?: string } }>;
+    };
+    const unchangedEvent = runtimeData.entries.find((entry) =>
+      entry.event === "revise:unchanged" || entry.eventType === "revise:unchanged");
+    expect(unchangedEvent).toBeDefined();
+    const unchangedMessage = unchangedEvent?.message ?? unchangedEvent?.data?.message;
+    expect(unchangedMessage).toContain("did not improve");
+  });
+
+  it("keeps core unchanged reason and emits unmatched brief reasonCode when generated content keeps chapter unchanged", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    await writeFile(chapterPath, "# 第3章\n原文。", "utf-8");
+
+    reviseDraftMock.mockImplementation(async () => {
+      await writeFile(chapterPath, "# 第3章\n原文。", "utf-8");
+      return {
+        chapterNumber: 3,
+        wordCount: 1200,
+        fixedIssues: [],
+        applied: false,
+        status: "unchanged",
+        unchangedReason: "No revisions were applied.",
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite", brief: "改成完全不同的剧情走向" }),
+    });
+    expect(response.status).toBe(200);
+    const data = await response.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${data.runId}`);
+      const run = await runResponse.json() as { status: string; decision: string | null; unchangedReason: string | null };
+      expect(run.status).toBe("succeeded");
+      expect(run.decision).toBe("unchanged");
+      expect(run.unchangedReason).toBe("No revisions were applied.");
+    });
+
+    const runtimeResponse = await app.request("http://localhost/api/runtime/events?limit=50");
+    expect(runtimeResponse.status).toBe(200);
+    const runtimeData = await runtimeResponse.json() as {
+      entries: Array<{ event?: string; data?: { reasonCode?: string } }>;
+    };
+    const unchangedEvent = runtimeData.entries.find((entry) => entry.event === "revise:unchanged");
+    expect(unchangedEvent?.data?.reasonCode).toBe("brief-unmatched");
+  });
+
   it("returns chapter-run validation and not-found errors for invalid queries", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

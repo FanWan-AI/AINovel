@@ -1442,6 +1442,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           const decision = inferRunDecision("succeeded", result.applied);
           const afterContent = await readChapterContentSnapshot(id, chapterNum);
           const briefTrace = buildBriefTrace(appliedBrief, beforeContent, afterContent, decision);
+          const unmatchedBrief = briefUsed && briefTrace.length > 0 && briefTrace.every((item) => !item.matched);
+          const unchangedReason = decision === "unchanged"
+            ? ((result.unchangedReason ?? result.skippedReason ?? "").trim() || NO_REVISIONS_APPLIED_MESSAGE)
+            : null;
           emitActionEvent(action, decision === "unchanged" ? "unchanged" : "success", {
             bookId: id,
             chapterNumber: chapterNum,
@@ -1449,7 +1453,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             details: {
               fixedCount: result.fixedIssues.length,
               status: result.status,
-              ...(decision === "unchanged" ? { message: NO_REVISIONS_APPLIED_MESSAGE } : {}),
+              ...(decision === "unchanged" && unmatchedBrief ? { reasonCode: "brief-unmatched" } : {}),
+              ...(decision === "unchanged" ? { message: unchangedReason } : {}),
             },
           });
           await completeChapterRun({
@@ -1457,7 +1462,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             runId: chapterRun.runId,
             status: "succeeded",
             decision,
-            unchangedReason: decision === "unchanged" ? NO_REVISIONS_APPLIED_MESSAGE : null,
+            unchangedReason,
             data: {
               fixedCount: result.fixedIssues.length,
               status: result.status,

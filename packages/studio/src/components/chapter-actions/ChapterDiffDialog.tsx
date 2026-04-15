@@ -27,11 +27,210 @@ interface ChapterDiffDialogProps {
   readonly onClose: () => void;
 }
 
+type SegmentKind = "same" | "add" | "remove";
+
+interface DiffSegment {
+  readonly kind: SegmentKind;
+  readonly text: string;
+}
+
+type DiffRowKind = "equal" | "add" | "remove" | "change";
+
+export interface DiffRow {
+  readonly kind: DiffRowKind;
+  readonly beforeText: string | null;
+  readonly afterText: string | null;
+}
+
+type RawDiffOp =
+  | { readonly kind: "equal"; readonly value: string }
+  | { readonly kind: "remove"; readonly value: string }
+  | { readonly kind: "add"; readonly value: string };
+
+function splitLines(input: string): string[] {
+  return input.split(/\r?\n/);
+}
+
+function createLcsMatrix(a: readonly string[], b: readonly string[]): number[][] {
+  const matrix: number[][] = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      matrix[i][j] = a[i] === b[j]
+        ? matrix[i + 1][j + 1] + 1
+        : Math.max(matrix[i + 1][j], matrix[i][j + 1]);
+    }
+  }
+  return matrix;
+}
+
+function buildRawDiffOps(beforeLines: readonly string[], afterLines: readonly string[]): RawDiffOp[] {
+  const matrix = createLcsMatrix(beforeLines, afterLines);
+  const ops: RawDiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeLines.length && j < afterLines.length) {
+    if (beforeLines[i] === afterLines[j]) {
+      ops.push({ kind: "equal", value: beforeLines[i] });
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (matrix[i + 1][j] >= matrix[i][j + 1]) {
+      ops.push({ kind: "remove", value: beforeLines[i] });
+      i += 1;
+    } else {
+      ops.push({ kind: "add", value: afterLines[j] });
+      j += 1;
+    }
+  }
+  while (i < beforeLines.length) {
+    ops.push({ kind: "remove", value: beforeLines[i] });
+    i += 1;
+  }
+  while (j < afterLines.length) {
+    ops.push({ kind: "add", value: afterLines[j] });
+    j += 1;
+  }
+  return ops;
+}
+
+export function buildDiffRows(beforeContent: string, afterContent: string): DiffRow[] {
+  const ops = buildRawDiffOps(splitLines(beforeContent), splitLines(afterContent));
+  const rows: DiffRow[] = [];
+  let idx = 0;
+  while (idx < ops.length) {
+    const current = ops[idx];
+    if (current.kind === "equal") {
+      rows.push({ kind: "equal", beforeText: current.value, afterText: current.value });
+      idx += 1;
+      continue;
+    }
+    if (current.kind === "remove") {
+      const removed: string[] = [];
+      while (idx < ops.length && ops[idx].kind === "remove") {
+        removed.push(ops[idx].value);
+        idx += 1;
+      }
+      const added: string[] = [];
+      let probe = idx;
+      while (probe < ops.length && ops[probe].kind === "add") {
+        added.push(ops[probe].value);
+        probe += 1;
+      }
+      if (added.length > 0) {
+        const paired = Math.max(removed.length, added.length);
+        for (let offset = 0; offset < paired; offset += 1) {
+          rows.push({
+            kind: "change",
+            beforeText: removed[offset] ?? null,
+            afterText: added[offset] ?? null,
+          });
+        }
+        idx = probe;
+      } else {
+        removed.forEach((line) => rows.push({ kind: "remove", beforeText: line, afterText: null }));
+      }
+      continue;
+    }
+    const added: string[] = [];
+    while (idx < ops.length && ops[idx].kind === "add") {
+      added.push(ops[idx].value);
+      idx += 1;
+    }
+    added.forEach((line) => rows.push({ kind: "add", beforeText: null, afterText: line }));
+  }
+  return rows;
+}
+
+function tokenizeForInlineDiff(input: string): string[] {
+  if (/[一-龥]/.test(input)) {
+    return Array.from(input);
+  }
+  return input.split(/(\s+|[^\w\s])/).filter((token) => token.length > 0);
+}
+
+function buildTokenOps(beforeTokens: readonly string[], afterTokens: readonly string[]): RawDiffOp[] {
+  const matrix = createLcsMatrix(beforeTokens, afterTokens);
+  const ops: RawDiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeTokens.length && j < afterTokens.length) {
+    if (beforeTokens[i] === afterTokens[j]) {
+      ops.push({ kind: "equal", value: beforeTokens[i] });
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (matrix[i + 1][j] >= matrix[i][j + 1]) {
+      ops.push({ kind: "remove", value: beforeTokens[i] });
+      i += 1;
+    } else {
+      ops.push({ kind: "add", value: afterTokens[j] });
+      j += 1;
+    }
+  }
+  while (i < beforeTokens.length) {
+    ops.push({ kind: "remove", value: beforeTokens[i] });
+    i += 1;
+  }
+  while (j < afterTokens.length) {
+    ops.push({ kind: "add", value: afterTokens[j] });
+    j += 1;
+  }
+  return ops;
+}
+
+function mergeSegments(segments: DiffSegment[]): DiffSegment[] {
+  if (segments.length === 0) return [];
+  const merged: DiffSegment[] = [segments[0]];
+  for (let idx = 1; idx < segments.length; idx += 1) {
+    const current = segments[idx];
+    const prev = merged[merged.length - 1];
+    if (prev.kind === current.kind) {
+      merged[merged.length - 1] = { kind: prev.kind, text: prev.text + current.text };
+    } else {
+      merged.push(current);
+    }
+  }
+  return merged;
+}
+
+export function buildInlineDiffSegments(beforeText: string, afterText: string): {
+  readonly before: DiffSegment[];
+  readonly after: DiffSegment[];
+} {
+  const tokenOps = buildTokenOps(tokenizeForInlineDiff(beforeText), tokenizeForInlineDiff(afterText));
+  const beforeSegments = mergeSegments(
+    tokenOps
+      .filter((item) => item.kind !== "add")
+      .map((item) => ({ kind: item.kind === "remove" ? "remove" : "same", text: item.value })),
+  );
+  const afterSegments = mergeSegments(
+    tokenOps
+      .filter((item) => item.kind !== "remove")
+      .map((item) => ({ kind: item.kind === "add" ? "add" : "same", text: item.value })),
+  );
+  return { before: beforeSegments, after: afterSegments };
+}
+
 function actionLabel(actionType: string, t: TFunction): string {
   if (actionType === "rewrite") return t("book.rewrite");
   if (actionType === "anti-detect") return t("book.antiDetect");
   if (actionType === "resync") return t("chapterTaskCenter.actionResync");
   return t("book.spotFix");
+}
+
+function lineCellClass(kind: DiffRowKind, side: "before" | "after"): string {
+  if (kind === "change") return side === "before" ? "bg-rose-500/8 border-l-2 border-rose-500/40" : "bg-emerald-500/8 border-l-2 border-emerald-500/40";
+  if (kind === "remove" && side === "before") return "bg-rose-500/10 border-l-2 border-rose-500/45";
+  if (kind === "add" && side === "after") return "bg-emerald-500/10 border-l-2 border-emerald-500/45";
+  return "";
+}
+
+function segmentClass(kind: SegmentKind): string {
+  if (kind === "remove") return "bg-rose-500/30 text-rose-700 dark:text-rose-200 rounded px-0.5";
+  if (kind === "add") return "bg-emerald-500/30 text-emerald-700 dark:text-emerald-200 rounded px-0.5";
+  return "";
 }
 
 export function ChapterDiffDialog({
@@ -43,6 +242,7 @@ export function ChapterDiffDialog({
   onClose,
 }: ChapterDiffDialogProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const diffRows = payload ? buildDiffRows(payload.beforeContent ?? "", payload.afterContent ?? "") : [];
 
   useEffect(() => {
     if (!open || loading) return;
@@ -130,13 +330,42 @@ export function ChapterDiffDialog({
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <div className="rounded-xl border border-border/40 bg-secondary/10 p-3 space-y-2">
-                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.beforeTitle")}</div>
-                  <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed">{payload.beforeContent ?? t("chapterDiff.emptyContent")}</pre>
-                </div>
-                <div className="rounded-xl border border-border/40 bg-secondary/10 p-3 space-y-2">
-                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.afterTitle")}</div>
-                  <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed">{payload.afterContent ?? t("chapterDiff.emptyContent")}</pre>
+                <div className="rounded-xl border border-border/40 bg-secondary/10 overflow-hidden lg:col-span-2">
+                  <div className="grid grid-cols-2 border-b border-border/40 bg-secondary/40">
+                    <div className="px-3 py-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">{t("chapterDiff.beforeTitle")}</div>
+                    <div className="px-3 py-2 text-xs font-bold uppercase tracking-widest text-muted-foreground border-l border-border/40">{t("chapterDiff.afterTitle")}</div>
+                  </div>
+                  <div className="max-h-[55vh] overflow-auto">
+                    {diffRows.length === 0 ? (
+                      <div className="px-3 py-4 text-sm text-muted-foreground">{t("chapterDiff.emptyContent")}</div>
+                    ) : (
+                      diffRows.map((row, index) => {
+                        const inlineSegments = row.kind === "change" && row.beforeText !== null && row.afterText !== null
+                          ? buildInlineDiffSegments(row.beforeText, row.afterText)
+                          : null;
+                        const beforeSegments = inlineSegments
+                          ? inlineSegments.before
+                          : [{ kind: "same", text: row.beforeText ?? "" }] as DiffSegment[];
+                        const afterSegments = inlineSegments
+                          ? inlineSegments.after
+                          : [{ kind: "same", text: row.afterText ?? "" }] as DiffSegment[];
+                        return (
+                          <div key={index} className="grid grid-cols-2 border-b border-border/30 last:border-b-0">
+                            <div className={`px-3 py-2.5 text-xs leading-relaxed font-mono whitespace-pre-wrap break-words ${lineCellClass(row.kind, "before")}`}>
+                              {row.beforeText === null ? <span className="text-muted-foreground/60">∅</span> : beforeSegments.map((segment, segIndex) => (
+                                <span key={segIndex} className={segmentClass(segment.kind)}>{segment.text}</span>
+                              ))}
+                            </div>
+                            <div className={`px-3 py-2.5 text-xs leading-relaxed font-mono whitespace-pre-wrap break-words border-l border-border/40 ${lineCellClass(row.kind, "after")}`}>
+                              {row.afterText === null ? <span className="text-muted-foreground/60">∅</span> : afterSegments.map((segment, segIndex) => (
+                                <span key={segIndex} className={segmentClass(segment.kind)}>{segment.text}</span>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
               </div>
             </>

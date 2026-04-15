@@ -176,20 +176,10 @@ export function upsertLifecycleRun(
     return merged.sort((a, b) => b.startedAt - a.startedAt);
   }
 
-  const actionType = actionTypes[0];
-  if (!actionType) return prev;
-  const newRun: ChapterRunRecord = {
-    id: createChapterRunId(),
-    chapterNumber: input.chapterNumber,
-    actionType,
-    status,
-    startedAt: finishedAt,
-    finishedAt,
-    durationMs: 0,
-    reason,
-    briefSummary,
-  };
-  return [newRun, ...prev].slice(0, MAX_STORED_RUNS);
+  // Ignore orphan terminal lifecycle events to avoid creating phantom 0ms runs
+  // after page re-mount or stale SSE replay. Real runs are created by startRun()
+  // or loaded from server-side ledger.
+  return prev;
 }
 
 export function useChapterRuns(bookId: string) {

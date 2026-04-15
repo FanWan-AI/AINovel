@@ -898,7 +898,10 @@ export class PipelineRunner {
           : undefined,
       });
 
-      if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
+      const explicitRevisionIntent = (this.config.externalContext ?? "").trim().length > 0;
+      const allowIntentDrivenRevision = explicitRevisionIntent || mode !== "spot-fix";
+
+      if (!allowIntentDrivenRevision && preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
         const unchangedReason = "No warning, critical, or AI-tell issues to fix.";
         return {
           chapterNumber: targetChapter,
@@ -908,6 +911,7 @@ export class PipelineRunner {
           decision: "unchanged",
           briefTrace: [
             `mode=${mode}`,
+            `intentDriven=${allowIntentDrivenRevision}`,
             "pre(blocking=0,critical=0,aiTell=0)",
             "gate=skip:no-actionable-issues",
           ],
@@ -959,6 +963,7 @@ export class PipelineRunner {
           decision: "unchanged",
           briefTrace: [
             `mode=${mode}`,
+            `intentDriven=${allowIntentDrivenRevision}`,
             `pre(blocking=${preRevision.blockingCount},critical=${preRevision.criticalCount},aiTell=${preRevision.aiTellCount})`,
             "gate=rollback:empty-revision",
           ],
@@ -1027,15 +1032,25 @@ export class PipelineRunner {
       const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
       const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
       const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
-      const shouldApplyRevision = blockingDidNotWorsen
-        && criticalDidNotWorsen
-        && aiDidNotWorsen
-        && (improvedBlocking || improvedAITells);
+      const normalizedSource = content.trim();
+      const normalizedRevised = normalizedRevision.content.trim();
+      const contentChanged = normalizedSource !== normalizedRevised;
+      const shouldApplyRevision = allowIntentDrivenRevision
+        ? blockingDidNotWorsen
+          && criticalDidNotWorsen
+          && aiDidNotWorsen
+          && contentChanged
+        : blockingDidNotWorsen
+          && criticalDidNotWorsen
+          && aiDidNotWorsen
+          && (improvedBlocking || improvedAITells);
       const preAuditTrace = `pre(blocking=${preRevision.blockingCount},critical=${preRevision.criticalCount},aiTell=${preRevision.aiTellCount})`;
       const postAuditTrace = `post(blocking=${effectivePostRevision.blockingCount},critical=${effectivePostRevision.criticalCount},aiTell=${effectivePostRevision.aiTellCount})`;
 
       if (!shouldApplyRevision) {
-        const unchangedReason = "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.";
+        const unchangedReason = allowIntentDrivenRevision
+          ? "Manual revision produced no stable textual change under current safeguards; kept original chapter."
+          : "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.";
         return {
           chapterNumber: targetChapter,
           wordCount: revisionBaseCount,
@@ -1044,6 +1059,7 @@ export class PipelineRunner {
           decision: "unchanged",
           briefTrace: [
             `mode=${mode}`,
+            `intentDriven=${allowIntentDrivenRevision}`,
             preAuditTrace,
             postAuditTrace,
             "gate=rollback:not-improved",
@@ -1141,6 +1157,7 @@ export class PipelineRunner {
         appliedBrief: this.buildAppliedBrief(reviseOutput.fixedIssues),
         briefTrace: [
           `mode=${mode}`,
+          `intentDriven=${allowIntentDrivenRevision}`,
           preAuditTrace,
           postAuditTrace,
           "gate=applied",
