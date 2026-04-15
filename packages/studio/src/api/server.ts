@@ -65,9 +65,9 @@ type EventHandler = (event: string, data: unknown) => void;
 const subscribers = new Set<EventHandler>();
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 // Runtime lifecycle actions emitted for human-readable run narration in Studio.
-type RuntimeAction = "revise" | "rewrite" | "resync" | "plan" | "compose" | "write-next";
+type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | "compose" | "write-next";
 // Common lifecycle stages for runtime actions.
-type RuntimeActionStage = "start" | "success" | "fail";
+type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged";
 
 function broadcast(event: string, data: unknown): void {
   runtimeEventStore.append(deriveRuntimeEvent(event, data));
@@ -296,8 +296,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       action,
       bookId: payload.bookId,
       chapterNumber: payload.chapterNumber,
+      chapter: payload.chapterNumber,
       briefUsed: payload.briefUsed,
       level: stage === "fail" ? "error" : "info",
+      stage,
       ...payload.details,
     };
     if (payload.error) {
@@ -1303,7 +1305,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         appliedBrief,
       });
       chapterRunId = chapterRun.runId;
-      emitActionEvent("revise", "start", {
+      const action: RuntimeAction = reviseMode === "anti-detect" ? "anti-detect" : "revise";
+      emitActionEvent(action, "start", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
@@ -1317,16 +1320,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         reviseMode,
       ).then(
         async (result) => {
-          emitActionEvent("revise", "success", {
+          const decision = inferRunDecision("succeeded", result.applied);
+          emitActionEvent(action, decision === "unchanged" ? "unchanged" : "success", {
             bookId: id,
             chapterNumber: chapterNum,
             briefUsed,
             details: {
               fixedCount: result.fixedIssues.length,
               status: result.status,
+              ...(decision === "unchanged" ? { message: "No revisions were applied." } : {}),
             },
           });
-          const decision = inferRunDecision("succeeded", result.applied);
           await completeChapterRun({
             bookId: id,
             runId: chapterRun.runId,
@@ -1341,7 +1345,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         },
         async (e) => {
           const error = e instanceof Error ? e.message : String(e);
-          emitActionEvent("revise", "fail", {
+          emitActionEvent(action, "fail", {
             bookId: id,
             chapterNumber: chapterNum,
             briefUsed,
@@ -1366,7 +1370,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      emitActionEvent("revise", "fail", {
+      const action: RuntimeAction = reviseMode === "anti-detect" ? "anti-detect" : "revise";
+      emitActionEvent(action, "fail", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
@@ -1823,13 +1828,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
+      const revised = (result as { revised?: unknown } | null | undefined)?.revised;
+      const decision = inferRunDecision("succeeded", revised);
       emitActionEvent("resync", "success", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
+        details: {
+          decision,
+          ...(decision === "unchanged" ? { message: "No truth artifacts required updates." } : {}),
+        },
       });
-      const revised = (result as { revised?: unknown } | null | undefined)?.revised;
-      const decision = inferRunDecision("succeeded", revised);
       await completeChapterRun({
         bookId: id,
         runId: chapterRun.runId,

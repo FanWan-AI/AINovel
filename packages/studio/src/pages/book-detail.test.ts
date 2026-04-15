@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { translateChapterStatus, getTopActionIds } from "./BookDetail";
+import { getTopActionIds, parseChapterLifecycleEvent, translateChapterStatus } from "./BookDetail";
 import type { TFunction } from "../hooks/use-i18n";
 
 // Minimal stub that echoes the translation key so tests stay readable without
@@ -89,5 +89,29 @@ describe("getTopActionIds — dual-button contract", () => {
     const actions = getTopActionIds() as ReadonlyArray<string>;
     expect(actions).not.toContain("draftOnly");
     expect(actions).not.toContain("writeNext");
+  });
+});
+
+describe("parseChapterLifecycleEvent", () => {
+  it("parses unified chapter lifecycle events", () => {
+    expect(parseChapterLifecycleEvent("anti-detect:success")).toEqual({
+      action: "anti-detect",
+      stage: "success",
+    });
+    expect(parseChapterLifecycleEvent("resync:unchanged")).toEqual({
+      action: "resync",
+      stage: "unchanged",
+    });
+  });
+
+  it("maps legacy complete/error events to success/fail", () => {
+    expect(parseChapterLifecycleEvent("revise:complete")).toEqual({
+      action: "revise",
+      stage: "success",
+    });
+    expect(parseChapterLifecycleEvent("rewrite:error")).toEqual({
+      action: "rewrite",
+      stage: "fail",
+    });
   });
 });

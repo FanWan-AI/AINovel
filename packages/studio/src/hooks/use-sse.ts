@@ -6,6 +6,21 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
+const LEGACY_EVENT_ALIASES: Record<string, string> = {
+  "revise:complete": "revise:success",
+  "revise:error": "revise:fail",
+  "rewrite:complete": "rewrite:success",
+  "rewrite:error": "rewrite:fail",
+  "resync:complete": "resync:success",
+  "resync:error": "resync:fail",
+  "anti-detect:complete": "anti-detect:success",
+  "anti-detect:error": "anti-detect:fail",
+};
+
+export function normalizeStudioEventName(event: string): string {
+  return LEGACY_EVENT_ALIASES[event] ?? event;
+}
+
 export const STUDIO_SSE_EVENTS = [
   "book:creating",
   "book:created",
@@ -26,7 +41,26 @@ export const STUDIO_SSE_EVENTS = [
   "write-next:start",
   "write-next:success",
   "write-next:fail",
+  "revise:start",
+  "revise:progress",
+  "revise:success",
+  "revise:fail",
+  "revise:unchanged",
+  "rewrite:start",
+  "rewrite:progress",
+  "rewrite:success",
+  "rewrite:fail",
+  "rewrite:unchanged",
+  "anti-detect:start",
+  "anti-detect:progress",
+  "anti-detect:success",
+  "anti-detect:fail",
+  "anti-detect:unchanged",
   "resync:start",
+  "resync:progress",
+  "resync:success",
+  "resync:fail",
+  "resync:unchanged",
   "resync:complete",
   "resync:error",
   "daemon:chapter",
@@ -41,10 +75,8 @@ export const STUDIO_SSE_EVENTS = [
   "audit:start",
   "audit:complete",
   "audit:error",
-  "revise:start",
   "revise:complete",
   "revise:error",
-  "rewrite:start",
   "rewrite:complete",
   "rewrite:error",
   "style:start",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STUDIO_SSE_EVENTS } from "./use-sse";
+import { normalizeStudioEventName, STUDIO_SSE_EVENTS } from "./use-sse";
 
 describe("STUDIO_SSE_EVENTS", () => {
   it("covers the server lifecycle events that drive the UI", () => {
@@ -23,7 +23,26 @@ describe("STUDIO_SSE_EVENTS", () => {
       "write-next:start",
       "write-next:success",
       "write-next:fail",
+      "revise:start",
+      "revise:progress",
+      "revise:success",
+      "revise:fail",
+      "revise:unchanged",
+      "rewrite:start",
+      "rewrite:progress",
+      "rewrite:success",
+      "rewrite:fail",
+      "rewrite:unchanged",
+      "anti-detect:start",
+      "anti-detect:progress",
+      "anti-detect:success",
+      "anti-detect:fail",
+      "anti-detect:unchanged",
       "resync:start",
+      "resync:progress",
+      "resync:success",
+      "resync:fail",
+      "resync:unchanged",
       "resync:complete",
       "resync:error",
       "daemon:started",
@@ -32,10 +51,8 @@ describe("STUDIO_SSE_EVENTS", () => {
       "audit:start",
       "audit:complete",
       "audit:error",
-      "revise:start",
       "revise:complete",
       "revise:error",
-      "rewrite:start",
       "rewrite:complete",
       "rewrite:error",
       "agent:start",
@@ -60,5 +77,16 @@ describe("STUDIO_SSE_EVENTS", () => {
       "llm:progress",
       "ping",
     ]));
+  });
+
+  it("maps legacy lifecycle events to unified semantics", () => {
+    expect(normalizeStudioEventName("revise:complete")).toBe("revise:success");
+    expect(normalizeStudioEventName("revise:error")).toBe("revise:fail");
+    expect(normalizeStudioEventName("rewrite:complete")).toBe("rewrite:success");
+    expect(normalizeStudioEventName("rewrite:error")).toBe("rewrite:fail");
+    expect(normalizeStudioEventName("resync:complete")).toBe("resync:success");
+    expect(normalizeStudioEventName("resync:error")).toBe("resync:fail");
+    expect(normalizeStudioEventName("anti-detect:error")).toBe("anti-detect:fail");
+    expect(normalizeStudioEventName("rewrite:success")).toBe("rewrite:success");
   });
 });
