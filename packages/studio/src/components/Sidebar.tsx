@@ -5,15 +5,14 @@ import { shouldRefetchBookCollections, shouldRefetchDaemonStatus } from "../hook
 import type { TFunction } from "../hooks/use-i18n";
 import {
   Book,
-  Settings,
   Plus,
   ScrollText,
-  Boxes,
   Zap,
   Wand2,
   FileInput,
   TrendingUp,
   Stethoscope,
+  Bot,
 } from "lucide-react";
 
 interface BookSummary {
@@ -26,6 +25,7 @@ interface BookSummary {
 
 interface Nav {
   toDashboard: () => void;
+  toAssistant: () => void;
   toBook: (id: string) => void;
   toBookCreate: () => void;
   toConfig: () => void;
@@ -37,6 +37,44 @@ interface Nav {
   toImport: () => void;
   toRadar: () => void;
   toDoctor: () => void;
+}
+
+export interface SystemSidebarItem {
+  key: "assistant" | "runtime-center";
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  badge?: string;
+  badgeColor?: string;
+}
+
+export function buildSystemSidebarItems({
+  nav,
+  activePage,
+  daemonRunning,
+  t,
+}: {
+  nav: Pick<Nav, "toAssistant" | "toRuntimeCenter">;
+  activePage: string;
+  daemonRunning: boolean;
+  t: TFunction;
+}): ReadonlyArray<SystemSidebarItem> {
+  return [
+    {
+      key: "assistant",
+      label: t("nav.assistant"),
+      active: activePage === "assistant",
+      onClick: nav.toAssistant,
+    },
+    {
+      key: "runtime-center",
+      label: t("nav.runtimeCenter"),
+      active: activePage === "runtime-center",
+      onClick: nav.toRuntimeCenter,
+      badge: daemonRunning ? t("nav.running") : undefined,
+      badgeColor: daemonRunning ? "bg-emerald-500/10 text-emerald-500" : "bg-muted text-muted-foreground",
+    },
+  ];
 }
 
 export function Sidebar({ nav, activePage, sse, t }: {
@@ -58,6 +96,13 @@ export function Sidebar({ nav, activePage, sse, t }: {
       refetchDaemon();
     }
   }, [refetchBooks, refetchDaemon, sse.messages]);
+
+  const systemItems = buildSystemSidebarItems({
+    nav,
+    activePage,
+    daemonRunning: Boolean(daemon?.running),
+    t,
+  });
 
   return (
     <aside className="w-[260px] shrink-0 border-r border-border bg-background/80 backdrop-blur-md flex flex-col h-full overflow-hidden select-none">
@@ -131,26 +176,17 @@ export function Sidebar({ nav, activePage, sse, t }: {
             </span>
           </div>
           <div className="space-y-1">
-            <SidebarItem
-              label={t("create.genre")}
-              icon={<Boxes size={16} />}
-              active={activePage === "genres"}
-              onClick={nav.toGenres}
-            />
-            <SidebarItem
-              label={t("nav.config")}
-              icon={<Settings size={16} />}
-              active={activePage === "config"}
-              onClick={nav.toConfig}
-            />
-            <SidebarItem
-              label={t("nav.runtimeCenter")}
-              icon={<Zap size={16} />}
-              active={activePage === "runtime-center"}
-              onClick={nav.toRuntimeCenter}
-              badge={daemon?.running ? t("nav.running") : undefined}
-              badgeColor={daemon?.running ? "bg-emerald-500/10 text-emerald-500" : "bg-muted text-muted-foreground"}
-            />
+            {systemItems.map((item) => (
+              <SidebarItem
+                key={item.key}
+                label={item.label}
+                icon={item.key === "assistant" ? <Bot size={16} /> : <Zap size={16} />}
+                active={item.active}
+                onClick={item.onClick}
+                badge={item.badge}
+                badgeColor={item.badgeColor}
+              />
+            ))}
           </div>
         </div>
 

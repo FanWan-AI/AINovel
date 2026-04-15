@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  buildHeaderQuickActions,
   deriveActiveBookId,
   mapRouteToActivePage,
   resolveLegacyRoute,
@@ -68,5 +69,33 @@ describe("mapRouteToActivePage", () => {
   it("keeps normal route page or active book key", () => {
     expect(mapRouteToActivePage({ page: "assistant" })).toBe("assistant");
     expect(mapRouteToActivePage({ page: "book", bookId: "book-a" }, "book-a")).toBe("book:book-a");
+  });
+});
+
+describe("buildHeaderQuickActions", () => {
+  it("keeps AI Assistant before settings in header quick actions", () => {
+    const actions = buildHeaderQuickActions({
+      currentRoute: { page: "dashboard" },
+      nav: { toAssistant: vi.fn(), toSettings: vi.fn() },
+    });
+
+    expect(actions.map((action) => action.key)).toEqual(["assistant", "settings"]);
+  });
+
+  it("wires assistant/settings navigation callbacks", () => {
+    const toAssistant = vi.fn();
+    const toSettings = vi.fn();
+    const actions = buildHeaderQuickActions({
+      currentRoute: { page: "assistant" },
+      nav: { toAssistant, toSettings },
+    });
+
+    actions[0]?.onClick();
+    actions[1]?.onClick();
+
+    expect(toAssistant).toHaveBeenCalledTimes(1);
+    expect(toSettings).toHaveBeenCalledTimes(1);
+    expect(actions[0]?.active).toBe(true);
+    expect(actions[1]?.active).toBe(false);
   });
 });
