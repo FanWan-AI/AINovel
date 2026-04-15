@@ -56,10 +56,13 @@ describe("resolveSettingsTabContent", () => {
     expect(resolveSettingsTabContent("genre")).toBe("genre");
   });
 
-  it("keeps non-migrated tabs on placeholder content and defaults unknown tab to provider", () => {
+  it("keeps non-migrated tabs on placeholder content", () => {
     expect(resolveSettingsTabContent("locale")).toBe("placeholder");
     expect(resolveSettingsTabContent("appearance")).toBe("placeholder");
     expect(resolveSettingsTabContent("writing")).toBe("placeholder");
+  });
+
+  it("falls back unknown tab input to provider content via normalizeSettingsTab", () => {
     expect(resolveSettingsTabContent("unknown" as never)).toBe("provider");
   });
 });
