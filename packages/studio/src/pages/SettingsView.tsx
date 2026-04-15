@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { putApi, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
+import { ConfigView } from "./ConfigView";
+import { GenreManager } from "./GenreManager";
 
 export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writing";
 
@@ -83,6 +85,16 @@ export function buildSettingsTabItems({
     active: item.key === activeTab,
     onClick: () => onTabChange(item.key),
   }));
+}
+
+export type SettingsTabContent = "provider" | "genre" | "writing" | "placeholder";
+
+export function resolveSettingsTabContent(tab?: SettingsTab): SettingsTabContent {
+  const activeTab = normalizeSettingsTab(tab);
+  if (activeTab === "provider" || activeTab === "genre" || activeTab === "writing") {
+    return activeTab;
+  }
+  return "placeholder";
 }
 
 interface Nav {
@@ -175,7 +187,7 @@ export function SettingsView({
   nav,
   tab,
   onTabChange,
-  theme: _theme,
+  theme,
   t,
 }: {
   nav: Nav;
@@ -314,6 +326,7 @@ export function SettingsView({
       </div>
     );
   };
+  const tabContent = resolveSettingsTabContent(activeTab);
 
   return (
     <div className="space-y-6">
@@ -346,11 +359,14 @@ export function SettingsView({
         </div>
       </div>
 
-      {activeTab === "writing" ? (
+      {tabContent === "provider" && <ConfigView nav={nav} theme={theme} t={t} />}
+      {tabContent === "genre" && <GenreManager nav={nav} theme={theme} t={t} />}
+      {tabContent === "writing" && (
         <div className="rounded-lg border border-border px-6 py-6">
           {renderWritingGovernancePanel()}
         </div>
-      ) : (
+      )}
+      {tabContent === "placeholder" && (
         <div className="rounded-lg border border-dashed border-border px-6 py-10">
           <h2 className="text-base font-semibold text-foreground">{t(activeTabDefinition.placeholderTitleKey)}</h2>
           <p className="mt-2 text-sm text-muted-foreground">{t(activeTabDefinition.placeholderDescKey)}</p>

@@ -4,6 +4,7 @@ import {
   collectWritingDuplicateKeys,
   normalizeSettingsTab,
   normalizeWritingGovernanceForm,
+  resolveSettingsTabContent,
   saveWritingGovernance,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
@@ -90,5 +91,22 @@ describe("writing governance helpers", () => {
       governanceKeys: ["plan-next-and-write", "style-template-global"],
       bookDetailKeys: ["plan-next-and-write", "quick-write"],
     })).toEqual(["plan-next-and-write"]);
+  });
+});
+
+describe("resolveSettingsTabContent", () => {
+  it("maps provider, genre and writing tabs to content panels", () => {
+    expect(resolveSettingsTabContent("provider")).toBe("provider");
+    expect(resolveSettingsTabContent("genre")).toBe("genre");
+    expect(resolveSettingsTabContent("writing")).toBe("writing");
+  });
+
+  it("keeps non-migrated tabs on placeholder content", () => {
+    expect(resolveSettingsTabContent("locale")).toBe("placeholder");
+    expect(resolveSettingsTabContent("appearance")).toBe("placeholder");
+  });
+
+  it("falls back unknown tab input to provider content via normalizeSettingsTab", () => {
+    expect(resolveSettingsTabContent("unknown" as never)).toBe("provider");
   });
 });

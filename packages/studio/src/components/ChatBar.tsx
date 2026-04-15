@@ -45,6 +45,31 @@ interface BookRef {
   readonly id: string;
 }
 
+export type ChatActionType = "write-next" | "audit" | "market-radar";
+
+export interface ChatActionIntent {
+  readonly type: ChatActionType;
+  readonly chapterNumber?: number;
+}
+
+export interface ChatActionSseUpdate {
+  readonly done: boolean;
+  readonly message: string;
+}
+
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/iu;
+const AUDIT_ACTION_PATTERN = /审计|audit/iu;
+const RADAR_ACTION_PATTERN = /市场雷达|市场趋势|雷达|market\s*radar|scan\s*market|market\s*trend/iu;
+const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
+const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+const ACTION_RESULT_SUMMARY_MAX_LENGTH = 120;
+const ACTION_RESULT_SUMMARY_TRUNCATE_LENGTH = 117;
+
+interface WriteNextDetailsPayload {
+  readonly title?: unknown;
+  readonly wordCount?: unknown;
+}
+
 export function resolveDirectWriteTarget(
   activeBookId: string | undefined,
   books: ReadonlyArray<BookRef>,
@@ -59,6 +84,105 @@ export function resolveDirectWriteTarget(
     return { bookId: null, reason: "missing" };
   }
   return { bookId: null, reason: "ambiguous" };
+}
+
+export function detectChatActionIntent(prompt: string): ChatActionIntent | null {
+  const normalized = prompt.trim();
+  if (!normalized) return null;
+  if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return { type: "write-next" };
+  if (AUDIT_ACTION_PATTERN.test(normalized)) {
+    const zhMatch = normalized.match(AUDIT_CHAPTER_ZH_PATTERN);
+    if (zhMatch?.[1]) return { type: "audit", chapterNumber: Number.parseInt(zhMatch[1], 10) };
+    const enMatch = normalized.match(AUDIT_CHAPTER_EN_PATTERN);
+    if (enMatch?.[1]) return { type: "audit", chapterNumber: Number.parseInt(enMatch[1], 10) };
+    return { type: "audit" };
+  }
+  if (RADAR_ACTION_PATTERN.test(normalized)) return { type: "market-radar" };
+  return null;
+}
+
+export function buildChatActionApiPath(intent: ChatActionIntent, bookId: string | null): string | null {
+  if (intent.type === "write-next") {
+    return bookId ? `/books/${bookId}/write-next` : null;
+  }
+  if (intent.type === "audit") {
+    if (!bookId || !intent.chapterNumber) return null;
+    return `/books/${bookId}/audit/${intent.chapterNumber}`;
+  }
+  return "/radar/scan";
+}
+
+function resolveActionResultSummary(result: unknown): string {
+  if (result == null) return "ok";
+  if (typeof result === "string") return result;
+  if (Array.isArray(result)) return `${result.length} items`;
+  if (typeof result === "object") {
+    const value = result as Record<string, unknown>;
+    if (typeof value.summary === "string" && value.summary.trim()) return value.summary;
+    if (Array.isArray(value.items)) return `${value.items.length} items`;
+    const json = JSON.stringify(value);
+    return json.length > ACTION_RESULT_SUMMARY_MAX_LENGTH
+      ? `${json.slice(0, ACTION_RESULT_SUMMARY_TRUNCATE_LENGTH)}...`
+      : json;
+  }
+  return String(result);
+}
+
+function buildChatActionSuccessMessage(intent: ChatActionIntent, isZh: boolean, payload: Record<string, unknown>): string {
+  if (intent.type === "write-next") {
+    const details = payload.details as WriteNextDetailsPayload | undefined;
+    const title = typeof details?.title === "string" ? details.title : `Chapter ${payload.chapterNumber ?? "?"}`;
+    const wordCount = typeof details?.wordCount === "number" ? details.wordCount.toLocaleString() : "?";
+    return `✓ ${title} (${wordCount} chars)`;
+  }
+  if (intent.type === "audit") {
+    const chapter = payload.chapter ?? intent.chapterNumber ?? "?";
+    const passed = payload.passed;
+    if (passed === true) return isZh ? `✓ 第${chapter}章审计通过` : `✓ Chapter ${chapter} audit passed`;
+    if (passed === false) return isZh ? `✓ 第${chapter}章审计完成：需修订` : `✓ Chapter ${chapter} audit done: needs revision`;
+    return isZh ? `✓ 第${chapter}章审计完成` : `✓ Chapter ${chapter} audit completed`;
+  }
+  const summary = resolveActionResultSummary(payload.result ?? payload);
+  return isZh ? `✓ 市场雷达完成：${summary}` : `✓ Market radar completed: ${summary}`;
+}
+
+function buildChatActionFailureMessage(intent: ChatActionIntent, isZh: boolean, error: unknown): string {
+  const reason = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : String(error);
+  if (intent.type === "write-next") return `✗ ${reason}`;
+  if (intent.type === "audit") return isZh ? `✗ 审计失败：${reason}` : `✗ Audit failed: ${reason}`;
+  return isZh ? `✗ 市场雷达失败：${reason}` : `✗ Market radar failed: ${reason}`;
+}
+
+export function resolveChatActionSseUpdate(event: string, data: Record<string, unknown>, isZh: boolean): ChatActionSseUpdate | null {
+  if (event === "write-next:success" || event === "write:complete" || event === "draft:complete") {
+    return { done: true, message: buildChatActionSuccessMessage({ type: "write-next" }, isZh, data) };
+  }
+  if (event === "write-next:fail" || event === "write:error" || event === "draft:error") {
+    return { done: true, message: buildChatActionFailureMessage({ type: "write-next" }, isZh, data.error ?? "Unknown error") };
+  }
+  if (event === "audit:start") {
+    return { done: false, message: isZh ? `⋯ 开始审计第${data.chapter ?? "?"}章…` : `⋯ Auditing chapter ${data.chapter ?? "?"}...` };
+  }
+  if (event === "audit:complete") {
+    return { done: true, message: buildChatActionSuccessMessage({ type: "audit" }, isZh, data) };
+  }
+  if (event === "audit:error") {
+    return { done: true, message: buildChatActionFailureMessage({ type: "audit" }, isZh, data.error ?? "Unknown error") };
+  }
+  if (event === "radar:start") {
+    return { done: false, message: isZh ? "⋯ 开始扫描市场雷达…" : "⋯ Scanning market radar..." };
+  }
+  if (event === "radar:complete") {
+    return { done: true, message: buildChatActionSuccessMessage({ type: "market-radar" }, isZh, data) };
+  }
+  if (event === "radar:error") {
+    return { done: true, message: buildChatActionFailureMessage({ type: "market-radar" }, isZh, data.error ?? "Unknown error") };
+  }
+  return null;
 }
 
 // ── Sub-components ──
@@ -204,6 +328,7 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isZh = t("nav.connected") === "已连接";
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -225,24 +350,23 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
     if (!recent || recent.event === "ping") return;
 
     const d = recent.data as Record<string, unknown>;
+    const actionUpdate = resolveChatActionSseUpdate(recent.event, d, isZh);
+    if (actionUpdate) {
+      if (actionUpdate.done) {
+        setLoading(false);
+      }
+      setMessages((prev) => {
+        if (actionUpdate.message.startsWith("⋯")) {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && last.content.startsWith("⋯")) {
+            return [...prev.slice(0, -1), { role: "assistant", content: actionUpdate.message, timestamp: Date.now() }];
+          }
+        }
+        return [...prev, { role: "assistant", content: actionUpdate.message, timestamp: Date.now() }];
+      });
+      return;
+    }
 
-    if (recent.event === "write:complete" || recent.event === "draft:complete") {
-      setLoading(false);
-      const title = d.title ?? `Chapter ${d.chapterNumber}`;
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: `✓ ${title} (${(d.wordCount as number)?.toLocaleString() ?? "?"} chars)`,
-        timestamp: Date.now(),
-      }]);
-    }
-    if (recent.event === "write:error" || recent.event === "draft:error") {
-      setLoading(false);
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: `✗ ${d.error ?? "Unknown error"}`,
-        timestamp: Date.now(),
-      }]);
-    }
     if (recent.event === "log" && loading) {
       const msg = d.message as string;
       if (msg && (msg.includes("Phase") || msg.includes("streaming") || msg.includes("Writing") || msg.includes("Audit") || msg.includes("Revis"))) {
@@ -255,7 +379,7 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
         });
       }
     }
-  }, [sse.messages.length]);
+  }, [isZh, loading, sse.messages.length]);
 
   // Current phase for status bar
   const currentPhase = useMemo(() => {
@@ -271,30 +395,70 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
     setMessages((prev) => [...prev, { role: "user", content: text, timestamp: Date.now() }]);
     setLoading(true);
 
-    const lower = text.toLowerCase();
+    const normalizedPrompt = text.trim();
 
     try {
-      if (lower.match(/^(写下一章|write next)/)) {
-        const { books } = await fetchJson<{ books: ReadonlyArray<BookRef> }>("/books");
-        const target = resolveDirectWriteTarget(activeBookId, books);
-
-        if (target.bookId) {
+      const intent = detectChatActionIntent(normalizedPrompt);
+      if (intent) {
+        if (intent.type === "audit" && !intent.chapterNumber) {
+          setLoading(false);
           setMessages((prev) => [...prev, {
             role: "assistant",
-            content: isZh ? `⋯ 开始处理《${target.bookId}》...` : `⋯ Starting ${target.bookId}...`,
+            content: isZh ? "✗ 请指定要审计的章节，例如“审计第5章”。" : '✗ Please specify a chapter to audit, e.g. "audit chapter 5".',
             timestamp: Date.now(),
           }]);
-          await postApi(`/books/${target.bookId}/write-next`, {});
           return;
         }
 
+        let targetBookId: string | null = null;
+        if (intent.type !== "market-radar") {
+          const { books } = await fetchJson<{ books: ReadonlyArray<BookRef> }>("/books");
+          const target = resolveDirectWriteTarget(activeBookId, books);
+          targetBookId = target.bookId;
+          if (!targetBookId) {
+            setLoading(false);
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content:
+                target.reason === "missing"
+                  ? (isZh ? "✗ 还没有书，先创建一本再执行该动作。" : "✗ No books yet. Create one first.")
+                  : (isZh ? "✗ 当前有多本书，请先打开目标书籍后再执行。" : "✗ Multiple books found. Open the target book first."),
+              timestamp: Date.now(),
+            }]);
+            return;
+          }
+        }
+
+        const path = buildChatActionApiPath(intent, targetBookId);
+        if (!path) {
+          setLoading(false);
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: isZh ? "✗ 参数不完整，无法执行该动作。" : "✗ Missing parameters for this action.",
+            timestamp: Date.now(),
+          }]);
+          return;
+        }
+
+        setMessages((prev) => [...prev, {
+          role: "assistant",
+          content: isZh ? "⋯ 动作已启动，正在执行…" : "⋯ Action started, running...",
+          timestamp: Date.now(),
+        }]);
+
+        const result = await postApi<Record<string, unknown>>(path);
+        if (intent.type === "write-next") {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: isZh ? "⋯ 写作任务已提交，等待完成事件…" : "⋯ Write-next request accepted, waiting for completion...",
+            timestamp: Date.now(),
+          }]);
+          return;
+        }
         setLoading(false);
         setMessages((prev) => [...prev, {
           role: "assistant",
-          content:
-            target.reason === "missing"
-              ? (isZh ? "✗ 还没有书，先创建一本再写。" : "✗ No books yet. Create one first.")
-              : (isZh ? "✗ 当前有多本书，请先打开目标书籍后再执行“写下一章”。" : '✗ Multiple books found. Open the target book first, then run "write next".'),
+          content: buildChatActionSuccessMessage(intent, isZh, result),
           timestamp: Date.now(),
         }]);
         return;
@@ -327,8 +491,6 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
       handleSubmit();
     }, 50);
   };
-
-  const isZh = t("nav.connected") === "已连接";
 
   // Rotating tips
   const TIPS_ZH = [
