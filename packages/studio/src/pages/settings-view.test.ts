@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildSettingsTabItems,
   normalizeSettingsTab,
+  resolveSettingsTabContent,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
 
@@ -46,5 +47,19 @@ describe("buildSettingsTabItems", () => {
     writingTab?.onClick();
 
     expect(onTabChange).toHaveBeenCalledWith("writing");
+  });
+});
+
+describe("resolveSettingsTabContent", () => {
+  it("maps provider and genre tabs to migrated content panels", () => {
+    expect(resolveSettingsTabContent("provider")).toBe("provider");
+    expect(resolveSettingsTabContent("genre")).toBe("genre");
+  });
+
+  it("keeps non-migrated tabs on placeholder content and defaults unknown tab to provider", () => {
+    expect(resolveSettingsTabContent("locale")).toBe("placeholder");
+    expect(resolveSettingsTabContent("appearance")).toBe("placeholder");
+    expect(resolveSettingsTabContent("writing")).toBe("placeholder");
+    expect(resolveSettingsTabContent("unknown" as never)).toBe("provider");
   });
 });
