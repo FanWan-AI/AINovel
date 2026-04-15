@@ -43,6 +43,12 @@ import {
   type RuntimeEventLevel,
 } from "./schemas/runtime-schema.js";
 import { validateDaemonPlanRequest, validateDaemonStartRequest } from "./schemas/daemon-plan-schema.js";
+import {
+  validateChapterRunListQuery,
+  type ChapterRunActionType,
+  type ChapterRunRecord,
+} from "./schemas/chapter-run-schema.js";
+import { ChapterRunStore, inferRunDecision } from "./lib/chapter-run-store.js";
 import type {
   RuntimeEvent,
   RuntimeOverview,
@@ -84,6 +90,7 @@ const bookCreateRunStore = new BookCreateRunStore();
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
+  const chapterRunStore = new ChapterRunStore((bookId) => state.bookDir(bookId));
   let cachedConfig = initialConfig;
 
   // --- Runtime event log ---
@@ -298,6 +305,44 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       eventPayload.message = payload.error;
     }
     broadcast(`${action}:${stage}`, eventPayload);
+  }
+
+  function toChapterRunResponse(run: ChapterRunRecord): Record<string, unknown> {
+    return {
+      runId: run.runId,
+      bookId: run.bookId,
+      chapter: run.chapter,
+      actionType: run.actionType,
+      status: run.status,
+      decision: run.decision,
+      appliedBrief: run.appliedBrief,
+      unchangedReason: run.unchangedReason,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      error: run.error,
+    };
+  }
+
+  async function completeChapterRun(input: {
+    readonly bookId: string;
+    readonly runId: string;
+    readonly status: "succeeded" | "failed";
+    readonly decision?: "applied" | "unchanged" | "failed" | null;
+    readonly unchangedReason?: string | null;
+    readonly error?: string;
+    readonly message?: string;
+    readonly data?: Record<string, unknown>;
+  }): Promise<void> {
+    await chapterRunStore.completeRun({
+      bookId: input.bookId,
+      runId: input.runId,
+      status: input.status,
+      ...(input.decision !== undefined ? { decision: input.decision } : {}),
+      ...(input.unchangedReason !== undefined ? { unchangedReason: input.unchangedReason } : {}),
+      ...(input.error !== undefined ? { error: input.error } : {}),
+      ...(input.message !== undefined ? { message: input.message } : {}),
+      ...(input.data !== undefined ? { data: input.data } : {}),
+    });
   }
 
   // --- Books ---
@@ -1115,6 +1160,40 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json(response);
   });
 
+  app.get("/api/books/:id/chapter-runs", async (c) => {
+    const id = c.req.param("id");
+    const validation = validateChapterRunListQuery({
+      chapter: c.req.query("chapter"),
+      limit: c.req.query("limit"),
+    });
+    if (!validation.ok) {
+      return c.json({ code: "CHAPTER_RUNS_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+
+    const runs = await chapterRunStore.listRuns(id, validation.value);
+    return c.json({ runs: runs.map((run) => toChapterRunResponse(run)) });
+  });
+
+  app.get("/api/books/:id/chapter-runs/:runId", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const run = await chapterRunStore.getRun(id, runId);
+    if (!run) {
+      return c.json({ error: "Run not found" }, 404);
+    }
+    return c.json(toChapterRunResponse(run));
+  });
+
+  app.get("/api/books/:id/chapter-runs/:runId/events", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const events = await chapterRunStore.getRunEvents(id, runId);
+    if (!events) {
+      return c.json({ error: "Run not found" }, 404);
+    }
+    return c.json({ runId, events });
+  });
+
   app.post("/api/runtime/clear", (c) => {
     const cleared = runtimeEvents.length;
     runtimeEvents.splice(0, runtimeEvents.length);
@@ -1209,54 +1288,100 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const body: { mode?: string; brief?: string } = await c.req
       .json<{ mode?: string; brief?: string }>()
       .catch(() => ({ mode: "spot-fix" }));
+    const reviseMode = (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
-    emitActionEvent("revise", "start", {
-      bookId: id,
-      chapterNumber: chapterNum,
-      briefUsed,
-    });
+    const actionType: ChapterRunActionType = reviseMode === "anti-detect" ? "anti-detect" : "revise";
+    let chapterRunId: string | undefined;
+
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType,
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
+      emitActionEvent("revise", "start", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
       pipeline.reviseDraft(
         id,
         chapterNum,
-        (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect",
+        reviseMode,
       ).then(
-        (result) => emitActionEvent("revise", "success", {
-          bookId: id,
-          chapterNumber: chapterNum,
-          briefUsed,
-          details: {
-            fixedCount: result.fixedIssues.length,
-            status: result.status,
-          },
-        }),
-        (e) => emitActionEvent("revise", "fail", {
-          bookId: id,
-          chapterNumber: chapterNum,
-          briefUsed,
-          error: e instanceof Error ? e.message : String(e),
-        }),
+        async (result) => {
+          emitActionEvent("revise", "success", {
+            bookId: id,
+            chapterNumber: chapterNum,
+            briefUsed,
+            details: {
+              fixedCount: result.fixedIssues.length,
+              status: result.status,
+            },
+          });
+          const decision = inferRunDecision("succeeded", result.applied);
+          await completeChapterRun({
+            bookId: id,
+            runId: chapterRun.runId,
+            status: "succeeded",
+            decision,
+            unchangedReason: decision === "unchanged" ? "No revisions were applied." : null,
+            data: {
+              fixedCount: result.fixedIssues.length,
+              status: result.status,
+            },
+          });
+        },
+        async (e) => {
+          const error = e instanceof Error ? e.message : String(e);
+          emitActionEvent("revise", "fail", {
+            bookId: id,
+            chapterNumber: chapterNum,
+            briefUsed,
+            error,
+          });
+          await completeChapterRun({
+            bookId: id,
+            runId: chapterRun.runId,
+            status: "failed",
+            error,
+            message: error,
+          });
+        },
       );
       return c.json({
         status: "revising",
+        runId: chapterRunId,
         bookId: id,
         chapter: chapterNum,
-        mode: body.mode ?? "spot-fix",
+        mode: reviseMode,
         appliedBrief: appliedBrief ?? null,
       });
     } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
       emitActionEvent("revise", "fail", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
-        error: e instanceof Error ? e.message : String(e),
+        error,
       });
-      return c.json({ error: String(e) }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 
@@ -1570,40 +1695,80 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
-    emitActionEvent("rewrite", "start", {
-      bookId: id,
-      chapterNumber: chapterNum,
-      briefUsed,
-    });
+    let chapterRunId: string | undefined;
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType: "rewrite",
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
+      emitActionEvent("rewrite", "start", {
+        bookId: id,
+        chapterNumber: chapterNum,
+        briefUsed,
+      });
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(id, rollbackTarget);
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: appliedBrief,
       }));
       pipeline.writeNextChapter(id).then(
-        (result) => emitActionEvent("rewrite", "success", {
-          bookId: id,
-          chapterNumber: result.chapterNumber,
-          briefUsed,
-          details: { title: result.title, wordCount: result.wordCount },
-        }),
-        (e) => emitActionEvent("rewrite", "fail", {
-          bookId: id,
-          chapterNumber: chapterNum,
-          briefUsed,
-          error: e instanceof Error ? e.message : String(e),
-        }),
+        async (result) => {
+          emitActionEvent("rewrite", "success", {
+            bookId: id,
+            chapterNumber: result.chapterNumber,
+            briefUsed,
+            details: { title: result.title, wordCount: result.wordCount },
+          });
+          await completeChapterRun({
+            bookId: id,
+            runId: chapterRun.runId,
+            status: "succeeded",
+            decision: "applied",
+            data: {
+              title: result.title,
+              wordCount: result.wordCount,
+            },
+          });
+        },
+        async (e) => {
+          const error = e instanceof Error ? e.message : String(e);
+          emitActionEvent("rewrite", "fail", {
+            bookId: id,
+            chapterNumber: chapterNum,
+            briefUsed,
+            error,
+          });
+          await completeChapterRun({
+            bookId: id,
+            runId: chapterRun.runId,
+            status: "failed",
+            error,
+            message: error,
+          });
+        },
       );
-      return c.json({ status: "rewriting", bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
+      return c.json({ status: "rewriting", runId: chapterRunId, bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded, appliedBrief: appliedBrief ?? null });
     } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
       emitActionEvent("rewrite", "fail", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
-        error: e instanceof Error ? e.message : String(e),
+        error,
       });
-      return c.json({ error: String(e) }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 
@@ -1615,8 +1780,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       .catch(() => ({}));
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;
+    let chapterRunId: string | undefined;
 
     try {
+      const chapterRun = await chapterRunStore.createRun({
+        bookId: id,
+        chapter: chapterNum,
+        actionType: "resync",
+        appliedBrief,
+      });
+      chapterRunId = chapterRun.runId;
       emitActionEvent("resync", "start", {
         bookId: id,
         chapterNumber: chapterNum,
@@ -1632,13 +1805,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ).resyncChapterArtifacts;
 
       if (typeof resyncChapterArtifacts !== "function") {
+        const message = "Current @actalk/inkos-core build does not support chapter resync.";
         emitActionEvent("resync", "fail", {
           bookId: id,
           chapterNumber: chapterNum,
           briefUsed,
-          error: "Current @actalk/inkos-core build does not support chapter resync.",
+          error: message,
         });
-        return c.json({ error: "Current @actalk/inkos-core build does not support chapter resync." }, 501);
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRun.runId,
+          status: "failed",
+          error: message,
+          message,
+        });
+        return c.json({ error: message, runId: chapterRunId }, 501);
       }
 
       const result = await resyncChapterArtifacts.call(pipeline, id, chapterNum);
@@ -1647,18 +1828,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         chapterNumber: chapterNum,
         briefUsed,
       });
+      const revised = (result as { revised?: unknown } | null | undefined)?.revised;
+      const decision = inferRunDecision("succeeded", revised);
+      await completeChapterRun({
+        bookId: id,
+        runId: chapterRun.runId,
+        status: "succeeded",
+        decision,
+        unchangedReason: decision === "unchanged" ? "No truth artifacts required updates." : null,
+      });
       if (result && typeof result === "object") {
-        return c.json({ ...(result as Record<string, unknown>), appliedBrief: appliedBrief ?? null });
+        return c.json({ ...(result as Record<string, unknown>), runId: chapterRunId, appliedBrief: appliedBrief ?? null });
       }
-      return c.json({ ok: true, result, appliedBrief: appliedBrief ?? null });
+      return c.json({ ok: true, result, runId: chapterRunId, appliedBrief: appliedBrief ?? null });
     } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
       emitActionEvent("resync", "fail", {
         bookId: id,
         chapterNumber: chapterNum,
         briefUsed,
-        error: e instanceof Error ? e.message : String(e),
+        error,
       });
-      return c.json({ error: String(e) }, 500);
+      if (chapterRunId) {
+        await completeChapterRun({
+          bookId: id,
+          runId: chapterRunId,
+          status: "failed",
+          error,
+          message: error,
+        });
+      }
+      return c.json({ error: String(e), ...(chapterRunId ? { runId: chapterRunId } : {}) }, 500);
     }
   });
 

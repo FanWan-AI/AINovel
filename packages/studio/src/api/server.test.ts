@@ -761,6 +761,126 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(resyncChapterArtifactsMock).toHaveBeenCalledWith("demo-book", 3);
   });
 
+  it("persists chapter runs for revise/rewrite/anti-detect/resync and supports querying after refresh", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const reviseResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "rewrite", brief: "回收伏笔" }),
+    });
+    const antiDetectResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "anti-detect", brief: "降低AI痕迹" }),
+    });
+    const rewriteResponse = await app.request("http://localhost/api/books/demo-book/rewrite/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "保留人物动机" }),
+    });
+    const resyncResponse = await app.request("http://localhost/api/books/demo-book/resync/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: "同步事实" }),
+    });
+
+    expect(reviseResponse.status).toBe(200);
+    expect(antiDetectResponse.status).toBe(200);
+    expect(rewriteResponse.status).toBe(200);
+    expect(resyncResponse.status).toBe(200);
+
+    const reviseData = await reviseResponse.json() as { runId: string };
+    const antiDetectData = await antiDetectResponse.json() as { runId: string };
+    const rewriteData = await rewriteResponse.json() as { runId: string };
+    const resyncData = await resyncResponse.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const response = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseData.runId}`);
+      const data = await response.json() as { status: string };
+      expect(data.status).toBe("succeeded");
+    });
+    await vi.waitFor(async () => {
+      const response = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${rewriteData.runId}`);
+      const data = await response.json() as { status: string };
+      expect(data.status).toBe("succeeded");
+    });
+
+    const refreshedApp = createStudioServer(cloneProjectConfig() as never, root);
+    const listResponse = await refreshedApp.request("http://localhost/api/books/demo-book/chapter-runs?limit=10");
+    expect(listResponse.status).toBe(200);
+    const listData = await listResponse.json() as {
+      runs: Array<{
+        runId: string;
+        actionType: string;
+        status: string;
+        decision: string | null;
+        appliedBrief: string | null;
+        unchangedReason: string | null;
+        startedAt: string;
+        finishedAt: string | null;
+      }>;
+    };
+    expect(listData.runs.length).toBeGreaterThanOrEqual(4);
+    const runIds = listData.runs.map((run) => run.runId);
+    expect(runIds).toContain(reviseData.runId);
+    expect(runIds).toContain(antiDetectData.runId);
+    expect(runIds).toContain(rewriteData.runId);
+    expect(runIds).toContain(resyncData.runId);
+    const antiDetectRun = listData.runs.find((run) => run.runId === antiDetectData.runId);
+    expect(antiDetectRun?.actionType).toBe("anti-detect");
+    expect(antiDetectRun).toMatchObject({
+      status: "succeeded",
+      decision: "applied",
+      appliedBrief: "降低AI痕迹",
+      startedAt: expect.any(String),
+      finishedAt: expect.any(String),
+    });
+
+    const runResponse = await refreshedApp.request(`http://localhost/api/books/demo-book/chapter-runs/${resyncData.runId}`);
+    expect(runResponse.status).toBe(200);
+    await expect(runResponse.json()).resolves.toMatchObject({
+      runId: resyncData.runId,
+      actionType: "resync",
+      status: "succeeded",
+      decision: "unchanged",
+      unchangedReason: "No truth artifacts required updates.",
+      appliedBrief: "同步事实",
+      startedAt: expect.any(String),
+      finishedAt: expect.any(String),
+    });
+
+    const eventsResponse = await refreshedApp.request(`http://localhost/api/books/demo-book/chapter-runs/${resyncData.runId}/events`);
+    expect(eventsResponse.status).toBe(200);
+    const eventsData = await eventsResponse.json() as { events: Array<{ type: string; status: string }> };
+    expect(eventsData.events.map((event) => event.type)).toEqual(["start", "success"]);
+    expect(eventsData.events.map((event) => event.status)).toEqual(["running", "succeeded"]);
+  });
+
+  it("returns chapter-run validation and not-found errors for invalid queries", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const invalidQueryResponse = await app.request("http://localhost/api/books/demo-book/chapter-runs?chapter=abc&limit=0");
+    expect(invalidQueryResponse.status).toBe(422);
+    await expect(invalidQueryResponse.json()).resolves.toMatchObject({
+      code: "CHAPTER_RUNS_VALIDATION_FAILED",
+      errors: [
+        { field: "chapter", message: expect.any(String) },
+        { field: "limit", message: expect.any(String) },
+      ],
+    });
+
+    const missingRunResponse = await app.request("http://localhost/api/books/demo-book/chapter-runs/missing-run-id");
+    expect(missingRunResponse.status).toBe(404);
+    await expect(missingRunResponse.json()).resolves.toEqual({ error: "Run not found" });
+
+    const missingEventsResponse = await app.request("http://localhost/api/books/demo-book/chapter-runs/missing-run-id/events");
+    expect(missingEventsResponse.status).toBe(404);
+    await expect(missingEventsResponse.json()).resolves.toEqual({ error: "Run not found" });
+  });
+
   it("POST /api/v2/books/create/confirm triggers book creation and returns creating status", async () => {
     initBookMock.mockResolvedValueOnce(undefined);
 
