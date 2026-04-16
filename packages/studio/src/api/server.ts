@@ -706,6 +706,20 @@ function parseAssistantEvaluateScope(
   };
 }
 
+function parseAssistantWorldReportBody(
+  rawBody: unknown,
+): { ok: true; value: { bookId: string } } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+    return { ok: false, errors: [{ field: "body", message: "Request body must be a JSON object" }] };
+  }
+  const body = rawBody as Record<string, unknown>;
+  const bookId = typeof body.bookId === "string" ? body.bookId.trim() : "";
+  if (!bookId) {
+    return { ok: false, errors: [{ field: "bookId", message: "bookId must be a non-empty string" }] };
+  }
+  return { ok: true, value: { bookId } };
+}
+
 function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
   if (scope.type !== "book-list") return {};
   if (scope.bookIds.length === 1) {
@@ -3401,6 +3415,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       report,
       suggestedNextActions,
     });
+  });
+
+  app.post("/api/assistant/world/report", async (c) => {
+    const parsed = parseAssistantWorldReportBody(await c.req.json<unknown>().catch(() => null));
+    if (!parsed.ok) {
+      return c.json({ code: "ASSISTANT_WORLD_REPORT_VALIDATION_FAILED", errors: parsed.errors }, 422);
+    }
+    try {
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      const report = await pipeline.inspectWorldConsistencyAndMarket(parsed.value.bookId);
+      return c.json({
+        bookId: parsed.value.bookId,
+        report,
+      });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
   });
 
   app.post("/api/assistant/optimize", async (c) => {

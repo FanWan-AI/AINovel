@@ -8,6 +8,7 @@ const schedulerStartMock = vi.fn<() => Promise<void>>();
 const schedulerStartPlans: unknown[] = [];
 const initBookMock = vi.fn();
 const runRadarMock = vi.fn();
+const inspectWorldConsistencyAndMarketMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const auditChapterMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
@@ -68,6 +69,7 @@ vi.mock("@actalk/inkos-core", () => {
 
     initBook = initBookMock;
     runRadar = runRadarMock;
+    inspectWorldConsistencyAndMarket = inspectWorldConsistencyAndMarketMock;
     reviseDraft = reviseDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
@@ -158,6 +160,7 @@ describe("createStudioServer daemon lifecycle", () => {
     schedulerStartPlans.length = 0;
     initBookMock.mockReset();
     runRadarMock.mockReset();
+    inspectWorldConsistencyAndMarketMock.mockReset();
     reviseDraftMock.mockReset();
     auditChapterMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
@@ -169,6 +172,66 @@ describe("createStudioServer daemon lifecycle", () => {
     runRadarMock.mockResolvedValue({
       marketSummary: "Fresh market summary",
       recommendations: [],
+    });
+    inspectWorldConsistencyAndMarketMock.mockResolvedValue({
+      bookId: "demo-book",
+      generatedAt: "2026-04-16T00:00:00.000Z",
+      trace: {
+        version: "world-consistency-market-v1",
+        inputs: [{ source: "story/current_state.md", checksum: "fnv1a32:1a2b3c4d" }],
+      },
+      consistency: {
+        sections: [
+          { dimension: "character", summary: "ok", issues: [] },
+          { dimension: "setting", summary: "ok", issues: [] },
+          {
+            dimension: "foreshadowing",
+            summary: "发现 1 条阻断问题，需优先修复。",
+            issues: [{
+              issueId: "wc-foreshadowing-unresolved-overload",
+              dimension: "foreshadowing",
+              severity: "blocking",
+              title: "未回收伏笔积压",
+              description: "检测到 3 条待回收伏笔。",
+              recommendation: "优先安排章节回收积压伏笔。",
+              chapter: 3,
+              evidence: { source: "story/pending_hooks.md", line: 2, excerpt: "- 黑纹戒指来历未回收" },
+            }],
+          },
+        ],
+        blockingIssues: [{
+          issueId: "wc-foreshadowing-unresolved-overload",
+          dimension: "foreshadowing",
+          severity: "blocking",
+          title: "未回收伏笔积压",
+          description: "检测到 3 条待回收伏笔。",
+          recommendation: "优先安排章节回收积压伏笔。",
+          chapter: 3,
+          evidence: { source: "story/pending_hooks.md", line: 2, excerpt: "- 黑纹戒指来历未回收" },
+        }],
+      },
+      market: {
+        summary: "都市悬疑趋势上升。",
+        signals: [{
+          signalId: "market_signal_01",
+          source: "radar:番茄小说",
+          timestamp: "2026-04-16T00:00:00.000Z",
+          trend: "都市悬疑+系统博弈",
+          recommendation: "题材热度稳定。",
+          confidence: 0.81,
+          rationale: "番茄小说 都市",
+          benchmarkTitles: ["雨夜追凶录"],
+        }],
+      },
+      repairTasks: [{
+        stepId: "wc_fix_01",
+        action: "revise",
+        mode: "spot-fix",
+        bookId: "demo-book",
+        chapter: 3,
+        objective: "优先安排章节回收积压伏笔。",
+        issueIds: ["wc-foreshadowing-unresolved-overload"],
+      }],
     });
     reviseDraftMock.mockResolvedValue({
       chapterNumber: 3,
@@ -625,6 +688,85 @@ describe("createStudioServer daemon lifecycle", () => {
     };
     expect(emptyPayload.report.evidence).toHaveLength(1);
     expect(emptyPayload.report.evidence[0]?.source).toContain("chapter:demo-book:99");
+  });
+
+  it("aggregates assistant world consistency report with market signals source+timestamp", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/world/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookId: "demo-book" }),
+    });
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      bookId: string;
+      report: {
+        consistency: { blockingIssues: Array<{ severity: string }> };
+        market: { signals: Array<{ source: string; timestamp: string }> };
+        repairTasks: Array<{ stepId: string; action: string; mode: string }>;
+      };
+    };
+    expect(payload.bookId).toBe("demo-book");
+    expect(payload.report.consistency.blockingIssues[0]?.severity).toBe("blocking");
+    expect(payload.report.market.signals[0]).toEqual(expect.objectContaining({
+      source: expect.stringContaining("radar:"),
+      timestamp: expect.any(String),
+    }));
+    expect(payload.report.repairTasks[0]).toEqual(expect.objectContaining({
+      stepId: "wc_fix_01",
+      action: "revise",
+      mode: "spot-fix",
+    }));
+  });
+
+  it("supports report-to-task e2e by executing repair task steps from assistant world report", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const reportResponse = await app.request("http://localhost/api/assistant/world/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookId: "demo-book" }),
+    });
+    expect(reportResponse.status).toBe(200);
+    const reportPayload = await reportResponse.json() as {
+      report: {
+        repairTasks: Array<{ stepId: string; action: "revise"; mode: "spot-fix"; bookId: string; chapter: number }>;
+      };
+    };
+    const firstTask = reportPayload.report.repairTasks[0];
+    expect(firstTask).toBeDefined();
+
+    const executeResponse = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_world_fix_001",
+        sessionId: "asst_s_world_fix_001",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: firstTask!.bookId, chapter: firstTask!.chapter },
+          firstTask,
+          { stepId: "s3", action: "re-audit", bookId: firstTask!.bookId, chapter: firstTask!.chapter },
+        ],
+      }),
+    });
+
+    expect(executeResponse.status).toBe(200);
+    await expect(executeResponse.json()).resolves.toMatchObject({
+      status: "running",
+      stepRunIds: {
+        s1: expect.any(String),
+        [firstTask!.stepId]: expect.any(String),
+        s3: expect.any(String),
+      },
+    });
   });
 
   it("supports assistant read queries for book/volume/chapter/character/hook with source locator evidence", async () => {
