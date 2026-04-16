@@ -13,6 +13,7 @@ import {
   applyAssistantQuickAction,
   applyAssistantTaskEventFromSSE,
   buildAssistantConfirmationDraft,
+  buildAssistantTaskRecoveryPayload,
   buildAssistantNextActionPrompt,
   collectAssistantStepRunIds,
   cancelAssistantPendingAction,
@@ -22,7 +23,9 @@ import {
   createAssistantTaskPlanDraft,
   createAssistantInitialState,
   requestAssistantConfirmation,
+  parseAssistantTaskRecoveryPayload,
   reconcileAssistantTaskFromSnapshot,
+  recoverAssistantStateFromSnapshot,
   resolveAssistantScopeBookIds,
   transitionAssistantTaskPlan,
   submitAssistantInput,
@@ -235,6 +238,66 @@ describe("AssistantView", () => {
       s2: "",
       s3: "run_3",
     })).toEqual(["run_1", "run_3"]);
+  });
+
+  it("serializes and parses task recovery payload with backward-compatible legacy string", () => {
+    const payload = buildAssistantTaskRecoveryPayload({
+      ...createAssistantInitialState(),
+      taskExecution: {
+        taskId: "asst_t_100",
+        sessionId: "asst_s_100",
+        status: "running",
+        timeline: [],
+        lastSyncedAt: 100,
+        nextSequence: 0,
+      },
+    }, 1234);
+    expect(payload).toMatchObject({
+      taskId: "asst_t_100",
+      sessionId: "asst_s_100",
+      status: "running",
+      persistedAt: 1234,
+    });
+    expect(parseAssistantTaskRecoveryPayload(JSON.stringify(payload))).toMatchObject({
+      taskId: "asst_t_100",
+      sessionId: "asst_s_100",
+      status: "running",
+    });
+    expect(parseAssistantTaskRecoveryPayload("\"asst_t_legacy\"")).toMatchObject({
+      taskId: "asst_t_legacy",
+      status: "running",
+    });
+  });
+
+  it("recovers running task state from persisted payload and latest snapshot", () => {
+    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9100);
+    const running = confirmAssistantPendingAction(pending, 9101);
+    const recovered = recoverAssistantStateFromSnapshot(
+      createAssistantInitialState(),
+      {
+        taskId: "asst_t_recover_01",
+        sessionId: "asst_s_recover_01",
+        status: "running",
+        currentStepId: "s1",
+        steps: {
+          s1: { stepId: "s1", action: "audit", status: "running", startedAt: "2026-01-01T00:00:01.000Z" },
+        },
+        lastUpdatedAt: "2026-01-01T00:00:01.000Z",
+      },
+      {
+        version: 1,
+        taskId: "asst_t_recover_01",
+        sessionId: "asst_s_recover_01",
+        status: "running",
+        taskPlan: running.taskPlan!,
+        persistedAt: 9200,
+      },
+    );
+    expect(recovered.taskPlan?.status).toBe("running");
+    expect(recovered.taskExecution?.taskId).toBe("asst_t_recover_01");
+    expect(recovered.taskExecution?.timeline).toHaveLength(1);
+    expect(recovered.taskExecution?.timeline[0]?.event).toBe("assistant:step:start");
   });
 
   it("parses supported operator commands and rejects natural language", () => {

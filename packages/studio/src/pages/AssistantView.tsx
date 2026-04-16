@@ -126,6 +126,7 @@ interface AssistantTaskSnapshot {
 const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
 const ASSISTANT_TIMELINE_MAX_ENTRIES = 50;
 const ASSISTANT_TASK_SNAPSHOT_POLL_INTERVAL_MS = 2000;
+const ASSISTANT_TASK_RECOVERY_STORAGE_KEY = "inkos.assistant.task-recovery";
 const BOOK_STATUS_ACTIVE = "active";
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
 const AUDIT_ACTION_PATTERN = /审计|audit/iu;
@@ -190,6 +191,94 @@ export function parseAssistantEventTimestamp(input: unknown, fallback = Date.now
     if (Number.isFinite(parsed)) return parsed;
   }
   return fallback;
+}
+
+interface AssistantTaskRecoveryPayload {
+  readonly version: 1;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly status: AssistantTaskExecution["status"];
+  readonly taskPlan?: AssistantTaskPlan;
+  readonly persistedAt: number;
+}
+
+export function buildAssistantTaskRecoveryPayload(state: AssistantComposerState, now = Date.now()): AssistantTaskRecoveryPayload | null {
+  if (!state.taskExecution) {
+    return null;
+  }
+  return {
+    version: 1,
+    taskId: state.taskExecution.taskId,
+    sessionId: state.taskExecution.sessionId,
+    status: state.taskExecution.status,
+    ...(state.taskPlan ? { taskPlan: state.taskPlan } : {}),
+    persistedAt: now,
+  };
+}
+
+export function parseAssistantTaskRecoveryPayload(raw: string | null): AssistantTaskRecoveryPayload | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "string") {
+      return {
+        version: 1,
+        taskId: parsed,
+        sessionId: "",
+        status: "running",
+        persistedAt: Date.now(),
+      };
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    const payload = parsed as Record<string, unknown>;
+    const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
+    if (!taskId) {
+      return null;
+    }
+    const status = payload.status === "succeeded" || payload.status === "failed" ? payload.status : "running";
+    return {
+      version: 1,
+      taskId,
+      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : "",
+      status,
+      ...(typeof payload.taskPlan === "object" && payload.taskPlan !== null && !Array.isArray(payload.taskPlan)
+        ? { taskPlan: payload.taskPlan as AssistantTaskPlan }
+        : {}),
+      persistedAt: typeof payload.persistedAt === "number" && Number.isFinite(payload.persistedAt)
+        ? payload.persistedAt
+        : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function recoverAssistantStateFromSnapshot(
+  state: AssistantComposerState,
+  snapshot: AssistantTaskSnapshot,
+  payload: AssistantTaskRecoveryPayload,
+): AssistantComposerState {
+  const recoveredTaskPlan = state.taskPlan
+    ?? (payload.taskPlan ? transitionAssistantTaskPlan(payload.taskPlan, snapshot.status, Date.now()) : null);
+  const seeded: AssistantComposerState = {
+    ...state,
+    loading: snapshot.status === "running" || state.loading,
+    taskPlan: recoveredTaskPlan,
+    taskExecution: {
+      taskId: snapshot.taskId,
+      sessionId: snapshot.sessionId || payload.sessionId,
+      status: snapshot.status,
+      timeline: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.timeline : [],
+      lastSyncedAt: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.lastSyncedAt : Date.now(),
+      nextSequence: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.nextSequence : 0,
+      ...(state.taskExecution?.taskId === snapshot.taskId && state.taskExecution.stepRunIds ? { stepRunIds: state.taskExecution.stepRunIds } : {}),
+    },
+  };
+  return reconcileAssistantTaskFromSnapshot(seeded, snapshot);
 }
 
 export function formatAssistantTimelineMessage(
@@ -819,6 +908,7 @@ export function AssistantView({
   const [selectedBookIds, setSelectedBookIds] = useState<ReadonlyArray<string>>([]);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
   const consumedPromptKeyRef = useRef<string | null>(null);
+  const taskRecoveryAppliedRef = useRef<string | null>(null);
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
   const activeBookIds = useMemo(() => activeBooks.map((book) => book.id), [activeBooks]);
@@ -862,6 +952,30 @@ export function AssistantView({
   }, [sseMessages]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    let payload: AssistantTaskRecoveryPayload | null = null;
+    try {
+      payload = parseAssistantTaskRecoveryPayload(window.localStorage.getItem(ASSISTANT_TASK_RECOVERY_STORAGE_KEY));
+    } catch {
+      payload = null;
+    }
+    if (!payload || payload.status !== "running" || taskRecoveryAppliedRef.current === payload.taskId) {
+      return;
+    }
+    taskRecoveryAppliedRef.current = payload.taskId;
+    void (async () => {
+      try {
+        const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${payload.taskId}`);
+        setState((prev) => recoverAssistantStateFromSnapshot(prev, snapshot, payload));
+      } catch {
+        // ignore persisted task recovery errors
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     if (!state.taskExecution || state.taskExecution.status !== "running") {
       return;
     }
@@ -879,6 +993,22 @@ export function AssistantView({
       window.clearInterval(timer);
     };
   }, [state.taskExecution?.taskId, state.taskExecution?.status]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const payload = buildAssistantTaskRecoveryPayload(state);
+      if (!payload) {
+        window.localStorage.removeItem(ASSISTANT_TASK_RECOVERY_STORAGE_KEY);
+        return;
+      }
+      window.localStorage.setItem(ASSISTANT_TASK_RECOVERY_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore storage write failures
+    }
+  }, [state.taskExecution, state.taskPlan]);
 
   useEffect(() => {
     if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {

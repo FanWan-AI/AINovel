@@ -720,6 +720,90 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(task.json()).resolves.toMatchObject({ status: "failed" });
   });
 
+  it("persists assistant task snapshots to disk with backward-compatible store shape", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_persist_001",
+        sessionId: "asst_s_persist_001",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(409);
+
+    const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(storePath, "utf-8")) as {
+        version: number;
+        tasks: Array<{ taskId: string; status: string }>;
+      };
+      expect(raw.version).toBe(1);
+      expect(raw.tasks.some((task) => task.taskId === "asst_t_persist_001" && task.status === "failed")).toBe(true);
+    });
+  });
+
+  it("loads persisted assistant task snapshots and supports task summary history query", async () => {
+    const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      legacy_task: {
+        taskId: "legacy_task",
+        sessionId: "legacy_session",
+        status: "succeeded",
+        steps: {},
+        lastUpdatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      version: 1,
+      tasks: [
+        {
+          taskId: "asst_t_hist_001",
+          sessionId: "asst_s_hist_001",
+          status: "failed",
+          currentStepId: "s2",
+          steps: {},
+          lastUpdatedAt: "2026-01-02T00:00:00.000Z",
+          error: "boom",
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const restored = await app.request("http://localhost/api/assistant/tasks/asst_t_hist_001");
+    expect(restored.status).toBe(200);
+    await expect(restored.json()).resolves.toMatchObject({
+      taskId: "asst_t_hist_001",
+      status: "failed",
+      error: "boom",
+    });
+
+    const summary = await app.request("http://localhost/api/assistant/tasks?limit=5");
+    expect(summary.status).toBe(200);
+    await expect(summary.json()).resolves.toMatchObject({
+      tasks: expect.arrayContaining([
+        expect.objectContaining({
+          taskId: "asst_t_hist_001",
+          status: "failed",
+          lastUpdatedAt: "2026-01-02T00:00:00.000Z",
+        }),
+        expect.objectContaining({
+          taskId: "legacy_task",
+          status: "succeeded",
+        }),
+      ]),
+    });
+  });
+
   it("rejects assistant execute when skill permission is missing and logs reasons", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
