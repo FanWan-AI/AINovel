@@ -3,6 +3,7 @@ import { BotMessageSquare, Loader2, Send, Sparkles } from "lucide-react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useApi } from "../hooks/use-api";
+import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
 import { cn } from "../lib/utils";
 
 interface Nav {
@@ -21,7 +22,7 @@ export interface AssistantComposerState {
   readonly messages: ReadonlyArray<AssistantMessage>;
   readonly loading: boolean;
   readonly nextMessageId: number;
-  readonly pendingConfirmation: AssistantConfirmationDraft | null;
+  readonly taskPlan: AssistantTaskPlan | null;
 }
 
 export interface AssistantQuickAction {
@@ -47,6 +48,15 @@ export interface AssistantConfirmationDraft {
   readonly chapterNumber?: number;
 }
 
+export type AssistantTaskPlanStatus = "draft" | "awaiting-confirm" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface AssistantTaskPlan extends AssistantConfirmationDraft {
+  readonly id: string;
+  readonly status: AssistantTaskPlanStatus;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
 const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
 const BOOK_STATUS_ACTIVE = "active";
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
@@ -56,6 +66,14 @@ const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit"> = {
   "write-next": "assistant.actionWriteNext",
   audit: "assistant.actionAudit",
+};
+const VALID_ASSISTANT_TASK_PLAN_TRANSITIONS: Record<AssistantTaskPlanStatus, ReadonlyArray<AssistantTaskPlanStatus>> = {
+  draft: ["awaiting-confirm", "cancelled"],
+  "awaiting-confirm": ["running", "cancelled"],
+  running: ["succeeded", "failed", "cancelled"],
+  succeeded: [],
+  failed: [],
+  cancelled: [],
 };
 
 export const ASSISTANT_QUICK_ACTIONS: ReadonlyArray<AssistantQuickAction> = [
@@ -70,7 +88,35 @@ export function createAssistantInitialState(): AssistantComposerState {
     messages: [],
     loading: false,
     nextMessageId: 1,
-    pendingConfirmation: null,
+    taskPlan: null,
+  };
+}
+
+export function createAssistantTaskPlanDraft(draft: AssistantConfirmationDraft, now = Date.now()): AssistantTaskPlan {
+  return {
+    ...draft,
+    id: `plan-${now}`,
+    status: "draft",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function transitionAssistantTaskPlan(
+  taskPlan: AssistantTaskPlan,
+  status: AssistantTaskPlanStatus,
+  now = Date.now(),
+): AssistantTaskPlan {
+  if (taskPlan.status === status) {
+    return taskPlan;
+  }
+  if (!VALID_ASSISTANT_TASK_PLAN_TRANSITIONS[taskPlan.status].includes(status)) {
+    return taskPlan;
+  }
+  return {
+    ...taskPlan,
+    status,
+    updatedAt: now,
   };
 }
 
@@ -96,7 +142,7 @@ export function submitAssistantInput(
     loading: true,
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalized, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
-    pendingConfirmation: null,
+    taskPlan: state.taskPlan,
   };
 }
 
@@ -108,7 +154,7 @@ export function completeAssistantResponse(
   return {
     ...state,
     loading: false,
-    pendingConfirmation: null,
+    taskPlan: state.taskPlan,
     messages: [...state.messages, {
       id: `msg-${state.nextMessageId}`,
       role: "assistant",
@@ -151,6 +197,15 @@ export function canRunScopedBookAction(
   return resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds).length > 0;
 }
 
+export function resolveAssistantBookTitlesByIds(
+  targetBookIds: ReadonlyArray<string>,
+  activeBooks: ReadonlyArray<BookSummary>,
+  t: TFunction,
+): string[] {
+  const titleById = new Map(activeBooks.map((book) => [book.id, book.title] as const));
+  return targetBookIds.map((id) => titleById.get(id) ?? t("assistant.scopeUnknownBook"));
+}
+
 export function detectAssistantBookAction(prompt: string): AssistantBookActionType | null {
   const normalized = prompt.trim().toLowerCase();
   if (!normalized) return null;
@@ -191,37 +246,57 @@ export function requestAssistantConfirmation(
   now = Date.now(),
 ): AssistantComposerState {
   const normalizedPrompt = draft.prompt.trim();
-  if (!normalizedPrompt || state.loading || state.pendingConfirmation) {
+  if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
     return state;
   }
+  const taskPlanDraft = createAssistantTaskPlanDraft(draft, now);
   return {
     ...state,
     input: "",
     loading: false,
-    pendingConfirmation: draft,
+    taskPlan: transitionAssistantTaskPlan(taskPlanDraft, "awaiting-confirm", now),
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalizedPrompt, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
   };
 }
 
-export function confirmAssistantPendingAction(state: AssistantComposerState): AssistantComposerState {
-  if (!state.pendingConfirmation || state.loading) {
+export function confirmAssistantPendingAction(state: AssistantComposerState, now = Date.now()): AssistantComposerState {
+  if (!state.taskPlan || state.loading || state.taskPlan.status !== "awaiting-confirm") {
     return state;
   }
   return {
     ...state,
     loading: true,
-    pendingConfirmation: null,
+    taskPlan: transitionAssistantTaskPlan(state.taskPlan, "running", now),
   };
 }
 
-export function cancelAssistantPendingAction(state: AssistantComposerState): AssistantComposerState {
-  if (!state.pendingConfirmation) {
+export function cancelAssistantPendingAction(state: AssistantComposerState, now = Date.now()): AssistantComposerState {
+  if (!state.taskPlan) {
     return state;
   }
   return {
     ...state,
-    pendingConfirmation: null,
+    loading: false,
+    taskPlan: transitionAssistantTaskPlan(state.taskPlan, "cancelled", now),
+  };
+}
+
+export function completeAssistantTaskPlanExecution(
+  state: AssistantComposerState,
+  status: "succeeded" | "failed",
+  now = Date.now(),
+): AssistantComposerState {
+  if (!state.taskPlan || state.taskPlan.status !== "running") {
+    return {
+      ...state,
+      loading: false,
+    };
+  }
+  return {
+    ...state,
+    loading: false,
+    taskPlan: transitionAssistantTaskPlan(state.taskPlan, status, now),
   };
 }
 
@@ -286,14 +361,18 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     () => resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds),
     [scopeMode, selectedBookIds, activeBookIds],
   );
-  const selectedBookTitles = useMemo(() => {
-    const titleById = new Map(activeBooks.map((book) => [book.id, book.title] as const));
-    return selectedScopeBookIds.map((id) => titleById.get(id) ?? t("assistant.scopeUnknownBook"));
-  }, [activeBooks, selectedScopeBookIds]);
+  const selectedBookTitles = useMemo(
+    () => resolveAssistantBookTitlesByIds(selectedScopeBookIds, activeBooks, t),
+    [selectedScopeBookIds, activeBooks, t],
+  );
+  const taskPlanTargetBookTitles = useMemo(
+    () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBooks, t) : []),
+    [state.taskPlan, activeBooks, t],
+  );
 
   const sendPrompt = (rawPrompt: string) => {
     const normalizedPrompt = rawPrompt.trim();
-    if (!normalizedPrompt || state.loading || state.pendingConfirmation) {
+    if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
       return;
     }
 
@@ -317,11 +396,12 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
   };
 
   const handleConfirmAction = () => {
-    const pending = state.pendingConfirmation;
-    if (!pending) return;
+    if (!state.taskPlan || state.taskPlan.status !== "awaiting-confirm") {
+      return;
+    }
     setState((prev) => confirmAssistantPendingAction(prev));
     setTimeout(() => {
-      setState((prev) => completeAssistantResponse(prev, pending.prompt));
+      setState((prev) => completeAssistantTaskPlanExecution(prev, "succeeded"));
     }, MOCK_ASSISTANT_RESPONSE_DELAY_MS);
   };
 
@@ -429,36 +509,19 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
         </div>
       </section>
 
-      <section className="flex-1 min-h-[360px] overflow-y-auto rounded-xl border border-border/70 bg-background/70 p-4" data-testid="assistant-message-list">
-        {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : <MessageList messages={state.messages} />}
-        {state.pendingConfirmation && (
-          <div className="mt-3 rounded-xl border border-primary/40 bg-card p-4 space-y-2" data-testid="assistant-confirmation-card">
-            <div className="text-sm font-medium">{t("assistant.confirmTitle")}</div>
-            <div className="text-xs text-muted-foreground">
-              {t(ACTION_LABEL_KEY_BY_TYPE[state.pendingConfirmation.action])}
-              {state.pendingConfirmation.chapterNumber ? ` · ${t("assistant.confirmChapterPrefix")}${state.pendingConfirmation.chapterNumber}` : ""}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {t("assistant.confirmTargets")}：{selectedBookTitles.join("、")}
-            </div>
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                onClick={handleConfirmAction}
-                className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground"
-                data-testid="assistant-confirm-action"
-              >
-                {t("assistant.confirm")}
-              </button>
-              <button
-                onClick={() => setState((prev) => cancelAssistantPendingAction(prev))}
-                className="h-8 rounded-md border border-border px-3 text-xs text-muted-foreground"
-                data-testid="assistant-cancel-action"
-              >
-                {t("assistant.cancel")}
-              </button>
-            </div>
-          </div>
-        )}
+        <section className="flex-1 min-h-[360px] overflow-y-auto rounded-xl border border-border/70 bg-background/70 p-4" data-testid="assistant-message-list">
+          {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : <MessageList messages={state.messages} />}
+          {state.taskPlan && (
+            <TaskPlanCard
+              t={t}
+              taskPlan={state.taskPlan}
+              actionLabel={t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action])}
+              chapterLabel={state.taskPlan.chapterNumber ? `${t("assistant.confirmChapterPrefix")}${state.taskPlan.chapterNumber}` : undefined}
+              targetBookTitles={taskPlanTargetBookTitles}
+              onConfirm={handleConfirmAction}
+              onCancel={() => setState((prev) => cancelAssistantPendingAction(prev))}
+            />
+          )}
       </section>
 
       <section className="shrink-0 rounded-xl border border-border/70 bg-card/40 p-4 space-y-3" data-testid="assistant-input-panel">
@@ -490,7 +553,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
           />
           <button
             onClick={() => sendPrompt(state.input)}
-            disabled={state.loading || Boolean(state.pendingConfirmation)}
+            disabled={state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
             className="h-10 w-10 rounded-lg bg-primary text-primary-foreground disabled:opacity-50 flex items-center justify-center"
             data-testid="assistant-send"
           >
