@@ -18,6 +18,7 @@ interface StoredChapterRunLedger {
 const VALID_ACTION_TYPES: readonly ChapterRunActionType[] = ["revise", "rewrite", "anti-detect", "resync"];
 const VALID_STATUSES: readonly ChapterRunStatus[] = ["running", "succeeded", "failed"];
 const VALID_DECISIONS: readonly ChapterRunDecision[] = ["applied", "unchanged", "failed"];
+const ASSISTANT_SOFT_DELETE_REASON = "assistant-soft-delete";
 
 export class ChapterRunStore {
   private readonly bookMutations = new Map<string, Promise<void>>();
@@ -99,15 +100,18 @@ export class ChapterRunStore {
     await this.waitForPendingMutations(bookId);
     const ledger = await this.readLedger(bookId);
     const filtered = ledger.runs
+      .filter((run) => this.isRunActive(run))
       .filter((run) => options?.chapter === undefined || run.chapter === options.chapter)
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     return filtered.slice(0, options?.limit ?? filtered.length);
   }
 
-  async getRun(bookId: string, runId: string): Promise<ChapterRunRecord | null> {
+  async getRun(bookId: string, runId: string, options?: { readonly includeDeleted?: boolean }): Promise<ChapterRunRecord | null> {
     await this.waitForPendingMutations(bookId);
     const ledger = await this.readLedger(bookId);
-    return ledger.runs.find((run) => run.runId === runId) ?? null;
+    return ledger.runs.find((run) =>
+      run.runId === runId && (options?.includeDeleted === true || this.isRunActive(run)))
+      ?? null;
   }
 
   async getRunEvents(bookId: string, runId: string): Promise<ChapterRunEvent[] | null> {
@@ -118,12 +122,32 @@ export class ChapterRunStore {
 
   async deleteRun(bookId: string, runId: string): Promise<boolean> {
     let removed = false;
-    await this.mutateRuns(bookId, (runs) => {
-      const next = runs.filter((run) => run.runId !== runId);
-      removed = next.length !== runs.length;
-      return next;
-    });
+    await this.mutateRuns(bookId, (runs) => runs.map((run) => {
+      if (run.runId !== runId) return run;
+      if (this.isRunDeleted(run)) return run;
+      removed = true;
+      return {
+        ...run,
+        deletedAt: new Date().toISOString(),
+        deletedReason: ASSISTANT_SOFT_DELETE_REASON,
+      };
+    }));
     return removed;
+  }
+
+  async restoreRun(bookId: string, runId: string): Promise<boolean> {
+    let restored = false;
+    await this.mutateRuns(bookId, (runs) => runs.map((run) => {
+      if (run.runId !== runId) return run;
+      if (!this.isRunDeleted(run)) return run;
+      restored = true;
+      return {
+        ...run,
+        deletedAt: null,
+        deletedReason: null,
+      };
+    }));
+    return restored;
   }
 
   private async mutateRuns(bookId: string, updater: (runs: ChapterRunRecord[]) => ChapterRunRecord[]): Promise<void> {
@@ -195,6 +219,14 @@ export class ChapterRunStore {
     if (pending) {
       await pending.catch(() => undefined);
     }
+  }
+
+  private isRunDeleted(run: ChapterRunRecord): boolean {
+    return run.deletedAt !== undefined && run.deletedAt !== null;
+  }
+
+  private isRunActive(run: ChapterRunRecord): boolean {
+    return !this.isRunDeleted(run);
   }
 
   private async enqueueMutation(bookId: string, operation: () => Promise<void>): Promise<void> {

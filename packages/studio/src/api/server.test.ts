@@ -627,6 +627,195 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(emptyPayload.report.evidence[0]?.source).toContain("chapter:demo-book:99");
   });
 
+  it("supports assistant read queries for book/volume/chapter/character/hook with source locator evidence", async () => {
+    const storyDir = join(root, "books", "demo-book", "story");
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    await writeFile(join(storyDir, "story_bible.md"), "主线：王城阴谋。", "utf-8");
+    await writeFile(join(storyDir, "volume_outline.md"), "第一卷：王城风暴。", "utf-8");
+    await writeFile(join(storyDir, "character_matrix.md"), "角色：林舟，目标是查明真相。", "utf-8");
+    await writeFile(join(storyDir, "pending_hooks.md"), "伏笔：黑纹戒指来源未明。", "utf-8");
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n林舟在王城发现黑纹戒指。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const dimensions: Array<{ dimension: string; extra?: Record<string, unknown> }> = [
+      { dimension: "book" },
+      { dimension: "volume" },
+      { dimension: "chapter", extra: { chapter: 3 } },
+      { dimension: "character", extra: { keyword: "林舟" } },
+      { dimension: "hook", extra: { keyword: "戒指" } },
+    ];
+
+    for (const item of dimensions) {
+      const response = await app.request("http://localhost/api/assistant/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dimension: item.dimension,
+          bookId: "demo-book",
+          ...(item.extra ?? {}),
+        }),
+      });
+      expect(response.status).toBe(200);
+      const payload = await response.json() as {
+        dimension: string;
+        evidence: Array<{ source: string; locator: string; excerpt: string }>;
+      };
+      expect(payload.dimension).toBe(item.dimension);
+      expect(payload.evidence.length).toBeGreaterThan(0);
+      expect(payload.evidence[0]?.source).toContain("books/demo-book");
+      expect(payload.evidence[0]?.locator).toContain("line:");
+      expect(payload.evidence[0]?.excerpt).toEqual(expect.any(String));
+    }
+  });
+
+  it("supports assistant soft-delete preview/execute/restore for chapter and run", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n删除恢复测试文本。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const reviseResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "spot-fix" }),
+    });
+    expect(reviseResponse.status).toBe(200);
+    const reviseBody = await reviseResponse.json() as { runId: string };
+    await vi.waitFor(async () => {
+      const run = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseBody.runId}`);
+      const runBody = await run.json() as { status: string };
+      expect(runBody.status).toBe("succeeded");
+    });
+
+    const runPreview = await app.request("http://localhost/api/assistant/delete/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "run", bookId: "demo-book", runId: reviseBody.runId }),
+    });
+    expect(runPreview.status).toBe(200);
+    const runPreviewBody = await runPreview.json() as { preview: { previewId: string } };
+    const runExecute = await app.request("http://localhost/api/assistant/delete/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ previewId: runPreviewBody.preview.previewId, confirmed: true }),
+    });
+    expect(runExecute.status).toBe(200);
+    const runExecuteBody = await runExecute.json() as { restoreId: string };
+    const runAfterDelete = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseBody.runId}`);
+    expect(runAfterDelete.status).toBe(404);
+
+    const runRestore = await app.request("http://localhost/api/assistant/delete/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ restoreId: runExecuteBody.restoreId }),
+    });
+    expect(runRestore.status).toBe(200);
+    const runAfterRestore = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseBody.runId}`);
+    expect(runAfterRestore.status).toBe(200);
+
+    const chapterPreview = await app.request("http://localhost/api/assistant/delete/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "chapter", bookId: "demo-book", chapter: 3 }),
+    });
+    expect(chapterPreview.status).toBe(200);
+    const chapterPreviewBody = await chapterPreview.json() as { preview: { previewId: string } };
+    const chapterExecute = await app.request("http://localhost/api/assistant/delete/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ previewId: chapterPreviewBody.preview.previewId, confirmed: true }),
+    });
+    expect(chapterExecute.status).toBe(200);
+    const chapterExecuteBody = await chapterExecute.json() as { restoreId: string };
+
+    await expect(access(join(chapterDir, "0003_demo.md"))).rejects.toBeDefined();
+
+    const chapterRestore = await app.request("http://localhost/api/assistant/delete/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ restoreId: chapterExecuteBody.restoreId }),
+    });
+    expect(chapterRestore.status).toBe(200);
+    await expect(readFile(join(chapterDir, "0003_demo.md"), "utf-8")).resolves.toContain("删除恢复测试文本");
+  });
+
+  it("supports assistant conversational CRUD orchestration for read/delete/restore", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    const storyDir = join(root, "books", "demo-book", "story");
+    await mkdir(chapterDir, { recursive: true });
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(join(storyDir, "pending_hooks.md"), "伏笔：黑纹戒指来源未明。", "utf-8");
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n对话触发删除恢复。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const readResponse = await app.request("http://localhost/api/assistant/crud", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "查询伏笔", bookId: "demo-book", keyword: "戒指" }),
+    });
+    expect(readResponse.status).toBe(200);
+    await expect(readResponse.json()).resolves.toMatchObject({
+      kind: "read",
+      result: {
+        dimension: "hook",
+        evidence: expect.any(Array),
+      },
+    });
+
+    const deletePreviewResponse = await app.request("http://localhost/api/assistant/crud", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "删除第3章", bookId: "demo-book" }),
+    });
+    expect(deletePreviewResponse.status).toBe(200);
+    const deletePreviewPayload = await deletePreviewResponse.json() as {
+      kind: string;
+      result: { preview: { previewId: string } };
+    };
+    expect(deletePreviewPayload.kind).toBe("delete-preview");
+
+    const deleteExecuteResponse = await app.request("http://localhost/api/assistant/crud", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: "删除第3章",
+        bookId: "demo-book",
+        confirmed: true,
+        previewId: deletePreviewPayload.result.preview.previewId,
+      }),
+    });
+    expect(deleteExecuteResponse.status).toBe(200);
+    const deleteExecutePayload = await deleteExecuteResponse.json() as {
+      kind: string;
+      result: { restoreId: string };
+    };
+    expect(deleteExecutePayload.kind).toBe("delete-executed");
+    await expect(access(join(chapterDir, "0003_demo.md"))).rejects.toBeDefined();
+
+    const restoreResponse = await app.request("http://localhost/api/assistant/crud", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: `恢复 ${deleteExecutePayload.result.restoreId}`,
+      }),
+    });
+    expect(restoreResponse.status).toBe(200);
+    await expect(restoreResponse.json()).resolves.toMatchObject({
+      kind: "delete-restored",
+      restoreId: deleteExecutePayload.result.restoreId,
+    });
+    await expect(readFile(join(chapterDir, "0003_demo.md"), "utf-8")).resolves.toContain("对话触发删除恢复");
+  });
+
   it("executes assistant audit->revise->re-audit chain and returns running with step runIds", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });

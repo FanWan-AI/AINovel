@@ -106,6 +106,48 @@ export interface AssistantEvaluateResponse {
   readonly suggestedNextActions: ReadonlyArray<string>;
 }
 
+export type AssistantCrudReadDimension = "book" | "volume" | "chapter" | "character" | "hook";
+
+export interface AssistantCrudEvidence {
+  readonly source: string;
+  readonly locator: string;
+  readonly excerpt: string;
+}
+
+export interface AssistantCrudReadResponse {
+  readonly ok: boolean;
+  readonly dimension: AssistantCrudReadDimension;
+  readonly bookId: string;
+  readonly chapter?: number;
+  readonly keyword?: string;
+  readonly summary: string;
+  readonly evidence: ReadonlyArray<AssistantCrudEvidence>;
+}
+
+export interface AssistantCrudDeletePreviewResponse {
+  readonly ok: boolean;
+  readonly requiresConfirmation: boolean;
+  readonly preview: {
+    readonly target: "chapter" | "run";
+    readonly bookId: string;
+    readonly impactSummary: string;
+    readonly evidence: ReadonlyArray<AssistantCrudEvidence>;
+    readonly previewId: string;
+    readonly confirmBy: string;
+  };
+}
+
+export interface AssistantCrudDeleteExecuteResponse {
+  readonly ok: boolean;
+  readonly target: "chapter" | "run";
+  readonly bookId: string;
+  readonly chapter?: number;
+  readonly runId?: string;
+  readonly restoreId: string;
+  readonly deletedAt: string;
+  readonly recoverBefore: string;
+}
+
 interface AssistantTaskSnapshot {
   readonly taskId: string;
   readonly sessionId: string;
@@ -130,6 +172,14 @@ const ASSISTANT_TASK_RECOVERY_STORAGE_KEY = "inkos.assistant.task-recovery";
 const BOOK_STATUS_ACTIVE = "active";
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
 const AUDIT_ACTION_PATTERN = /审计|audit/iu;
+const CRUD_READ_ACTION_PATTERN = /查询|查看|检索|read|search/iu;
+const CRUD_DELETE_ACTION_PATTERN = /删除|delete/iu;
+const CRUD_RESTORE_ACTION_PATTERN = /恢复|restore/iu;
+const CRUD_DIMENSION_VOLUME_PATTERN = /卷|volume/iu;
+const CRUD_DIMENSION_CHAPTER_PATTERN = /章|chapter/iu;
+const CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
+const CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
+const CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit"> = {
@@ -721,6 +771,59 @@ export function detectAssistantBookAction(prompt: string): AssistantBookActionTy
   return null;
 }
 
+export function parseAssistantCrudReadRequest(prompt: string): {
+  readonly dimension: AssistantCrudReadDimension;
+  readonly chapter?: number;
+  readonly keyword?: string;
+} | null {
+  const normalized = prompt.trim();
+  if (!normalized || !CRUD_READ_ACTION_PATTERN.test(normalized)) {
+    return null;
+  }
+  const dimension: AssistantCrudReadDimension = CRUD_DIMENSION_HOOK_PATTERN.test(normalized)
+    ? "hook"
+    : CRUD_DIMENSION_CHARACTER_PATTERN.test(normalized)
+      ? "character"
+      : CRUD_DIMENSION_VOLUME_PATTERN.test(normalized)
+        ? "volume"
+        : CRUD_DIMENSION_CHAPTER_PATTERN.test(normalized)
+          ? "chapter"
+          : "book";
+  const chapter = dimension === "chapter" ? extractAssistantAuditChapter(normalized) : undefined;
+  const keywordMatch = normalized.match(/["“](.+?)["”]/u);
+  const keyword = keywordMatch?.[1]?.trim();
+  return {
+    dimension,
+    ...(chapter !== undefined ? { chapter } : {}),
+    ...(keyword ? { keyword } : {}),
+  };
+}
+
+export function parseAssistantCrudDeleteRequest(prompt: string): { readonly target: "chapter" | "run"; readonly chapter?: number; readonly runId?: string } | null {
+  const normalized = prompt.trim();
+  if (!normalized || !CRUD_DELETE_ACTION_PATTERN.test(normalized)) {
+    return null;
+  }
+  const runId = normalized.match(CRUD_RUN_ID_PATTERN)?.[1];
+  if (runId) {
+    return { target: "run", runId };
+  }
+  const chapter = extractAssistantAuditChapter(normalized);
+  if (chapter !== undefined) {
+    return { target: "chapter", chapter };
+  }
+  return null;
+}
+
+export function parseAssistantCrudRestoreId(prompt: string): string | null {
+  const normalized = prompt.trim();
+  if (!normalized || !CRUD_RESTORE_ACTION_PATTERN.test(normalized)) {
+    return null;
+  }
+  const token = normalized.match(/(asst_restore_[a-z0-9]+)/iu)?.[1];
+  return token ?? null;
+}
+
 export function extractAssistantAuditChapter(prompt: string): number | undefined {
   const zhMatch = prompt.match(AUDIT_CHAPTER_ZH_PATTERN);
   if (zhMatch?.[1]) return Number.parseInt(zhMatch[1], 10);
@@ -882,6 +985,81 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
   );
 }
 
+function AssistantCrudReadCard({ result }: { readonly result: AssistantCrudReadResponse }) {
+  return (
+    <section className="mt-3 rounded-md border border-border/70 bg-card/40 p-3" data-testid="assistant-crud-read-card">
+      <div className="text-xs text-muted-foreground">Read · {result.dimension}</div>
+      <div className="text-sm mt-1">{result.summary}</div>
+      <ul className="mt-2 space-y-1 text-xs">
+        {result.evidence.map((item, index) => (
+          <li key={`${item.source}-${item.locator}-${index}`}>
+            <span className="font-medium">{item.source}</span> ({item.locator}) · {item.excerpt}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function AssistantCrudDeleteCard({
+  preview,
+  result,
+  busy,
+  onConfirm,
+  onRestore,
+}: {
+  readonly preview: AssistantCrudDeletePreviewResponse["preview"] | null;
+  readonly result: AssistantCrudDeleteExecuteResponse | null;
+  readonly busy: boolean;
+  readonly onConfirm: () => void;
+  readonly onRestore: (restoreId: string) => void;
+}) {
+  if (!preview && !result) {
+    return null;
+  }
+  return (
+    <section className="mt-3 rounded-md border border-border/70 bg-card/40 p-3" data-testid="assistant-crud-delete-card">
+      {preview && (
+        <>
+          <div className="text-xs text-muted-foreground">Delete Preview · {preview.target}</div>
+          <div className="text-sm mt-1">{preview.impactSummary}</div>
+          <ul className="mt-2 space-y-1 text-xs">
+            {preview.evidence.map((item, index) => (
+              <li key={`${item.source}-${item.locator}-${index}`}>
+                <span className="font-medium">{item.source}</span> ({item.locator}) · {item.excerpt}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="mt-2 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+            onClick={onConfirm}
+            disabled={busy}
+            data-testid="assistant-crud-delete-confirm"
+          >
+            确认删除（软删除）
+          </button>
+        </>
+      )}
+      {result && (
+        <>
+          <div className="text-xs text-muted-foreground mt-2">Delete Executed · {result.target}</div>
+          <div className="text-sm mt-1">恢复编号：{result.restoreId}</div>
+          <button
+            type="button"
+            className="mt-2 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+            onClick={() => onRestore(result.restoreId)}
+            disabled={busy}
+            data-testid="assistant-crud-delete-restore"
+          >
+            恢复
+          </button>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function AssistantView({
   nav,
   theme: _theme,
@@ -907,6 +1085,10 @@ export function AssistantView({
   const [scopeMode, setScopeMode] = useState<AssistantBookScopeMode>("all-active");
   const [selectedBookIds, setSelectedBookIds] = useState<ReadonlyArray<string>>([]);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
+  const [crudReadResult, setCrudReadResult] = useState<AssistantCrudReadResponse | null>(null);
+  const [crudDeletePreview, setCrudDeletePreview] = useState<AssistantCrudDeletePreviewResponse["preview"] | null>(null);
+  const [crudDeleteResult, setCrudDeleteResult] = useState<AssistantCrudDeleteExecuteResponse | null>(null);
+  const [crudBusy, setCrudBusy] = useState(false);
   const consumedPromptKeyRef = useRef<string | null>(null);
   const taskRecoveryAppliedRef = useRef<string | null>(null);
 
@@ -1068,6 +1250,89 @@ export function AssistantView({
       return;
     }
 
+    const readRequest = parseAssistantCrudReadRequest(normalizedPrompt);
+    if (readRequest) {
+      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
+      if (!targetBookId) {
+        setScopeBlockHint(t("assistant.scopeBlocked"));
+        return;
+      }
+      setScopeBlockHint("");
+      setCrudBusy(true);
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      void (async () => {
+        try {
+          const response = await postApi<AssistantCrudReadResponse>("/assistant/read", {
+            ...readRequest,
+            bookId: targetBookId,
+          });
+          setCrudReadResult(response);
+          setCrudDeletePreview(null);
+          setCrudDeleteResult(null);
+          setState((prev) => completeAssistantResponse(prev, `已返回 ${response.dimension} 查询结果。`));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setScopeBlockHint(`查询失败：${message}`);
+          setState((prev) => completeAssistantResponse(prev, "查询失败，请重试。"));
+        } finally {
+          setCrudBusy(false);
+        }
+      })();
+      return;
+    }
+
+    const restoreIdFromPrompt = parseAssistantCrudRestoreId(normalizedPrompt);
+    if (restoreIdFromPrompt) {
+      setCrudBusy(true);
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      void (async () => {
+        try {
+          await postApi<{ ok: boolean; restoreId: string }>("/assistant/delete/restore", { restoreId: restoreIdFromPrompt });
+          setCrudDeletePreview(null);
+          setCrudDeleteResult((prev) => (prev && prev.restoreId === restoreIdFromPrompt ? null : prev));
+          setState((prev) => completeAssistantResponse(prev, `恢复成功：${restoreIdFromPrompt}`));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setScopeBlockHint(`恢复失败：${message}`);
+          setState((prev) => completeAssistantResponse(prev, "恢复失败，请检查恢复编号。"));
+        } finally {
+          setCrudBusy(false);
+        }
+      })();
+      return;
+    }
+
+    const deleteRequest = parseAssistantCrudDeleteRequest(normalizedPrompt);
+    if (deleteRequest) {
+      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
+      if (!targetBookId) {
+        setScopeBlockHint(t("assistant.scopeBlocked"));
+        return;
+      }
+      setScopeBlockHint("");
+      setCrudBusy(true);
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      void (async () => {
+        try {
+          const preview = await postApi<AssistantCrudDeletePreviewResponse>("/assistant/delete/preview", {
+            ...deleteRequest,
+            bookId: targetBookId,
+          });
+          setCrudDeletePreview(preview.preview);
+          setCrudDeleteResult(null);
+          setCrudReadResult(null);
+          setState((prev) => completeAssistantResponse(prev, "已生成删除影响预览，请确认后执行。"));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setScopeBlockHint(`删除预览失败：${message}`);
+          setState((prev) => completeAssistantResponse(prev, "删除预览失败，请重试。"));
+        } finally {
+          setCrudBusy(false);
+        }
+      })();
+      return;
+    }
+
     const draft = buildAssistantConfirmationDraft(normalizedPrompt, scopeMode, selectedBookIds, activeBookIds);
     if (detectAssistantBookAction(normalizedPrompt)) {
       if (!draft) {
@@ -1136,6 +1401,39 @@ export function AssistantView({
 
   const handleRunNextAction = (action: string) => {
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!crudDeletePreview) return;
+    setCrudBusy(true);
+    try {
+      const result = await postApi<AssistantCrudDeleteExecuteResponse>("/assistant/delete/execute", {
+        previewId: crudDeletePreview.previewId,
+        confirmed: true,
+      });
+      setCrudDeleteResult(result);
+      setCrudDeletePreview(null);
+      setState((prev) => completeAssistantResponse(prev, `删除已执行，可在窗口期内恢复：${result.restoreId}`));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setScopeBlockHint(`删除执行失败：${message}`);
+    } finally {
+      setCrudBusy(false);
+    }
+  };
+
+  const handleRestoreDelete = async (restoreId: string) => {
+    setCrudBusy(true);
+    try {
+      await postApi("/assistant/delete/restore", { restoreId });
+      setCrudDeleteResult(null);
+      setState((prev) => completeAssistantResponse(prev, `已恢复：${restoreId}`));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setScopeBlockHint(`恢复失败：${message}`);
+    } finally {
+      setCrudBusy(false);
+    }
   };
 
   const showLoading = state.loading && state.messages.length === 0;
@@ -1262,6 +1560,14 @@ export function AssistantView({
               onRunNextAction={handleRunNextAction}
             />
           )}
+          {crudReadResult && <AssistantCrudReadCard result={crudReadResult} />}
+          <AssistantCrudDeleteCard
+            preview={crudDeletePreview}
+            result={crudDeleteResult}
+            busy={crudBusy}
+            onConfirm={handleConfirmDelete}
+            onRestore={handleRestoreDelete}
+          />
           <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
       </section>
 
@@ -1294,7 +1600,7 @@ export function AssistantView({
           />
           <button
             onClick={() => sendPrompt(state.input)}
-            disabled={state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
+            disabled={crudBusy || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
             className="h-10 w-10 rounded-lg bg-primary text-primary-foreground disabled:opacity-50 flex items-center justify-center"
             data-testid="assistant-send"
           >
