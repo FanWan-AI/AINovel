@@ -1,12 +1,14 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { parseAssistantOperatorCommand } from "../api/services/assistant-command-parser";
 import type { TFunction } from "../hooks/use-i18n";
 import {
   ASSISTANT_QUICK_ACTIONS,
   AssistantTimeline,
   AssistantView,
   applyAssistantInput,
+  applyAssistantOperatorCommand,
   applyAssistantQuickAction,
   applyAssistantTaskEventFromSSE,
   buildAssistantConfirmationDraft,
@@ -225,5 +227,75 @@ describe("AssistantView", () => {
       s2: "",
       s3: "run_3",
     })).toEqual(["run_1", "run_3"]);
+  });
+
+  it("parses supported operator commands and rejects natural language", () => {
+    expect(parseAssistantOperatorCommand("/goal 完成第一卷主线")).toEqual({
+      kind: "command",
+      raw: "/goal 完成第一卷主线",
+      command: { name: "goal", goal: "完成第一卷主线" },
+    });
+    expect(parseAssistantOperatorCommand("/trace on")).toEqual({
+      kind: "command",
+      raw: "/trace on",
+      command: { name: "trace", enabled: true },
+    });
+    expect(parseAssistantOperatorCommand("/status")).toEqual({
+      kind: "command",
+      raw: "/status",
+      command: { name: "status" },
+    });
+    expect(parseAssistantOperatorCommand("/pause")).toEqual({
+      kind: "command",
+      raw: "/pause",
+      command: { name: "pause" },
+    });
+    expect(parseAssistantOperatorCommand("/resume")).toEqual({
+      kind: "command",
+      raw: "/resume",
+      command: { name: "resume" },
+    });
+    expect(parseAssistantOperatorCommand("/approve step-1")).toEqual({
+      kind: "command",
+      raw: "/approve step-1",
+      command: { name: "approve", targetId: "step-1" },
+    });
+    expect(parseAssistantOperatorCommand("/rollback run_1")).toEqual({
+      kind: "command",
+      raw: "/rollback run_1",
+      command: { name: "rollback", runId: "run_1" },
+    });
+    expect(parseAssistantOperatorCommand("/budget")).toEqual({
+      kind: "command",
+      raw: "/budget",
+      command: { name: "budget" },
+    });
+    expect(parseAssistantOperatorCommand("/trace maybe")).toEqual({
+      kind: "error",
+      raw: "/trace maybe",
+      error: "命令 /trace 仅支持 on 或 off。",
+    });
+    expect(parseAssistantOperatorCommand("请帮我生成下一章 /goal")).toEqual({
+      kind: "not-command",
+    });
+  });
+
+  it("echoes operator command receipts and readable failures", () => {
+    const initial = createAssistantInitialState();
+    const afterGoal = applyAssistantOperatorCommand(initial, "/goal 推进主线", 11_000);
+    expect(afterGoal).not.toBeNull();
+    expect(afterGoal?.messages.map((message) => message.content)).toEqual([
+      "/goal 推进主线",
+      "[Operator Receipt]\n- command: /goal 推进主线\n- result: ok\n- message: 已更新目标：推进主线",
+    ]);
+
+    const afterPause = applyAssistantOperatorCommand(afterGoal!, "/pause", 11_001);
+    expect(afterPause?.messages.at(-1)?.content).toContain("result: ok");
+
+    const afterPauseAgain = applyAssistantOperatorCommand(afterPause!, "/pause", 11_002);
+    expect(afterPauseAgain?.messages.at(-1)?.content).toContain("命令执行失败：会话已处于暂停状态。");
+
+    const afterNaturalLanguage = applyAssistantOperatorCommand(afterPauseAgain!, "请继续分析人物弧光", 11_003);
+    expect(afterNaturalLanguage).toBeNull();
   });
 });
