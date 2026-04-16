@@ -6,6 +6,8 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
+const SSE_MESSAGE_BUFFER_SIZE = 100;
+
 interface EventSourceLike {
   addEventListener: (type: string, listener: (e: MessageEvent) => void) => void;
   removeEventListener: (type: string, listener: (e: MessageEvent) => void) => void;
@@ -144,10 +146,9 @@ export function useSSE(url = "/api/events") {
         const payloadTimestamp = typeof data === "object" && data !== null
           ? (data as { timestamp?: unknown }).timestamp
           : undefined;
-        const timestamp = typeof payloadTimestamp === "string"
-          ? (Date.parse(payloadTimestamp) || Date.now())
-          : Date.now();
-        setMessages((prev) => [...prev.slice(-99), { event: normalizedEvent, data, timestamp }]);
+        const parsedPayloadTimestamp = typeof payloadTimestamp === "string" ? Date.parse(payloadTimestamp) : NaN;
+        const timestamp = Number.isNaN(parsedPayloadTimestamp) ? Date.now() : parsedPayloadTimestamp;
+        setMessages((prev) => [...prev.slice(-(SSE_MESSAGE_BUFFER_SIZE - 1)), { event: normalizedEvent, data, timestamp }]);
       } catch {
         // ignore parse errors
       }

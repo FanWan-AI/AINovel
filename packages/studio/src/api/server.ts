@@ -523,7 +523,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             status: stepStatus,
             ...(stepStatus === "running"
               ? { startedAt: timestamp }
-              : { startedAt: previousStep?.startedAt ?? timestamp, finishedAt: timestamp }),
+              : { ...(previousStep?.startedAt !== undefined ? { startedAt: previousStep.startedAt } : {}), finishedAt: timestamp }),
             ...(typeof payload.error === "string" ? { error: payload.error } : {}),
           } satisfies AssistantTaskStepSnapshot,
         }

@@ -148,7 +148,7 @@ describe("AssistantView", () => {
     const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 8000);
     const running = confirmAssistantPendingAction(pending, 8001);
-    const withTask = { ...running, taskExecution: { taskId: "asst_t_01", sessionId: "asst_s_01", status: "running" as const, timeline: [], lastSyncedAt: 8001 } };
+    const withTask = { ...running, taskExecution: { taskId: "asst_t_01", sessionId: "asst_s_01", status: "running" as const, timeline: [], lastSyncedAt: 8001, nextSequence: 0 } };
 
     const started = applyAssistantTaskEventFromSSE(withTask, {
       event: "assistant:step:start",
@@ -172,7 +172,7 @@ describe("AssistantView", () => {
     const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9000);
     const running = confirmAssistantPendingAction(pending, 9001);
-    const withTask = { ...running, taskExecution: { taskId: "asst_t_02", sessionId: "asst_s_02", status: "running" as const, timeline: [], lastSyncedAt: 9001 } };
+    const withTask = { ...running, taskExecution: { taskId: "asst_t_02", sessionId: "asst_s_02", status: "running" as const, timeline: [], lastSyncedAt: 9001, nextSequence: 0 } };
 
     const reconciled = reconcileAssistantTaskFromSnapshot(withTask, {
       taskId: "asst_t_02",
