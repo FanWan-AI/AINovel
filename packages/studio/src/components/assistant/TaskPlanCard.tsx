@@ -9,7 +9,15 @@ export interface TaskPlanCardAction {
   readonly className: string;
 }
 
-const TASK_PLAN_STATUS_KEY: Record<AssistantTaskPlanStatus, "assistant.planStatusDraft" | "assistant.planStatusAwaitingConfirm" | "assistant.planStatusRunning" | "assistant.planStatusSucceeded" | "assistant.planStatusFailed" | "assistant.planStatusCancelled"> = {
+type TaskPlanStatusI18nKey =
+  | "assistant.planStatusDraft"
+  | "assistant.planStatusAwaitingConfirm"
+  | "assistant.planStatusRunning"
+  | "assistant.planStatusSucceeded"
+  | "assistant.planStatusFailed"
+  | "assistant.planStatusCancelled";
+
+const TASK_PLAN_STATUS_KEY: Record<AssistantTaskPlanStatus, TaskPlanStatusI18nKey> = {
   draft: "assistant.planStatusDraft",
   "awaiting-confirm": "assistant.planStatusAwaitingConfirm",
   running: "assistant.planStatusRunning",
@@ -71,7 +79,7 @@ export function TaskPlanCard({
     <div className="mt-3 rounded-xl border border-primary/40 bg-card p-4 space-y-2" data-testid="assistant-task-plan-card">
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-medium">{t("assistant.planTitle")}</div>
-        <div className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+        <div className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
           {t("assistant.planStatus")} · {t(resolveTaskPlanStatusKey(taskPlan.status))}
         </div>
       </div>

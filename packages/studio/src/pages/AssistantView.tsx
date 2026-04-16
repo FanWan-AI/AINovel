@@ -199,10 +199,9 @@ export function canRunScopedBookAction(
 
 export function resolveAssistantBookTitlesByIds(
   targetBookIds: ReadonlyArray<string>,
-  activeBooks: ReadonlyArray<BookSummary>,
+  titleById: ReadonlyMap<string, string>,
   t: TFunction,
 ): string[] {
-  const titleById = new Map(activeBooks.map((book) => [book.id, book.title] as const));
   return targetBookIds.map((id) => titleById.get(id) ?? t("assistant.scopeUnknownBook"));
 }
 
@@ -288,10 +287,7 @@ export function completeAssistantTaskPlanExecution(
   now = Date.now(),
 ): AssistantComposerState {
   if (!state.taskPlan || state.taskPlan.status !== "running") {
-    return {
-      ...state,
-      loading: false,
-    };
+    return state;
   }
   return {
     ...state,
@@ -361,13 +357,17 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     () => resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds),
     [scopeMode, selectedBookIds, activeBookIds],
   );
+  const activeBookTitleById = useMemo(
+    () => new Map(activeBooks.map((book) => [book.id, book.title] as const)),
+    [activeBooks],
+  );
   const selectedBookTitles = useMemo(
-    () => resolveAssistantBookTitlesByIds(selectedScopeBookIds, activeBooks, t),
-    [selectedScopeBookIds, activeBooks, t],
+    () => resolveAssistantBookTitlesByIds(selectedScopeBookIds, activeBookTitleById, t),
+    [selectedScopeBookIds, activeBookTitleById, t],
   );
   const taskPlanTargetBookTitles = useMemo(
-    () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBooks, t) : []),
-    [state.taskPlan, activeBooks, t],
+    () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBookTitleById, t) : []),
+    [state.taskPlan, activeBookTitleById, t],
   );
 
   const sendPrompt = (rawPrompt: string) => {

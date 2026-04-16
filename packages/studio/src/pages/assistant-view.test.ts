@@ -135,4 +135,9 @@ describe("AssistantView", () => {
     expect(failed.taskPlan?.status).toBe("failed");
     expect(failed.loading).toBe(false);
   });
+
+  it("does not mutate state when completion is requested outside running status", () => {
+    const state = createAssistantInitialState();
+    expect(completeAssistantTaskPlanExecution(state, "succeeded", 7000)).toBe(state);
+  });
 });
