@@ -16,6 +16,7 @@ import {
   type LogEntry,
 } from "@actalk/inkos-core";
 import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
@@ -42,7 +43,11 @@ import {
   type RuntimeEventSource,
   type RuntimeEventLevel,
 } from "./schemas/runtime-schema.js";
-import { validateDaemonPlanRequest, validateDaemonStartRequest } from "./schemas/daemon-plan-schema.js";
+import {
+  validateDaemonPlanRequest,
+  validateDaemonStartRequest,
+  type DaemonPlanBookScope,
+} from "./schemas/daemon-plan-schema.js";
 import {
   validateChapterRunListQuery,
   type ChapterRunActionType,
@@ -266,6 +271,138 @@ function buildBriefTrace(
 
 // --- V2 confirm run-state store ---
 const bookCreateRunStore = new BookCreateRunStore();
+
+type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next";
+type AssistantPlanRiskLevel = "low" | "medium" | "high";
+type AssistantPlanScope = DaemonPlanBookScope;
+
+interface AssistantPlanStep {
+  readonly stepId: string;
+  readonly action: string;
+  readonly bookId?: string;
+  readonly bookIds?: ReadonlyArray<string>;
+  readonly chapter?: number;
+  readonly mode?: string;
+}
+
+const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
+const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
+const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
+const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
+const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+
+function parseAssistantChapterFromInput(input: string): number | undefined {
+  const zhMatch = input.match(ASSISTANT_CHAPTER_ZH_PATTERN);
+  if (zhMatch?.[1]) return Number.parseInt(zhMatch[1], 10);
+  const enMatch = input.match(ASSISTANT_CHAPTER_EN_PATTERN);
+  if (enMatch?.[1]) return Number.parseInt(enMatch[1], 10);
+  return undefined;
+}
+
+function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
+  const normalized = input.trim();
+  if (!normalized) return null;
+  if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
+    return "audit_and_optimize";
+  }
+  if (ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
+    return "audit_and_optimize";
+  }
+  if (ASSISTANT_AUDIT_PATTERN.test(normalized)) {
+    return "audit";
+  }
+  if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
+    return "write_next";
+  }
+  return null;
+}
+
+function parseAssistantPlanScope(rawScope: unknown): { ok: true; scope: AssistantPlanScope } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  const validation = validateDaemonPlanRequest({
+    plan: {
+      mode: "managed-default",
+      bookScope: rawScope,
+    },
+  });
+  if (!validation.ok) {
+    const scopeErrors = validation.errors
+      .filter((error) => error.field.startsWith("plan.bookScope"))
+      .map((error) => ({
+        field: error.field.replace(/^plan\.bookScope/, "scope"),
+        message: error.message,
+      }));
+    return {
+      ok: false,
+      errors: scopeErrors.length > 0
+        ? scopeErrors
+        : [{
+            field: "scope",
+            message: "scope must be { type: 'all-active' } or { type: 'book-list', bookIds: string[] }",
+          }],
+    };
+  }
+  return { ok: true, scope: validation.value.plan.bookScope };
+}
+
+function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
+  if (scope.type !== "book-list") return {};
+  if (scope.bookIds.length === 1) {
+    return { bookId: scope.bookIds[0] };
+  }
+  return { bookIds: scope.bookIds };
+}
+
+function buildAssistantPlanDraft(
+  intent: AssistantPlanIntent,
+  scope: AssistantPlanScope,
+  input: string,
+): { plan: AssistantPlanStep[]; risk: { level: AssistantPlanRiskLevel; reasons: string[] } } {
+  const bookTarget = buildAssistantPlanBookTarget(scope);
+  const chapter = parseAssistantChapterFromInput(input);
+
+  if (intent === "audit") {
+    return {
+      plan: [
+        { stepId: "s1", action: "audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
+      ],
+      risk: {
+        level: "low",
+        reasons: ["仅执行章节审计，不直接修改内容"],
+      },
+    };
+  }
+
+  if (intent === "audit_and_optimize") {
+    return {
+      plan: [
+        { stepId: "s1", action: "audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
+        {
+          stepId: "s2",
+          action: "revise",
+          mode: "spot-fix",
+          ...bookTarget,
+          ...(chapter !== undefined ? { chapter } : {}),
+        },
+        { stepId: "s3", action: "re-audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
+      ],
+      risk: {
+        level: "medium",
+        reasons: ["涉及章节内容改写"],
+      },
+    };
+  }
+
+  return {
+    plan: [
+      { stepId: "s1", action: "plan-next", ...bookTarget },
+      { stepId: "s2", action: "write-next", ...bookTarget },
+    ],
+    risk: {
+      level: "low",
+      reasons: ["将生成下一章节草稿"],
+    },
+  };
+}
 
 // --- Server factory ---
 
@@ -1680,6 +1817,64 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("agent:error", { instruction, error: msg });
       return c.json({ response: msg });
     }
+  });
+
+  app.post("/api/assistant/plan", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return c.json({
+        code: "ASSISTANT_PLAN_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+
+    const body = rawBody as Record<string, unknown>;
+    const errors: Array<{ field: string; message: string }> = [];
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (!sessionId) {
+      errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
+    }
+    const input = typeof body.input === "string" ? body.input.trim() : "";
+    if (!input) {
+      errors.push({ field: "input", message: "input must be a non-empty string" });
+    }
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_PLAN_VALIDATION_FAILED", errors }, 422);
+    }
+
+    if (body.scope === undefined) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_PLAN_SCOPE_REQUIRED",
+          message: "scope is required for assistant plan",
+        },
+      }, 400);
+    }
+
+    const parsedScope = parseAssistantPlanScope(body.scope);
+    if (!parsedScope.ok) {
+      return c.json({ code: "ASSISTANT_PLAN_VALIDATION_FAILED", errors: parsedScope.errors }, 422);
+    }
+
+    const intent = resolveAssistantPlanIntent(input);
+    if (!intent) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_PLAN_INTENT_UNKNOWN",
+          message: "Unable to recognize assistant intent from input.",
+        },
+      }, 422);
+    }
+
+    const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
+    return c.json({
+      taskId,
+      intent,
+      plan: drafted.plan,
+      requiresConfirmation: true,
+      risk: drafted.risk,
+    });
   });
 
   // --- Language setup ---
