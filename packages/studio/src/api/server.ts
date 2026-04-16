@@ -285,6 +285,14 @@ interface AssistantPlanStep {
   readonly mode?: string;
 }
 
+interface AssistantExecuteStepRef {
+  readonly stepId: string;
+  readonly action: "audit" | "revise" | "re-audit";
+  readonly bookId: string;
+  readonly chapter: number;
+  readonly mode?: string;
+}
+
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
@@ -671,6 +679,57 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (record["status"] !== "ready-for-review" && record["status"] !== "audit-failed") return false;
     if (!Array.isArray(record["auditIssues"])) return false;
     return true;
+  }
+
+  function normalizeAssistantExecuteStep(step: AssistantPlanStep): AssistantExecuteStepRef | null {
+    if (step.action !== "audit" && step.action !== "revise" && step.action !== "re-audit") {
+      return null;
+    }
+    const stepBookId = typeof step.bookId === "string"
+      ? step.bookId
+      : (Array.isArray(step.bookIds) && step.bookIds.length === 1 && typeof step.bookIds[0] === "string"
+        ? step.bookIds[0]
+        : null);
+    const stepChapter = typeof step.chapter === "number" ? step.chapter : null;
+    if (!stepBookId || stepChapter === null || !Number.isInteger(stepChapter) || stepChapter < 1) {
+      return null;
+    }
+    return {
+      stepId: step.stepId,
+      action: step.action,
+      bookId: stepBookId,
+      chapter: stepChapter,
+      ...(step.mode !== undefined ? { mode: step.mode } : {}),
+    };
+  }
+
+  async function parseApiErrorMessage(response: Response): Promise<string> {
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const nestedError = payload?.["error"];
+    if (typeof nestedError === "string") return nestedError;
+    if (nestedError && typeof nestedError === "object") {
+      const nestedMessage = (nestedError as Record<string, unknown>)["message"];
+      if (typeof nestedMessage === "string") return nestedMessage;
+    }
+    const topMessage = payload?.["message"];
+    if (typeof topMessage === "string") return topMessage;
+    return response.statusText || `Request failed with status ${response.status}`;
+  }
+
+  async function waitForChapterRunCompletion(
+    bookId: string,
+    runId: string,
+    timeoutMs = 30_000,
+  ): Promise<ChapterRunRecord> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const run = await chapterRunStore.getRun(bookId, runId);
+      if (run && run.status !== "running") {
+        return run;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`Timed out waiting for chapter run ${runId}`);
   }
 
   function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
@@ -1874,6 +1933,228 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       plan: drafted.plan,
       requiresConfirmation: true,
       risk: drafted.risk,
+    });
+  });
+
+  app.post("/api/assistant/execute", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return c.json({
+        code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const body = rawBody as Record<string, unknown>;
+    const errors: Array<{ field: string; message: string }> = [];
+    const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+    if (!taskId) errors.push({ field: "taskId", message: "taskId must be a non-empty string" });
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (!sessionId) errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
+    const approved = body.approved === true;
+    if (!Array.isArray(body.plan)) {
+      errors.push({ field: "plan", message: "plan must be a non-empty array" });
+    }
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_EXECUTE_VALIDATION_FAILED", errors }, 422);
+    }
+    if (!approved) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_EXECUTE_NOT_APPROVED",
+          message: "Assistant task must be approved before execution.",
+        },
+      }, 409);
+    }
+
+    const plan = (body.plan as AssistantPlanStep[])
+      .map((step) => normalizeAssistantExecuteStep(step))
+      .filter((step): step is AssistantExecuteStepRef => step !== null);
+    const auditStep = plan.find((step) => step.action === "audit");
+    const reviseStep = plan.find((step) => step.action === "revise");
+    const reAuditStep = plan.find((step) => step.action === "re-audit");
+    if (!auditStep || !reviseStep || !reAuditStep) {
+      return c.json({
+        code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
+        errors: [{
+          field: "plan",
+          message: "plan must include audit, revise and re-audit steps with single book and chapter targets",
+        }],
+      }, 422);
+    }
+
+    const auditRunId = `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const reAuditRunId = `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+
+    broadcast("assistant:step:start", {
+      taskId,
+      sessionId,
+      stepId: auditStep.stepId,
+      action: auditStep.action,
+      runId: auditRunId,
+      bookId: auditStep.bookId,
+      chapter: auditStep.chapter,
+    });
+    const auditResponse = await app.request(
+      `http://localhost/api/books/${auditStep.bookId}/audit/${auditStep.chapter}`,
+      { method: "POST" },
+    );
+    if (!auditResponse.ok) {
+      const error = await parseApiErrorMessage(auditResponse);
+      broadcast("assistant:step:fail", {
+        taskId,
+        sessionId,
+        stepId: auditStep.stepId,
+        action: auditStep.action,
+        runId: auditRunId,
+        bookId: auditStep.bookId,
+        chapter: auditStep.chapter,
+        error,
+      });
+      return c.json({
+        error: {
+          code: "ASSISTANT_EXECUTE_STEP_FAILED",
+          message: error,
+          taskId,
+          stepId: auditStep.stepId,
+          runId: auditRunId,
+        },
+      }, 500);
+    }
+    broadcast("assistant:step:success", {
+      taskId,
+      sessionId,
+      stepId: auditStep.stepId,
+      action: auditStep.action,
+      runId: auditRunId,
+      bookId: auditStep.bookId,
+      chapter: auditStep.chapter,
+    });
+
+    const reviseResponse = await app.request(
+      `http://localhost/api/books/${reviseStep.bookId}/revise/${reviseStep.chapter}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...(reviseStep.mode !== undefined ? { mode: reviseStep.mode } : {}) }),
+      },
+    );
+    const revisePayload = await reviseResponse.json().catch(() => null) as Record<string, unknown> | null;
+    if (!reviseResponse.ok || typeof revisePayload?.["runId"] !== "string") {
+      const error = !reviseResponse.ok
+        ? await parseApiErrorMessage(reviseResponse)
+        : "revise step did not return runId";
+      broadcast("assistant:step:fail", {
+        taskId,
+        sessionId,
+        stepId: reviseStep.stepId,
+        action: reviseStep.action,
+        runId: null,
+        bookId: reviseStep.bookId,
+        chapter: reviseStep.chapter,
+        error,
+      });
+      return c.json({
+        error: {
+          code: "ASSISTANT_EXECUTE_STEP_FAILED",
+          message: error,
+          taskId,
+          stepId: reviseStep.stepId,
+        },
+      }, 500);
+    }
+    const reviseRunId = revisePayload["runId"];
+    broadcast("assistant:step:start", {
+      taskId,
+      sessionId,
+      stepId: reviseStep.stepId,
+      action: reviseStep.action,
+      runId: reviseRunId,
+      bookId: reviseStep.bookId,
+      chapter: reviseStep.chapter,
+    });
+
+    void (async () => {
+      try {
+        const reviseRun = await waitForChapterRunCompletion(reviseStep.bookId, reviseRunId);
+        if (reviseRun.status !== "succeeded") {
+          const error = reviseRun.error ?? "revise step failed";
+          broadcast("assistant:step:fail", {
+            taskId,
+            sessionId,
+            stepId: reviseStep.stepId,
+            action: reviseStep.action,
+            runId: reviseRunId,
+            bookId: reviseStep.bookId,
+            chapter: reviseStep.chapter,
+            error,
+          });
+          broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+          return;
+        }
+
+        broadcast("assistant:step:success", {
+          taskId,
+          sessionId,
+          stepId: reviseStep.stepId,
+          action: reviseStep.action,
+          runId: reviseRunId,
+          bookId: reviseStep.bookId,
+          chapter: reviseStep.chapter,
+        });
+        broadcast("assistant:step:start", {
+          taskId,
+          sessionId,
+          stepId: reAuditStep.stepId,
+          action: reAuditStep.action,
+          runId: reAuditRunId,
+          bookId: reAuditStep.bookId,
+          chapter: reAuditStep.chapter,
+        });
+        const reAuditResponse = await app.request(
+          `http://localhost/api/books/${reAuditStep.bookId}/audit/${reAuditStep.chapter}`,
+          { method: "POST" },
+        );
+        if (!reAuditResponse.ok) {
+          const error = await parseApiErrorMessage(reAuditResponse);
+          broadcast("assistant:step:fail", {
+            taskId,
+            sessionId,
+            stepId: reAuditStep.stepId,
+            action: reAuditStep.action,
+            runId: reAuditRunId,
+            bookId: reAuditStep.bookId,
+            chapter: reAuditStep.chapter,
+            error,
+          });
+          broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+          return;
+        }
+        broadcast("assistant:step:success", {
+          taskId,
+          sessionId,
+          stepId: reAuditStep.stepId,
+          action: reAuditStep.action,
+          runId: reAuditRunId,
+          bookId: reAuditStep.bookId,
+          chapter: reAuditStep.chapter,
+        });
+        broadcast("assistant:done", { taskId, sessionId, status: "succeeded" });
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+      }
+    })();
+
+    return c.json({
+      taskId,
+      sessionId,
+      status: "running",
+      stepRunIds: {
+        [auditStep.stepId]: auditRunId,
+        [reviseStep.stepId]: reviseRunId,
+        [reAuditStep.stepId]: reAuditRunId,
+      },
+      currentStepId: reviseStep.stepId,
     });
   });
 

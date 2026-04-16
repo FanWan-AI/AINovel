@@ -9,6 +9,7 @@ const schedulerStartPlans: unknown[] = [];
 const initBookMock = vi.fn();
 const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
+const auditChapterMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
 const planChapterMock = vi.fn();
@@ -35,8 +36,8 @@ vi.mock("@actalk/inkos-core", () => {
       return [];
     }
 
-    async loadBookConfig(): Promise<never> {
-      throw new Error("not implemented");
+    async loadBookConfig(bookId: string): Promise<{ id: string; genre: string; language: "zh" }> {
+      return { id: bookId, genre: "都市", language: "zh" };
     }
 
     async loadChapterIndex(bookId: string): Promise<[]> {
@@ -73,6 +74,14 @@ vi.mock("@actalk/inkos-core", () => {
     planChapter = planChapterMock;
   }
 
+  class MockContinuityAuditor {
+    constructor(_ctx: unknown) {}
+
+    async auditChapter(bookDir: string, content: string, chapterNumber: number, genre: string): Promise<unknown> {
+      return await auditChapterMock(bookDir, content, chapterNumber, genre);
+    }
+  }
+
   class MockScheduler {
     private running = false;
 
@@ -97,6 +106,7 @@ vi.mock("@actalk/inkos-core", () => {
     StateManager: MockStateManager,
     PipelineRunner: MockPipelineRunner,
     Scheduler: MockScheduler,
+    ContinuityAuditor: MockContinuityAuditor,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
@@ -149,6 +159,7 @@ describe("createStudioServer daemon lifecycle", () => {
     initBookMock.mockReset();
     runRadarMock.mockReset();
     reviseDraftMock.mockReset();
+    auditChapterMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
     planChapterMock.mockReset();
@@ -165,6 +176,11 @@ describe("createStudioServer daemon lifecycle", () => {
       fixedIssues: ["focus restored"],
       applied: true,
       status: "ready-for-review",
+    });
+    auditChapterMock.mockResolvedValue({
+      passed: true,
+      summary: "audit passed",
+      issues: [],
     });
     resyncChapterArtifactsMock.mockResolvedValue({
       chapterNumber: 3,
@@ -464,6 +480,110 @@ describe("createStudioServer daemon lifecycle", () => {
         message: "Unable to recognize assistant intent from input.",
       },
     });
+  });
+
+  it("executes assistant audit->revise->re-audit chain and returns running with step runIds", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_001",
+        sessionId: "asst_s_001",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      taskId: "asst_t_execute_001",
+      sessionId: "asst_s_001",
+      status: "running",
+      currentStepId: "s2",
+      stepRunIds: {
+        s1: expect.stringMatching(/^asst_run_/),
+        s2: expect.any(String),
+        s3: expect.stringMatching(/^asst_run_/),
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "spot-fix");
+      expect(auditChapterMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("blocks unapproved assistant execute requests", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_002",
+        sessionId: "asst_s_002",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "ASSISTANT_EXECUTE_NOT_APPROVED",
+        message: "Assistant task must be approved before execution.",
+      },
+    });
+    expect(auditChapterMock).not.toHaveBeenCalled();
+    expect(reviseDraftMock).not.toHaveBeenCalled();
+  });
+
+  it("interrupts assistant execute chain when a step fails and propagates the error", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    auditChapterMock.mockRejectedValueOnce(new Error("audit exploded"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_003",
+        sessionId: "asst_s_003",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "ASSISTANT_EXECUTE_STEP_FAILED",
+        taskId: "asst_t_execute_003",
+        stepId: "s1",
+      },
+    });
+    expect(reviseDraftMock).not.toHaveBeenCalled();
   });
 
   it("daemon session and events expose pause/resume transitions", async () => {
