@@ -178,7 +178,7 @@ export function authorizeAssistantSkillPlan(
   if (permissions === undefined) {
     return { allow: true };
   }
-  const granted = new Set(permissions ?? []);
+  const granted = new Set(permissions);
   const denied: AssistantSkillAuthorizationDenied[] = [];
 
   for (const step of plan) {

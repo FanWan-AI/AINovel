@@ -2305,9 +2305,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const rawPermissions = c.req.query("permissions");
     const permissions = typeof rawPermissions === "string" && rawPermissions.trim().length > 0
       ? rawPermissions.split(",").map((value) => value.trim()).filter((value) => value.length > 0)
-      : [];
+      : undefined;
     return c.json({
-      permissions,
+      permissions: permissions ?? [],
       skills: listAssistantSkills(permissions),
     });
   });
@@ -2363,10 +2363,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const skillAuthorization = authorizeAssistantSkillPlan(plan, permissionsInput);
     if (!skillAuthorization.allow) {
       const reasons = skillAuthorization.denied.map((item) => item.reason);
-      const blockedMessage = reasons.join("; ");
-      const finalBlockedMessage = blockedMessage.length > 0
-        ? blockedMessage
-        : "Assistant execution blocked by skill authorization.";
+      const finalBlockedMessage = reasons.join("; ");
       apiLogger.warn("assistant skill authorization blocked", {
         taskId,
         sessionId,
