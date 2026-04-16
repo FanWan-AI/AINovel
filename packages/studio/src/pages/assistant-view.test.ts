@@ -24,6 +24,9 @@ import {
   createAssistantInitialState,
   requestAssistantConfirmation,
   parseAssistantTaskRecoveryPayload,
+  parseAssistantCrudDeleteRequest,
+  parseAssistantCrudReadRequest,
+  parseAssistantCrudRestoreId,
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
   resolveAssistantScopeBookIds,
@@ -298,6 +301,27 @@ describe("AssistantView", () => {
     expect(recovered.taskExecution?.taskId).toBe("asst_t_recover_01");
     expect(recovered.taskExecution?.timeline).toHaveLength(1);
     expect(recovered.taskExecution?.timeline[0]?.event).toBe("assistant:step:start");
+  });
+
+  it("parses read/delete/restore intents from assistant prompts", () => {
+    expect(parseAssistantCrudReadRequest("查询第3章")).toEqual({
+      dimension: "chapter",
+      chapter: 3,
+    });
+    expect(parseAssistantCrudReadRequest("查看角色 \"林舟\"")).toEqual({
+      dimension: "character",
+      keyword: "林舟",
+    });
+    expect(parseAssistantCrudDeleteRequest("删除 run_abc123")).toEqual({
+      target: "run",
+      runId: "run_abc123",
+    });
+    expect(parseAssistantCrudDeleteRequest("删除第5章")).toEqual({
+      target: "chapter",
+      chapter: 5,
+    });
+    expect(parseAssistantCrudRestoreId("恢复 asst_restore_abc123")).toBe("asst_restore_abc123");
+    expect(parseAssistantCrudReadRequest("写下一章")).toBeNull();
   });
 
   it("parses supported operator commands and rejects natural language", () => {

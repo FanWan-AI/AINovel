@@ -15,9 +15,9 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
@@ -86,6 +86,8 @@ const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
+const ASSISTANT_DELETE_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
+const ASSISTANT_DELETE_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TRACE_MAX_ITEMS = 8;
 const WRITING_GOVERNANCE_SCHEMA_VERSION = 1;
 const WRITING_STYLE_TEMPLATE_VALUES = ["narrative-balance", "dialogue-driven", "cinematic"] as const;
@@ -455,6 +457,41 @@ interface AssistantEvaluateEvidence {
   readonly reason: string;
 }
 
+type AssistantCrudReadDimension = "book" | "volume" | "chapter" | "character" | "hook";
+
+interface AssistantCrudEvidence {
+  readonly source: string;
+  readonly locator: string;
+  readonly excerpt: string;
+}
+
+interface AssistantCrudDeletePreview {
+  readonly target: "chapter" | "run";
+  readonly bookId: string;
+  readonly impactSummary: string;
+  readonly evidence: ReadonlyArray<AssistantCrudEvidence>;
+  readonly previewId: string;
+  readonly confirmBy: string;
+}
+
+interface AssistantCrudDeleteRecoveryEntry {
+  readonly restoreId: string;
+  readonly target: "chapter" | "run";
+  readonly bookId: string;
+  readonly chapter?: number;
+  readonly runId?: string;
+  readonly chapterFileName?: string;
+  readonly chapterContent?: string;
+  readonly deletedAt: string;
+  readonly recoverBefore: string;
+  readonly restoredAt?: string;
+}
+
+interface AssistantCrudDeleteRecoveryStore {
+  readonly version: 1;
+  readonly entries: AssistantCrudDeleteRecoveryEntry[];
+}
+
 interface AssistantEvaluateDimensions {
   readonly continuity: number;
   readonly readability: number;
@@ -481,6 +518,15 @@ interface AssistantOptimizeIteration {
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
+const ASSISTANT_CRUD_READ_PATTERN = /查询|查看|检索|read|search/iu;
+const ASSISTANT_CRUD_DELETE_PATTERN = /删除|delete/iu;
+const ASSISTANT_CRUD_RESTORE_PATTERN = /恢复|restore/iu;
+const ASSISTANT_CRUD_DIMENSION_VOLUME_PATTERN = /卷|volume/iu;
+const ASSISTANT_CRUD_DIMENSION_CHAPTER_PATTERN = /章|chapter/iu;
+const ASSISTANT_CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
+const ASSISTANT_CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
+const ASSISTANT_CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
+const ASSISTANT_CRUD_RESTORE_ID_PATTERN = /(asst_restore_[a-z0-9]+)/iu;
 const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 
@@ -490,6 +536,14 @@ function parseAssistantChapterFromInput(input: string): number | undefined {
   const enMatch = input.match(ASSISTANT_CHAPTER_EN_PATTERN);
   if (enMatch?.[1]) return Number.parseInt(enMatch[1], 10);
   return undefined;
+}
+
+function parseAssistantCrudDimensionFromInput(input: string): AssistantCrudReadDimension {
+  if (ASSISTANT_CRUD_DIMENSION_HOOK_PATTERN.test(input)) return "hook";
+  if (ASSISTANT_CRUD_DIMENSION_CHARACTER_PATTERN.test(input)) return "character";
+  if (ASSISTANT_CRUD_DIMENSION_VOLUME_PATTERN.test(input)) return "volume";
+  if (ASSISTANT_CRUD_DIMENSION_CHAPTER_PATTERN.test(input)) return "chapter";
+  return "book";
 }
 
 function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
@@ -711,6 +765,59 @@ function buildAssistantPlanDraft(
   };
 }
 
+function normalizeAssistantCrudKeyword(input: unknown): string | undefined {
+  if (typeof input !== "string") return undefined;
+  const normalized = input.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function readRelativeSource(root: string, filePath: string): string {
+  const value = relative(root, filePath).replace(/\\/g, "/");
+  return value.length > 0 ? value : filePath;
+}
+
+function pickEvidenceLines(content: string, keyword?: string, maxItems = 3): Array<{ line: number; excerpt: string }> {
+  const lines = content.split(/\r?\n/u);
+  const normalizedKeyword = keyword?.toLowerCase();
+  const matched = lines
+    .map((line, index) => ({ line: index + 1, excerpt: line.trim() }))
+    .filter((entry) => entry.excerpt.length > 0)
+    .filter((entry) => !normalizedKeyword || entry.excerpt.toLowerCase().includes(normalizedKeyword));
+  if (matched.length > 0) return matched.slice(0, maxItems);
+  return lines
+    .map((line, index) => ({ line: index + 1, excerpt: line.trim() }))
+    .filter((entry) => entry.excerpt.length > 0)
+    .slice(0, maxItems);
+}
+
+function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dimension: AssistantCrudReadDimension; bookId: string; chapter?: number; keyword?: string } } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+    return { ok: false, errors: [{ field: "body", message: "Request body must be a JSON object" }] };
+  }
+  const body = rawBody as Record<string, unknown>;
+  const dimension = typeof body.dimension === "string" ? body.dimension.trim() : "";
+  const bookId = typeof body.bookId === "string" ? body.bookId.trim() : "";
+  const chapter = typeof body.chapter === "number" ? body.chapter : Number.NaN;
+  const errors: Array<{ field: string; message: string }> = [];
+  if (dimension !== "book" && dimension !== "volume" && dimension !== "chapter" && dimension !== "character" && dimension !== "hook") {
+    errors.push({ field: "dimension", message: "dimension must be one of book/volume/chapter/character/hook" });
+  }
+  if (!bookId) errors.push({ field: "bookId", message: "bookId must be a non-empty string" });
+  if (dimension === "chapter" && (!Number.isInteger(chapter) || chapter < 1)) {
+    errors.push({ field: "chapter", message: "chapter must be a positive integer when dimension is chapter" });
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      dimension: dimension as AssistantCrudReadDimension,
+      bookId,
+      ...(dimension === "chapter" ? { chapter } : {}),
+      ...(normalizeAssistantCrudKeyword(body.keyword) ? { keyword: normalizeAssistantCrudKeyword(body.keyword) } : {}),
+    },
+  };
+}
+
 // --- Server factory ---
 
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
@@ -724,6 +831,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   let runtimeEventIdCounter = 0;
   let sseClientCount = 0;
   const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
+  const assistantDeletePreviews = new Map<string, { readonly body: { target: "chapter" | "run"; bookId: string; chapter?: number; runId?: string }; readonly expiresAt: number }>();
+  const assistantDeleteRecoveryStorePath = join(root, ".inkos", "assistant-delete-recovery.v1.json");
   const assistantTaskSnapshotStorePath = join(root, ASSISTANT_TASK_SNAPSHOT_STORE_FILE);
   let assistantTaskSnapshotPersistTimer: ReturnType<typeof setTimeout> | null = null;
   let assistantTaskSnapshotPersistInFlight: Promise<void> | null = null;
@@ -1150,6 +1259,115 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   function generateAssistantRunId(): string {
     return `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  }
+
+  async function loadAssistantDeleteRecoveryStore(): Promise<AssistantCrudDeleteRecoveryStore> {
+    try {
+      const raw = JSON.parse(await readFile(assistantDeleteRecoveryStorePath, "utf-8")) as Partial<AssistantCrudDeleteRecoveryStore>;
+      if (raw.version !== 1 || !Array.isArray(raw.entries)) {
+        return { version: 1, entries: [] };
+      }
+      return { version: 1, entries: raw.entries };
+    } catch {
+      return { version: 1, entries: [] };
+    }
+  }
+
+  async function saveAssistantDeleteRecoveryStore(store: AssistantCrudDeleteRecoveryStore): Promise<void> {
+    await mkdir(dirname(assistantDeleteRecoveryStorePath), { recursive: true });
+    await writeFile(assistantDeleteRecoveryStorePath, JSON.stringify(store, null, 2), "utf-8");
+  }
+
+  async function appendAssistantDeleteRecoveryEntry(entry: AssistantCrudDeleteRecoveryEntry): Promise<void> {
+    const store = await loadAssistantDeleteRecoveryStore();
+    await saveAssistantDeleteRecoveryStore({
+      version: 1,
+      entries: [...store.entries, entry].slice(-200),
+    });
+  }
+
+  async function markAssistantDeleteRecoveryRestored(restoreId: string): Promise<void> {
+    const store = await loadAssistantDeleteRecoveryStore();
+    await saveAssistantDeleteRecoveryStore({
+      version: 1,
+      entries: store.entries.map((entry) => entry.restoreId === restoreId
+        ? { ...entry, restoredAt: new Date().toISOString() }
+        : entry),
+    });
+  }
+
+  async function resolveChapterFile(bookId: string, chapter: number): Promise<{ fileName: string; filePath: string; content: string } | null> {
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const prefix = `${String(chapter).padStart(4, "0")}_`;
+    let fileName: string | undefined;
+    try {
+      const files = await readdir(chaptersDir);
+      fileName = files.find((file) => file.startsWith(prefix) && file.endsWith(".md"));
+    } catch {
+      return null;
+    }
+    if (!fileName) return null;
+    const filePath = join(chaptersDir, fileName);
+    try {
+      const content = await readFile(filePath, "utf-8");
+      return { fileName, filePath, content };
+    } catch {
+      return null;
+    }
+  }
+
+  async function collectAssistantCrudEvidence(
+    filePath: string,
+    keyword?: string,
+    maxItems = 3,
+  ): Promise<AssistantCrudEvidence[]> {
+    try {
+      const content = await readFile(filePath, "utf-8");
+      return pickEvidenceLines(content, keyword, maxItems).map((entry) => ({
+        source: readRelativeSource(root, filePath),
+        locator: `line:${entry.line}`,
+        excerpt: entry.excerpt,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  async function resolveAssistantCrudRead(
+    query: { dimension: AssistantCrudReadDimension; bookId: string; chapter?: number; keyword?: string },
+  ): Promise<{ summary: string; evidence: AssistantCrudEvidence[] }> {
+    const bookDir = state.bookDir(query.bookId);
+    const filesByDimension: Record<AssistantCrudReadDimension, string[]> = {
+      book: [join(bookDir, "book.json"), join(bookDir, "story", "story_bible.md")],
+      volume: [join(bookDir, "story", "volume_outline.md"), join(bookDir, "story", "book_rules.md")],
+      chapter: [],
+      character: [join(bookDir, "story", "character_matrix.md"), join(bookDir, "story", "current_state.md")],
+      hook: [join(bookDir, "story", "pending_hooks.md"), join(bookDir, "story", "chapter_summaries.md")],
+    };
+    if (query.dimension === "chapter" && query.chapter !== undefined) {
+      const chapterFile = await resolveChapterFile(query.bookId, query.chapter);
+      if (chapterFile) {
+        filesByDimension.chapter.push(chapterFile.filePath);
+      }
+    }
+    const evidence = (
+      await Promise.all(filesByDimension[query.dimension].map(async (filePath) =>
+        await collectAssistantCrudEvidence(filePath, query.keyword)))
+    ).flat();
+    if (evidence.length === 0) {
+      return {
+        summary: "未命中可用内容。",
+        evidence: [{
+          source: `books/${query.bookId}`,
+          locator: "n/a",
+          excerpt: "未找到可用来源文件或匹配文本。",
+        }],
+      };
+    }
+    return {
+      summary: `命中 ${evidence.length} 条证据。`,
+      evidence: evidence.slice(0, 8),
+    };
   }
 
   function clampSerializableScore(value: number): number {
@@ -2362,6 +2580,355 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("agent:error", { instruction, error: msg });
       return c.json({ response: msg });
     }
+  });
+
+  app.post("/api/assistant/read", async (c) => {
+    const parsed = parseAssistantCrudReadBody(await c.req.json<unknown>().catch(() => null));
+    if (!parsed.ok) {
+      return c.json({ code: "ASSISTANT_READ_VALIDATION_FAILED", errors: parsed.errors }, 422);
+    }
+    const { dimension, bookId, chapter, keyword } = parsed.value;
+    const result = await resolveAssistantCrudRead(parsed.value);
+    return c.json({
+      ok: true,
+      dimension,
+      bookId,
+      ...(chapter !== undefined ? { chapter } : {}),
+      ...(keyword ? { keyword } : {}),
+      summary: result.summary,
+      evidence: result.evidence,
+    });
+  });
+
+  app.post("/api/assistant/delete/preview", async (c) => {
+    const body = await c.req.json<unknown>().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({
+        code: "ASSISTANT_DELETE_PREVIEW_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const payload = body as Record<string, unknown>;
+    const target = payload.target === "chapter" || payload.target === "run" ? payload.target : "";
+    const bookId = typeof payload.bookId === "string" ? payload.bookId.trim() : "";
+    const chapter = typeof payload.chapter === "number" ? payload.chapter : Number.NaN;
+    const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
+    const errors: Array<{ field: string; message: string }> = [];
+    if (target !== "chapter" && target !== "run") errors.push({ field: "target", message: "target must be chapter or run" });
+    if (!bookId) errors.push({ field: "bookId", message: "bookId must be a non-empty string" });
+    if (target === "chapter" && (!Number.isInteger(chapter) || chapter < 1)) {
+      errors.push({ field: "chapter", message: "chapter must be a positive integer when target is chapter" });
+    }
+    if (target === "run" && !runId) {
+      errors.push({ field: "runId", message: "runId must be a non-empty string when target is run" });
+    }
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_DELETE_PREVIEW_VALIDATION_FAILED", errors }, 422);
+    }
+
+    let preview: AssistantCrudDeletePreview;
+    if (target === "chapter") {
+      const chapterFile = await resolveChapterFile(bookId, chapter);
+      if (!chapterFile) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Chapter not found." } }, 404);
+      }
+      const runs = await chapterRunStore.listRuns(bookId, { chapter, limit: 100 });
+      const evidence = pickEvidenceLines(chapterFile.content, undefined, 2).map((entry) => ({
+        source: readRelativeSource(root, chapterFile.filePath),
+        locator: `line:${entry.line}`,
+        excerpt: entry.excerpt,
+      }));
+      preview = {
+        target,
+        bookId,
+        impactSummary: `将软删除章节文件 ${chapterFile.fileName}，并影响 ${runs.length} 条关联 run 记录（不删除 run）。`,
+        evidence,
+        previewId: `asst_del_preview_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+        confirmBy: new Date(Date.now() + ASSISTANT_DELETE_PREVIEW_TTL_MS).toISOString(),
+      };
+      assistantDeletePreviews.set(preview.previewId, {
+        body: { target, bookId, chapter },
+        expiresAt: Date.now() + ASSISTANT_DELETE_PREVIEW_TTL_MS,
+      });
+    } else {
+      const run = await chapterRunStore.getRun(bookId, runId, { includeDeleted: true });
+      if (!run) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Run not found." } }, 404);
+      }
+      if (run.deletedAt) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_ALREADY_DELETED", message: "Run already soft-deleted." } }, 409);
+      }
+      const terminalEvent = [...run.events].reverse().find((event) => event.type === "success" || event.type === "fail");
+      preview = {
+        target,
+        bookId,
+        impactSummary: `将软删除 run ${run.runId}（${run.actionType}/chapter ${run.chapter}）。`,
+        evidence: [{
+          source: `chapter-run:${run.runId}`,
+          locator: terminalEvent ? `event:${terminalEvent.index}` : "event:n/a",
+          excerpt: terminalEvent?.message?.trim() || `${run.actionType} ${run.status}`,
+        }],
+        previewId: `asst_del_preview_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+        confirmBy: new Date(Date.now() + ASSISTANT_DELETE_PREVIEW_TTL_MS).toISOString(),
+      };
+      assistantDeletePreviews.set(preview.previewId, {
+        body: { target, bookId, runId },
+        expiresAt: Date.now() + ASSISTANT_DELETE_PREVIEW_TTL_MS,
+      });
+    }
+
+    return c.json({ ok: true, requiresConfirmation: true, preview });
+  });
+
+  app.post("/api/assistant/delete/execute", async (c) => {
+    const body = await c.req.json<unknown>().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({
+        code: "ASSISTANT_DELETE_EXECUTE_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const payload = body as Record<string, unknown>;
+    const previewId = typeof payload.previewId === "string" ? payload.previewId.trim() : "";
+    const confirmed = payload.confirmed === true;
+    const errors: Array<{ field: string; message: string }> = [];
+    if (!previewId) errors.push({ field: "previewId", message: "previewId must be a non-empty string" });
+    if (!confirmed) errors.push({ field: "confirmed", message: "confirmed must be true to execute delete" });
+    if (errors.length > 0) return c.json({ code: "ASSISTANT_DELETE_EXECUTE_VALIDATION_FAILED", errors }, 422);
+
+    const draft = assistantDeletePreviews.get(previewId);
+    if (!draft || draft.expiresAt < Date.now()) {
+      assistantDeletePreviews.delete(previewId);
+      return c.json({ error: { code: "ASSISTANT_DELETE_PREVIEW_EXPIRED", message: "Delete preview expired." } }, 409);
+    }
+    assistantDeletePreviews.delete(previewId);
+
+    const deletedAt = new Date().toISOString();
+    const recoverBefore = new Date(Date.now() + ASSISTANT_DELETE_RECOVERY_WINDOW_MS).toISOString();
+    const restoreId = `asst_restore_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    if (draft.body.target === "chapter") {
+      const chapter = draft.body.chapter!;
+      const chapterFile = await resolveChapterFile(draft.body.bookId, chapter);
+      if (!chapterFile) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Chapter not found." } }, 404);
+      }
+      await appendAssistantDeleteRecoveryEntry({
+        restoreId,
+        target: "chapter",
+        bookId: draft.body.bookId,
+        chapter,
+        chapterFileName: chapterFile.fileName,
+        chapterContent: chapterFile.content,
+        deletedAt,
+        recoverBefore,
+      });
+      await unlink(chapterFile.filePath);
+      broadcast("assistant:delete:executed", {
+        target: "chapter",
+        bookId: draft.body.bookId,
+        chapter,
+        restoreId,
+        deletedAt,
+        recoverBefore,
+      });
+      return c.json({
+        ok: true,
+        target: "chapter",
+        bookId: draft.body.bookId,
+        chapter,
+        restoreId,
+        deletedAt,
+        recoverBefore,
+      });
+    }
+
+    const run = await chapterRunStore.getRun(draft.body.bookId, draft.body.runId!, { includeDeleted: true });
+    if (!run) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Run not found." } }, 404);
+    }
+    const removed = await chapterRunStore.deleteRun(draft.body.bookId, draft.body.runId!);
+    if (!removed) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_ALREADY_DELETED", message: "Run already soft-deleted." } }, 409);
+    }
+    await appendAssistantDeleteRecoveryEntry({
+      restoreId,
+      target: "run",
+      bookId: draft.body.bookId,
+      chapter: run.chapter,
+      runId: run.runId,
+      deletedAt,
+      recoverBefore,
+    });
+    broadcast("assistant:delete:executed", {
+      target: "run",
+      bookId: draft.body.bookId,
+      runId: run.runId,
+      chapter: run.chapter,
+      restoreId,
+      deletedAt,
+      recoverBefore,
+    });
+    return c.json({
+      ok: true,
+      target: "run",
+      bookId: draft.body.bookId,
+      runId: run.runId,
+      chapter: run.chapter,
+      restoreId,
+      deletedAt,
+      recoverBefore,
+    });
+  });
+
+  app.post("/api/assistant/delete/restore", async (c) => {
+    const body = await c.req.json<unknown>().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({
+        code: "ASSISTANT_DELETE_RESTORE_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const payload = body as Record<string, unknown>;
+    const restoreId = typeof payload.restoreId === "string" ? payload.restoreId.trim() : "";
+    if (!restoreId) {
+      return c.json({
+        code: "ASSISTANT_DELETE_RESTORE_VALIDATION_FAILED",
+        errors: [{ field: "restoreId", message: "restoreId must be a non-empty string" }],
+      }, 422);
+    }
+    const store = await loadAssistantDeleteRecoveryStore();
+    const entry = store.entries.find((item) => item.restoreId === restoreId);
+    if (!entry) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_RESTORE_NOT_FOUND", message: "Restore entry not found." } }, 404);
+    }
+    if (entry.restoredAt) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_ALREADY_RESTORED", message: "Entry already restored." } }, 409);
+    }
+    if (Date.parse(entry.recoverBefore) < Date.now()) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_RESTORE_EXPIRED", message: "Restore window expired." } }, 410);
+    }
+
+    if (entry.target === "chapter") {
+      const chapter = entry.chapter ?? 0;
+      const fileName = entry.chapterFileName ?? "";
+      if (!chapter || !fileName || entry.chapterContent === undefined) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_RESTORE_CORRUPTED", message: "Restore payload is corrupted." } }, 500);
+      }
+      const chapterPath = join(state.bookDir(entry.bookId), "chapters", fileName);
+      await writeFile(chapterPath, entry.chapterContent, "utf-8");
+      await markAssistantDeleteRecoveryRestored(restoreId);
+      broadcast("assistant:delete:restored", {
+        target: "chapter",
+        bookId: entry.bookId,
+        chapter,
+        restoreId,
+      });
+      return c.json({ ok: true, target: "chapter", bookId: entry.bookId, chapter, restoreId });
+    }
+
+    const restored = await chapterRunStore.restoreRun(entry.bookId, entry.runId ?? "");
+    if (!restored) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_RESTORE_FAILED", message: "Run restore failed." } }, 409);
+    }
+    await markAssistantDeleteRecoveryRestored(restoreId);
+    broadcast("assistant:delete:restored", {
+      target: "run",
+      bookId: entry.bookId,
+      runId: entry.runId,
+      restoreId,
+    });
+    return c.json({ ok: true, target: "run", bookId: entry.bookId, runId: entry.runId, restoreId });
+  });
+
+  app.post("/api/assistant/crud", async (c) => {
+    const body = await c.req.json<unknown>().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({
+        code: "ASSISTANT_CRUD_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const payload = body as Record<string, unknown>;
+    const input = typeof payload.input === "string" ? payload.input.trim() : "";
+    const bookId = typeof payload.bookId === "string" ? payload.bookId.trim() : "";
+    if (!input) {
+      return c.json({ code: "ASSISTANT_CRUD_VALIDATION_FAILED", errors: [{ field: "input", message: "input must be a non-empty string" }] }, 422);
+    }
+
+    if (ASSISTANT_CRUD_RESTORE_PATTERN.test(input)) {
+      const restoreId = (typeof payload.restoreId === "string" ? payload.restoreId.trim() : "")
+        || input.match(ASSISTANT_CRUD_RESTORE_ID_PATTERN)?.[1]
+        || "";
+      if (!restoreId) {
+        return c.json({ code: "ASSISTANT_CRUD_VALIDATION_FAILED", errors: [{ field: "restoreId", message: "restoreId is required for restore prompts" }] }, 422);
+      }
+      const response = await app.request("http://localhost/api/assistant/delete/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ restoreId }),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) return c.json(result, response.status as 400);
+      return c.json({ kind: "delete-restored", restoreId, result });
+    }
+
+    if (ASSISTANT_CRUD_DELETE_PATTERN.test(input)) {
+      const previewId = typeof payload.previewId === "string" ? payload.previewId.trim() : "";
+      if (payload.confirmed === true && previewId) {
+        const response = await app.request("http://localhost/api/assistant/delete/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ previewId, confirmed: true }),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) return c.json(result, response.status as 400);
+        return c.json({ kind: "delete-executed", result });
+      }
+      if (!bookId) {
+        return c.json({ code: "ASSISTANT_CRUD_VALIDATION_FAILED", errors: [{ field: "bookId", message: "bookId is required for delete prompts" }] }, 422);
+      }
+      const runId = input.match(ASSISTANT_CRUD_RUN_ID_PATTERN)?.[1];
+      const chapter = parseAssistantChapterFromInput(input);
+      const targetPayload = runId
+        ? { target: "run", bookId, runId }
+        : { target: "chapter", bookId, chapter };
+      const response = await app.request("http://localhost/api/assistant/delete/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(targetPayload),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) return c.json(result, response.status as 400);
+      return c.json({ kind: "delete-preview", result });
+    }
+
+    if (ASSISTANT_CRUD_READ_PATTERN.test(input)) {
+      if (!bookId) {
+        return c.json({ code: "ASSISTANT_CRUD_VALIDATION_FAILED", errors: [{ field: "bookId", message: "bookId is required for read prompts" }] }, 422);
+      }
+      const dimension = parseAssistantCrudDimensionFromInput(input);
+      const chapter = dimension === "chapter" ? parseAssistantChapterFromInput(input) : undefined;
+      const response = await app.request("http://localhost/api/assistant/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dimension,
+          bookId,
+          ...(chapter !== undefined ? { chapter } : {}),
+          ...(typeof payload.keyword === "string" ? { keyword: payload.keyword } : {}),
+        }),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) return c.json(result, response.status as 400);
+      return c.json({ kind: "read", result });
+    }
+
+    return c.json({
+      error: {
+        code: "ASSISTANT_CRUD_INTENT_UNKNOWN",
+        message: "Unable to detect read/delete/restore intent from input.",
+      },
+    }, 422);
   });
 
   app.post("/api/assistant/plan", async (c) => {

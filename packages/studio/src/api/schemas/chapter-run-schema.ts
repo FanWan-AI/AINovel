@@ -29,6 +29,8 @@ export interface ChapterRunRecord {
   readonly error: string | null;
   readonly startedAt: string;
   readonly finishedAt: string | null;
+  readonly deletedAt?: string | null;
+  readonly deletedReason?: string | null;
   readonly events: readonly ChapterRunEvent[];
 }
 
