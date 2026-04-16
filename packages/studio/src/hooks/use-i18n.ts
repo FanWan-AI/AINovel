@@ -132,6 +132,8 @@ export const strings = {
   "assistant.templateWeeklyPlan": { zh: "本周更新计划", en: "Weekly Update Plan" },
   "assistant.templateRiskPrefix": { zh: "风险等级 ", en: "Risk " },
   "assistant.templateRiskGateHint": { zh: "高风险模板默认 L1，需先确认计划后执行。", en: "High-risk templates default to L1 and require plan confirmation before execution." },
+  "assistant.flywheelLabel": { zh: "飞轮建议", en: "Flywheel" },
+  "assistant.templateContinuePrefix": { zh: "一键继续：", en: "Continue: " },
   "assistant.inputPlaceholder": { zh: "输入你的问题或需求…", en: "Ask anything about your writing task…" },
 
   // Sidebar

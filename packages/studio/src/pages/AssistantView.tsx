@@ -1169,10 +1169,12 @@ function AssistantCrudDeleteCard({
 }
 
 export function AssistantTemplateSuggestionCard({
+  t,
   taskId,
   suggestedNextActions,
   onRunNextAction,
 }: {
+  readonly t: TFunction;
   readonly taskId: string;
   readonly suggestedNextActions: ReadonlyArray<string>;
   readonly onRunNextAction: (action: string) => void;
@@ -1181,8 +1183,12 @@ export function AssistantTemplateSuggestionCard({
     return null;
   }
   return (
-    <section className="mt-3 rounded-xl border border-border/70 bg-card/40 p-3 space-y-2" data-testid="assistant-template-suggestion-card">
-      <div className="text-xs text-muted-foreground">Flywheel · taskId={taskId}</div>
+    <section
+      className="mt-3 rounded-xl border border-border/70 bg-card/40 p-3 space-y-2"
+      data-testid="assistant-template-suggestion-card"
+      aria-label={t("assistant.flywheelLabel")}
+    >
+      <div className="text-xs text-muted-foreground">{t("assistant.flywheelLabel")} · taskId={taskId}</div>
       <div className="flex flex-wrap items-center gap-2">
         {suggestedNextActions.map((action) => (
           <button
@@ -1192,7 +1198,7 @@ export function AssistantTemplateSuggestionCard({
             className="h-8 rounded-md border border-border px-3 text-xs text-muted-foreground hover:text-primary"
             data-testid="assistant-template-next-action"
           >
-            一键继续：{action}
+            {t("assistant.templateContinuePrefix")}{action}
           </button>
         ))}
       </div>
@@ -1255,10 +1261,12 @@ export function AssistantView({
     if (!state.taskPlan) {
       return "";
     }
+    const baseLabel = t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action] ?? "assistant.actionTemplate");
     if (state.taskPlan.action !== "template") {
-      return t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action]);
+      return baseLabel;
     }
-    const templateLabel = state.taskPlan.templateId ? t(resolveAssistantPromptTemplate(state.taskPlan.templateId)?.labelKey ?? "assistant.actionTemplate") : t("assistant.actionTemplate");
+    const template = state.taskPlan.templateId ? resolveAssistantPromptTemplate(state.taskPlan.templateId) : null;
+    const templateLabel = template ? t(template.labelKey) : baseLabel;
     const riskLabel = state.taskPlan.templateRiskLevel ? ` · ${t("assistant.templateRiskPrefix")}${state.taskPlan.templateRiskLevel}` : "";
     return `${templateLabel}${riskLabel}`;
   }, [state.taskPlan, t]);
@@ -1368,6 +1376,13 @@ export function AssistantView({
     }
     const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
     const taskId = state.taskExecution.taskId;
+    const applySuggestedNextActions = (
+      prev: AssistantComposerState,
+      suggestedNextActions: ReadonlyArray<string>,
+    ): AssistantComposerState => ({
+      ...prev,
+      suggestedNextActions: resolveAssistantTemplateSuggestedActions(prev.taskPlan, suggestedNextActions),
+    });
     void (async () => {
       try {
         const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
@@ -1376,15 +1391,23 @@ export function AssistantView({
           ...(runIds.length > 0 ? { runIds } : {}),
         });
         setState((prev) => ({
-          ...prev,
+          ...applySuggestedNextActions(prev, result.suggestedNextActions),
           qualityReport: result.report,
-          suggestedNextActions: resolveAssistantTemplateSuggestedActions(prev.taskPlan, result.suggestedNextActions),
         }));
       } catch {
-        setState((prev) => ({
-          ...prev,
-          suggestedNextActions: resolveAssistantTemplateSuggestedActions(prev.taskPlan, prev.suggestedNextActions),
-        }));
+        setState((prev) => {
+          const suggestedNextActions = resolveAssistantTemplateSuggestedActions(prev.taskPlan, prev.suggestedNextActions);
+          if (
+            suggestedNextActions.length === prev.suggestedNextActions.length
+            && suggestedNextActions.every((item, index) => item === prev.suggestedNextActions[index])
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            suggestedNextActions,
+          };
+        });
       }
     })();
   }, [state.taskExecution, state.taskPlan]);
@@ -1398,11 +1421,13 @@ export function AssistantView({
       setScopeBlockHint(t("assistant.scopeBlocked"));
       return;
     }
-    setScopeBlockHint(
-      template.riskLevel === "L1"
-        ? t("assistant.templateRiskGateHint")
-        : "",
-    );
+    setScopeBlockHint((prev) => {
+      if (template.riskLevel === "L1") {
+        return t("assistant.templateRiskGateHint");
+      }
+      const riskHint = t("assistant.templateRiskGateHint");
+      return prev === riskHint ? "" : prev;
+    });
     setState((prev) => requestAssistantConfirmation(prev, draft));
   };
 
@@ -1783,6 +1808,7 @@ export function AssistantView({
           <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
           {state.taskExecution && state.taskExecution.status !== "running" && (
             <AssistantTemplateSuggestionCard
+              t={t}
               taskId={state.taskExecution.taskId}
               suggestedNextActions={resolveAssistantTemplateSuggestedActions(state.taskPlan, state.suggestedNextActions)}
               onRunNextAction={handleRunNextAction}
@@ -1800,6 +1826,7 @@ export function AssistantView({
                 onClick={() => handleRunTemplate(template)}
                 className="rounded-lg border border-border bg-background px-3 py-2 text-left text-xs hover:border-primary/40 hover:bg-primary/5"
                 data-testid={`assistant-template-${template.id}`}
+                aria-label={`${t(template.labelKey)} ${t("assistant.templateRiskPrefix")}${template.riskLevel}`}
               >
                 <span className="block text-foreground">{t(template.labelKey)}</span>
                 <span className="mt-1 block text-muted-foreground">{t("assistant.templateRiskPrefix")}{template.riskLevel}</span>

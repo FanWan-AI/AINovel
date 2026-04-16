@@ -268,12 +268,14 @@ describe("AssistantView", () => {
     expect(resolveAssistantTemplateSuggestedActions(pending.taskPlan, ["spot-fix"])).toEqual(["spot-fix"]);
 
     const html = renderToStaticMarkup(createElement(AssistantTemplateSuggestionCard, {
+      t: ((key) => String(key)) as TFunction,
       taskId: "asst_t_template_1",
       suggestedNextActions: resolved,
       onRunNextAction: vi.fn(),
     }));
     expect(html).toContain("taskId=asst_t_template_1");
     expect(html).toContain("assistant-template-next-action");
+    expect(html).toContain("assistant.templateContinuePrefix");
   });
 
   it("collects non-empty run ids from step run mapping", () => {
