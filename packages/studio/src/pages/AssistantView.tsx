@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BotMessageSquare, Loader2, Send, Sparkles } from "lucide-react";
 import type { Theme } from "../hooks/use-theme";
-import type { TFunction } from "../hooks/use-i18n";
+import type { StringKey, TFunction } from "../hooks/use-i18n";
 import { fetchJson, postApi, useApi } from "../hooks/use-api";
 import {
   parseAssistantOperatorCommand,
@@ -67,13 +67,17 @@ export interface AssistantOperatorSession {
 
 export type AssistantBookScopeMode = "single" | "multi" | "all-active";
 
-export type AssistantBookActionType = "write-next" | "audit";
+export type AssistantBookActionType = "write-next" | "audit" | "template";
+export type AssistantTemplateRiskLevel = "L0" | "L1";
 
 export interface AssistantConfirmationDraft {
   readonly action: AssistantBookActionType;
   readonly prompt: string;
   readonly targetBookIds: ReadonlyArray<string>;
   readonly chapterNumber?: number;
+  readonly templateId?: string;
+  readonly templateRiskLevel?: AssistantTemplateRiskLevel;
+  readonly templateNextAction?: string;
 }
 
 export type AssistantTaskPlanStatus = "draft" | "awaiting-confirm" | "running" | "succeeded" | "failed" | "cancelled";
@@ -158,6 +162,14 @@ export interface AssistantCrudDeleteExecuteResponse {
   readonly recoverBefore: string;
 }
 
+export interface AssistantPromptTemplate {
+  readonly id: string;
+  readonly labelKey: StringKey;
+  readonly prompt: string;
+  readonly riskLevel: AssistantTemplateRiskLevel;
+  readonly defaultNextAction: string;
+}
+
 interface AssistantTaskSnapshot {
   readonly taskId: string;
   readonly sessionId: string;
@@ -193,9 +205,10 @@ const CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
 const CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
-const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit"> = {
+const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit" | "assistant.actionTemplate"> = {
   "write-next": "assistant.actionWriteNext",
   audit: "assistant.actionAudit",
+  template: "assistant.actionTemplate",
 };
 const ASSISTANT_EVENT_SET = new Set([
   "assistant:step:start",
@@ -229,6 +242,37 @@ export const ASSISTANT_QUICK_ACTIONS: ReadonlyArray<AssistantQuickAction> = [
   { id: "outline", label: "生成大纲", prompt: "请帮我生成下一章节的大纲。" },
   { id: "recap", label: "总结进度", prompt: "请总结当前剧情进度和关键冲突。" },
   { id: "style", label: "优化文风", prompt: "请给我 3 条当前文本的文风优化建议。" },
+];
+
+export const ASSISTANT_PROMPT_TEMPLATES: ReadonlyArray<AssistantPromptTemplate> = [
+  {
+    id: "template-structure",
+    labelKey: "assistant.templateStructure",
+    prompt: "请基于当前目标输入生成 3 卷 30 章结构，并给出蓝图与章节计划。",
+    riskLevel: "L1",
+    defaultNextAction: "write-next",
+  },
+  {
+    id: "template-write-next",
+    labelKey: "assistant.templateWriteNextAudit",
+    prompt: "请按当前设定写下一章并完成一次自审。",
+    riskLevel: "L0",
+    defaultNextAction: "re-audit",
+  },
+  {
+    id: "template-audit-repair",
+    labelKey: "assistant.templateRecentAuditRepair",
+    prompt: "请审计最近三章并给出最小修复方案，然后执行 spot-fix。",
+    riskLevel: "L1",
+    defaultNextAction: "write-next",
+  },
+  {
+    id: "template-weekly-plan",
+    labelKey: "assistant.templateWeeklyPlan",
+    prompt: "请生成本周更新计划（字数、节奏、伏笔）并标注关键风险。",
+    riskLevel: "L0",
+    defaultNextAction: "write-next",
+  },
 ];
 
 export function createAssistantInitialState(): AssistantComposerState {
@@ -778,6 +822,41 @@ export function resolveAssistantBookTitlesByIds(
   return targetBookIds.map((id) => titleById.get(id) ?? t("assistant.scopeUnknownBook"));
 }
 
+export function resolveAssistantPromptTemplate(templateId: string): AssistantPromptTemplate | null {
+  return ASSISTANT_PROMPT_TEMPLATES.find((template) => template.id === templateId) ?? null;
+}
+
+export function buildAssistantTemplateConfirmationDraft(
+  template: AssistantPromptTemplate,
+  scopeMode: AssistantBookScopeMode,
+  selectedBookIds: ReadonlyArray<string>,
+  activeBookIds: ReadonlyArray<string>,
+): AssistantConfirmationDraft | null {
+  const targetBookIds = resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds);
+  if (targetBookIds.length === 0) return null;
+  return {
+    action: "template",
+    prompt: template.prompt,
+    targetBookIds,
+    templateId: template.id,
+    templateRiskLevel: template.riskLevel,
+    templateNextAction: template.defaultNextAction,
+  };
+}
+
+export function resolveAssistantTemplateSuggestedActions(
+  taskPlan: AssistantTaskPlan | null,
+  suggestedNextActions: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  if (suggestedNextActions.length > 0) {
+    return suggestedNextActions;
+  }
+  if (taskPlan?.action === "template" && taskPlan.templateNextAction) {
+    return [taskPlan.templateNextAction];
+  }
+  return [];
+}
+
 export function detectAssistantBookAction(prompt: string): AssistantBookActionType | null {
   const normalized = prompt.trim().toLowerCase();
   if (!normalized) return null;
@@ -1089,6 +1168,38 @@ function AssistantCrudDeleteCard({
   );
 }
 
+export function AssistantTemplateSuggestionCard({
+  taskId,
+  suggestedNextActions,
+  onRunNextAction,
+}: {
+  readonly taskId: string;
+  readonly suggestedNextActions: ReadonlyArray<string>;
+  readonly onRunNextAction: (action: string) => void;
+}) {
+  if (suggestedNextActions.length === 0) {
+    return null;
+  }
+  return (
+    <section className="mt-3 rounded-xl border border-border/70 bg-card/40 p-3 space-y-2" data-testid="assistant-template-suggestion-card">
+      <div className="text-xs text-muted-foreground">Flywheel · taskId={taskId}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        {suggestedNextActions.map((action) => (
+          <button
+            key={`template-next-${action}`}
+            type="button"
+            onClick={() => onRunNextAction(action)}
+            className="h-8 rounded-md border border-border px-3 text-xs text-muted-foreground hover:text-primary"
+            data-testid="assistant-template-next-action"
+          >
+            一键继续：{action}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function AssistantView({
   nav,
   theme: _theme,
@@ -1122,6 +1233,7 @@ export function AssistantView({
   const taskRecoveryAppliedRef = useRef<string | null>(null);
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
+  const promptTemplates = useMemo(() => ASSISTANT_PROMPT_TEMPLATES, []);
   const activeBookIds = useMemo(() => activeBooks.map((book) => book.id), [activeBooks]);
   const selectedScopeBookIds = useMemo(
     () => resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds),
@@ -1139,6 +1251,17 @@ export function AssistantView({
     () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBookTitleById, t) : []),
     [state.taskPlan, activeBookTitleById, t],
   );
+  const taskPlanActionLabel = useMemo(() => {
+    if (!state.taskPlan) {
+      return "";
+    }
+    if (state.taskPlan.action !== "template") {
+      return t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action]);
+    }
+    const templateLabel = state.taskPlan.templateId ? t(resolveAssistantPromptTemplate(state.taskPlan.templateId)?.labelKey ?? "assistant.actionTemplate") : t("assistant.actionTemplate");
+    const riskLabel = state.taskPlan.templateRiskLevel ? ` · ${t("assistant.templateRiskPrefix")}${state.taskPlan.templateRiskLevel}` : "";
+    return `${templateLabel}${riskLabel}`;
+  }, [state.taskPlan, t]);
 
   useEffect(() => {
     const key = initialPromptKey ?? initialPrompt ?? "";
@@ -1255,13 +1378,33 @@ export function AssistantView({
         setState((prev) => ({
           ...prev,
           qualityReport: result.report,
-          suggestedNextActions: result.suggestedNextActions,
+          suggestedNextActions: resolveAssistantTemplateSuggestedActions(prev.taskPlan, result.suggestedNextActions),
         }));
       } catch {
-        // ignore evaluate errors, task timeline remains available
+        setState((prev) => ({
+          ...prev,
+          suggestedNextActions: resolveAssistantTemplateSuggestedActions(prev.taskPlan, prev.suggestedNextActions),
+        }));
       }
     })();
   }, [state.taskExecution, state.taskPlan]);
+
+  const handleRunTemplate = (template: AssistantPromptTemplate) => {
+    if (state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
+      return;
+    }
+    const draft = buildAssistantTemplateConfirmationDraft(template, scopeMode, selectedBookIds, activeBookIds);
+    if (!draft) {
+      setScopeBlockHint(t("assistant.scopeBlocked"));
+      return;
+    }
+    setScopeBlockHint(
+      template.riskLevel === "L1"
+        ? t("assistant.templateRiskGateHint")
+        : "",
+    );
+    setState((prev) => requestAssistantConfirmation(prev, draft));
+  };
 
   const sendPrompt = (rawPrompt: string) => {
     const normalizedPrompt = rawPrompt.trim();
@@ -1609,7 +1752,7 @@ export function AssistantView({
             <TaskPlanCard
               t={t}
               taskPlan={state.taskPlan}
-              actionLabel={t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action])}
+              actionLabel={taskPlanActionLabel}
               chapterLabel={state.taskPlan.chapterNumber ? `${t("assistant.confirmChapterPrefix")}${state.taskPlan.chapterNumber}` : undefined}
               targetBookTitles={taskPlanTargetBookTitles}
               onConfirm={handleConfirmAction}
@@ -1638,9 +1781,32 @@ export function AssistantView({
             onRestore={handleRestoreDelete}
           />
           <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
+          {state.taskExecution && state.taskExecution.status !== "running" && (
+            <AssistantTemplateSuggestionCard
+              taskId={state.taskExecution.taskId}
+              suggestedNextActions={resolveAssistantTemplateSuggestedActions(state.taskPlan, state.suggestedNextActions)}
+              onRunNextAction={handleRunNextAction}
+            />
+          )}
       </section>
 
       <section className="shrink-0 rounded-xl border border-border/70 bg-card/40 p-4 space-y-3" data-testid="assistant-input-panel">
+        <div className="space-y-2" data-testid="assistant-template-panel">
+          <div className="text-xs text-muted-foreground">{t("assistant.templateTitle")}</div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {promptTemplates.map((template) => (
+              <button
+                key={template.id}
+                onClick={() => handleRunTemplate(template)}
+                className="rounded-lg border border-border bg-background px-3 py-2 text-left text-xs hover:border-primary/40 hover:bg-primary/5"
+                data-testid={`assistant-template-${template.id}`}
+              >
+                <span className="block text-foreground">{t(template.labelKey)}</span>
+                <span className="mt-1 block text-muted-foreground">{t("assistant.templateRiskPrefix")}{template.riskLevel}</span>
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="flex flex-wrap gap-2">
           {quickActions.map((action) => (
             <button

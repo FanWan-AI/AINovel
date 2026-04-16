@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { parseAssistantOperatorCommand } from "../api/services/assistant-command-parser";
 import type { TFunction } from "../hooks/use-i18n";
 import {
+  ASSISTANT_PROMPT_TEMPLATES,
   ASSISTANT_QUICK_ACTIONS,
+  AssistantTemplateSuggestionCard,
   AssistantTimeline,
   AssistantView,
   applyAssistantInput,
@@ -15,6 +17,7 @@ import {
   buildAssistantConfirmationDraft,
   buildAssistantTaskRecoveryPayload,
   buildAssistantNextActionPrompt,
+  buildAssistantTemplateConfirmationDraft,
   collectAssistantStepRunIds,
   cancelAssistantPendingAction,
   confirmAssistantPendingAction,
@@ -30,6 +33,7 @@ import {
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
   resolveAssistantScopeBookIds,
+  resolveAssistantTemplateSuggestedActions,
   transitionAssistantTaskPlan,
   submitAssistantInput,
 } from "./AssistantView";
@@ -47,6 +51,7 @@ describe("AssistantView", () => {
     expect(html).toContain("assistant-scope-selector");
     expect(html).toContain("assistant-message-list");
     expect(html).toContain("assistant-input-panel");
+    expect(html).toContain("assistant-template-panel");
     expect(html).toContain("assistant-empty-state");
     expect(html).toContain("生成大纲");
   });
@@ -121,6 +126,25 @@ describe("AssistantView", () => {
   it("blocks book-level action draft when no scoped books are selected", () => {
     expect(buildAssistantConfirmationDraft("请写下一章", "single", [], [])).toBeNull();
     expect(buildAssistantConfirmationDraft("audit chapter 12", "all-active", [], [])).toBeNull();
+  });
+
+  it("injects template prompt params and L1 risk into confirmation draft", () => {
+    const structureTemplate = ASSISTANT_PROMPT_TEMPLATES.find((item) => item.id === "template-structure");
+    expect(structureTemplate).toBeTruthy();
+    const draft = buildAssistantTemplateConfirmationDraft(
+      structureTemplate!,
+      "single",
+      ["book-2"],
+      ["book-1", "book-2"],
+    );
+    expect(draft).toEqual({
+      action: "template",
+      prompt: structureTemplate!.prompt,
+      targetBookIds: ["book-2"],
+      templateId: "template-structure",
+      templateRiskLevel: "L1",
+      templateNextAction: "write-next",
+    });
   });
 
   it("supports full task-plan state transitions", () => {
@@ -233,6 +257,23 @@ describe("AssistantView", () => {
     expect(buildAssistantNextActionPrompt("spot-fix", state.taskPlan)).toContain("spot-fix");
     expect(buildAssistantNextActionPrompt("re-audit", state.taskPlan)).toContain("第3章");
     expect(buildAssistantNextActionPrompt("write-next", state.taskPlan)).toBe("请写下一章。");
+  });
+
+  it("returns template flywheel fallback action and renders one-click suggestion card", () => {
+    const template = ASSISTANT_PROMPT_TEMPLATES[1]!;
+    const templateDraft = buildAssistantTemplateConfirmationDraft(template, "single", ["book-1"], ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), templateDraft!, 10_100);
+    const resolved = resolveAssistantTemplateSuggestedActions(pending.taskPlan, []);
+    expect(resolved).toEqual([template.defaultNextAction]);
+    expect(resolveAssistantTemplateSuggestedActions(pending.taskPlan, ["spot-fix"])).toEqual(["spot-fix"]);
+
+    const html = renderToStaticMarkup(createElement(AssistantTemplateSuggestionCard, {
+      taskId: "asst_t_template_1",
+      suggestedNextActions: resolved,
+      onRunNextAction: vi.fn(),
+    }));
+    expect(html).toContain("taskId=asst_t_template_1");
+    expect(html).toContain("assistant-template-next-action");
   });
 
   it("collects non-empty run ids from step run mapping", () => {
