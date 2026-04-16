@@ -459,7 +459,13 @@ function appendAssistantOperatorExchange(
 }
 
 function buildAssistantOperatorReceipt(rawCommand: string, result: "ok" | "error", message: string): string {
-  return `${ASSISTANT_OPERATOR_RECEIPT_PREFIX}\n- command: ${rawCommand}\n- result: ${result}\n- message: ${message}`;
+  const safeCommand = sanitizeAssistantOperatorReceiptValue(rawCommand);
+  const safeMessage = sanitizeAssistantOperatorReceiptValue(message);
+  return `${ASSISTANT_OPERATOR_RECEIPT_PREFIX}\n- command: ${safeCommand}\n- result: ${result}\n- message: ${safeMessage}`;
+}
+
+function sanitizeAssistantOperatorReceiptValue(value: string): string {
+  return value.replace(/\r?\n/gu, " ").trim();
 }
 
 function buildAssistantOperatorStatusMessage(operatorSession: AssistantOperatorSession): string {
@@ -508,74 +514,74 @@ function runAssistantOperatorCommand(
   parsed: Extract<AssistantOperatorParseResult, { kind: "command" }>,
 ): { readonly session: AssistantOperatorSession; readonly result: "ok" | "error"; readonly message: string } {
   const command = parsed.command;
-  if (command.name === "goal") {
-    return {
-      session: { ...operatorSession, goal: command.goal },
-      result: "ok",
-      message: `已更新目标：${command.goal}`,
-    };
-  }
-  if (command.name === "status") {
-    return {
-      session: operatorSession,
-      result: "ok",
-      message: buildAssistantOperatorStatusMessage(operatorSession),
-    };
-  }
-  if (command.name === "pause") {
-    if (operatorSession.paused) {
+  switch (command.name) {
+    case "goal":
+      return {
+        session: { ...operatorSession, goal: command.goal },
+        result: "ok",
+        message: `已更新目标：${command.goal}`,
+      };
+    case "status":
       return {
         session: operatorSession,
-        result: "error",
-        message: "命令执行失败：会话已处于暂停状态。",
+        result: "ok",
+        message: buildAssistantOperatorStatusMessage(operatorSession),
       };
-    }
-    return {
-      session: { ...operatorSession, paused: true },
-      result: "ok",
-      message: "会话已暂停。",
-    };
-  }
-  if (command.name === "resume") {
-    if (!operatorSession.paused) {
+    case "pause":
+      if (operatorSession.paused) {
+        return {
+          session: operatorSession,
+          result: "error",
+          message: "命令执行失败：会话已处于暂停状态。",
+        };
+      }
+      return {
+        session: { ...operatorSession, paused: true },
+        result: "ok",
+        message: "会话已暂停。",
+      };
+    case "resume":
+      if (!operatorSession.paused) {
+        return {
+          session: operatorSession,
+          result: "error",
+          message: "命令执行失败：会话当前未暂停。",
+        };
+      }
+      return {
+        session: { ...operatorSession, paused: false },
+        result: "ok",
+        message: "会话已恢复。",
+      };
+    case "approve":
+      return {
+        session: { ...operatorSession, lastApprovedTarget: command.targetId },
+        result: "ok",
+        message: `已审批：${command.targetId}`,
+      };
+    case "rollback":
+      return {
+        session: { ...operatorSession, lastRollbackRunId: command.runId },
+        result: "ok",
+        message: `已触发回滚：${command.runId}`,
+      };
+    case "trace":
+      return {
+        session: { ...operatorSession, traceEnabled: command.enabled },
+        result: "ok",
+        message: `追踪已${command.enabled ? "开启" : "关闭"}。`,
+      };
+    case "budget":
       return {
         session: operatorSession,
-        result: "error",
-        message: "命令执行失败：会话当前未暂停。",
+        result: "ok",
+        message: `预算使用：${operatorSession.budget.spent}/${operatorSession.budget.limit} ${operatorSession.budget.currency}`,
       };
+    default: {
+      const exhaustive: never = command;
+      return exhaustive;
     }
-    return {
-      session: { ...operatorSession, paused: false },
-      result: "ok",
-      message: "会话已恢复。",
-    };
   }
-  if (command.name === "approve") {
-    return {
-      session: { ...operatorSession, lastApprovedTarget: command.targetId },
-      result: "ok",
-      message: `已审批：${command.targetId}`,
-    };
-  }
-  if (command.name === "rollback") {
-    return {
-      session: { ...operatorSession, lastRollbackRunId: command.runId },
-      result: "ok",
-      message: `已触发回滚：${command.runId}`,
-    };
-  }
-  if (command.name === "trace") {
-    return {
-      session: { ...operatorSession, traceEnabled: command.enabled },
-      result: "ok",
-      message: `追踪已${command.enabled ? "开启" : "关闭"}。`,
-    };
-  }
-  return {
-    session: operatorSession,
-    result: "ok",
-    message: `预算使用：${operatorSession.budget.spent}/${operatorSession.budget.limit} ${operatorSession.budget.currency}`,
-  };
 }
 
 export function resolveAssistantScopeBookIds(
@@ -844,31 +850,30 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {
       return;
     }
-    const taskExecution = state.taskExecution;
-    const taskPlan = state.taskPlan;
-    if (evaluatedTaskIdRef.current === taskExecution.taskId) {
+    if (evaluatedTaskIdRef.current === state.taskExecution.taskId) {
       return;
     }
-    evaluatedTaskIdRef.current = taskExecution.taskId;
+    evaluatedTaskIdRef.current = state.taskExecution.taskId;
 
-    const scope = taskPlan.chapterNumber !== undefined
+    const scope = state.taskPlan.chapterNumber !== undefined
       ? {
           type: "chapter" as const,
-          bookId: taskPlan.targetBookIds[0] ?? "",
-          chapter: taskPlan.chapterNumber,
+          bookId: state.taskPlan.targetBookIds[0] ?? "",
+          chapter: state.taskPlan.chapterNumber,
         }
       : {
           type: "book" as const,
-          bookId: taskPlan.targetBookIds[0] ?? "",
+          bookId: state.taskPlan.targetBookIds[0] ?? "",
         };
     if (!scope.bookId) {
       return;
     }
-    const runIds = collectAssistantStepRunIds(taskExecution.stepRunIds);
+    const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
+    const taskId = state.taskExecution.taskId;
     void (async () => {
       try {
         const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-          taskId: taskExecution.taskId,
+          taskId,
           scope,
           ...(runIds.length > 0 ? { runIds } : {}),
         });

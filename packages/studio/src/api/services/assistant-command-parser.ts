@@ -34,7 +34,7 @@ const COMMANDS = new Set<AssistantOperatorCommandName>([
   "budget",
 ]);
 
-function parseSingleArg(raw: string): string {
+function normalizeCommandArg(raw: string): string {
   return raw.trim();
 }
 
@@ -58,7 +58,7 @@ export function parseAssistantOperatorCommand(input: string): AssistantOperatorP
   }
 
   if (name === "goal") {
-    const goal = parseSingleArg(argText);
+    const goal = normalizeCommandArg(argText);
     if (!goal) {
       return { kind: "error", raw: normalized, error: "命令 /goal 需要目标描述。" };
     }
@@ -66,7 +66,7 @@ export function parseAssistantOperatorCommand(input: string): AssistantOperatorP
   }
 
   if (name === "approve") {
-    const targetId = parseSingleArg(argText);
+    const targetId = normalizeCommandArg(argText);
     if (!targetId) {
       return { kind: "error", raw: normalized, error: "命令 /approve 需要 stepId 或 taskId。" };
     }
@@ -74,7 +74,7 @@ export function parseAssistantOperatorCommand(input: string): AssistantOperatorP
   }
 
   if (name === "rollback") {
-    const runId = parseSingleArg(argText);
+    const runId = normalizeCommandArg(argText);
     if (!runId) {
       return { kind: "error", raw: normalized, error: "命令 /rollback 需要 runId。" };
     }
@@ -82,7 +82,7 @@ export function parseAssistantOperatorCommand(input: string): AssistantOperatorP
   }
 
   if (name === "trace") {
-    const mode = parseSingleArg(argText).toLowerCase();
+    const mode = normalizeCommandArg(argText).toLowerCase();
     if (mode !== "on" && mode !== "off") {
       return { kind: "error", raw: normalized, error: "命令 /trace 仅支持 on 或 off。" };
     }
