@@ -293,6 +293,26 @@ interface AssistantExecuteStepRef {
   readonly mode?: string;
 }
 
+interface AssistantTaskStepSnapshot {
+  readonly stepId: string;
+  readonly action?: string;
+  readonly runId?: string;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly error?: string;
+}
+
+interface AssistantTaskSnapshot {
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly currentStepId?: string;
+  readonly steps: Record<string, AssistantTaskStepSnapshot>;
+  readonly lastUpdatedAt: string;
+  readonly error?: string;
+}
+
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
@@ -424,6 +444,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const runtimeEvents: RuntimeEvent[] = [];
   let runtimeEventIdCounter = 0;
   let sseClientCount = 0;
+  const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
 
   function deriveEventSource(event: string): RuntimeEventSource {
     if (event.startsWith("daemon:")) return "daemon";
@@ -462,6 +483,64 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (runtimeEvents.length > RUNTIME_EVENTS_MAX_LIMIT) {
       runtimeEvents.splice(0, runtimeEvents.length - RUNTIME_EVENTS_MAX_LIMIT);
     }
+  }
+
+  function emitAssistantTaskEvent(
+    event: "assistant:step:start" | "assistant:step:success" | "assistant:step:fail" | "assistant:done",
+    payload: Record<string, unknown> & { readonly taskId: string; readonly sessionId: string },
+  ): void {
+    const timestamp = typeof payload.timestamp === "string" ? payload.timestamp : new Date().toISOString();
+    const data = { ...payload, timestamp };
+    const taskId = payload.taskId;
+    const previous = assistantTaskSnapshots.get(taskId);
+    const currentStepId = typeof payload.stepId === "string" ? payload.stepId : undefined;
+
+    if (event === "assistant:done") {
+      assistantTaskSnapshots.set(taskId, {
+        taskId,
+        sessionId: payload.sessionId,
+        status: payload.status === "succeeded" ? "succeeded" : "failed",
+        ...(currentStepId !== undefined ? { currentStepId } : {}),
+        steps: previous?.steps ?? {},
+        lastUpdatedAt: timestamp,
+        ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+      });
+      broadcast(event, data);
+      return;
+    }
+
+    const stepId = currentStepId;
+    const stepStatus = event === "assistant:step:start" ? "running" : event === "assistant:step:success" ? "succeeded" : "failed";
+    const previousStep = stepId ? previous?.steps?.[stepId] : undefined;
+    const nextSteps = {
+      ...(previous?.steps ?? {}),
+      ...(stepId
+        ? {
+          [stepId]: {
+            stepId,
+            ...(typeof payload.action === "string" ? { action: payload.action } : {}),
+            ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
+            status: stepStatus,
+            ...(stepStatus === "running"
+              ? { startedAt: timestamp }
+              : { ...(previousStep?.startedAt !== undefined ? { startedAt: previousStep.startedAt } : {}), finishedAt: timestamp }),
+            ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+          } satisfies AssistantTaskStepSnapshot,
+        }
+        : {}),
+    };
+
+    assistantTaskSnapshots.set(taskId, {
+      taskId,
+      sessionId: payload.sessionId,
+      status: event === "assistant:step:fail" ? "failed" : "running",
+      ...(stepId !== undefined ? { currentStepId: stepId } : {}),
+      steps: nextSteps,
+      lastUpdatedAt: timestamp,
+      ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+    });
+
+    broadcast(event, data);
   }
 
   // Register a subscriber that captures all broadcast events into the runtime event log
@@ -1991,7 +2070,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const auditRunId = generateAssistantRunId();
     const reAuditRunId = generateAssistantRunId();
 
-    broadcast("assistant:step:start", {
+    emitAssistantTaskEvent("assistant:step:start", {
       taskId,
       sessionId,
       stepId: auditStep.stepId,
@@ -2006,7 +2085,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     );
     if (!auditResponse.ok) {
       const error = await parseApiErrorMessage(auditResponse);
-      broadcast("assistant:step:fail", {
+      emitAssistantTaskEvent("assistant:step:fail", {
         taskId,
         sessionId,
         stepId: auditStep.stepId,
@@ -2026,7 +2105,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         },
       }, 500);
     }
-    broadcast("assistant:step:success", {
+    emitAssistantTaskEvent("assistant:step:success", {
       taskId,
       sessionId,
       stepId: auditStep.stepId,
@@ -2049,7 +2128,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const error = !reviseResponse.ok
         ? await parseApiErrorMessage(reviseResponse)
         : "revise step did not return runId";
-      broadcast("assistant:step:fail", {
+      emitAssistantTaskEvent("assistant:step:fail", {
         taskId,
         sessionId,
         stepId: reviseStep.stepId,
@@ -2068,7 +2147,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 500);
     }
     const reviseRunId = revisePayload["runId"];
-    broadcast("assistant:step:start", {
+    emitAssistantTaskEvent("assistant:step:start", {
       taskId,
       sessionId,
       stepId: reviseStep.stepId,
@@ -2083,7 +2162,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         const reviseRun = await waitForChapterRunCompletion(reviseStep.bookId, reviseRunId);
         if (reviseRun.status !== "succeeded") {
           const error = reviseRun.error ?? "revise step failed";
-          broadcast("assistant:step:fail", {
+          emitAssistantTaskEvent("assistant:step:fail", {
             taskId,
             sessionId,
             stepId: reviseStep.stepId,
@@ -2093,11 +2172,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             chapter: reviseStep.chapter,
             error,
           });
-          broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+          emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
           return;
         }
 
-        broadcast("assistant:step:success", {
+        emitAssistantTaskEvent("assistant:step:success", {
           taskId,
           sessionId,
           stepId: reviseStep.stepId,
@@ -2106,7 +2185,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           bookId: reviseStep.bookId,
           chapter: reviseStep.chapter,
         });
-        broadcast("assistant:step:start", {
+        emitAssistantTaskEvent("assistant:step:start", {
           taskId,
           sessionId,
           stepId: reAuditStep.stepId,
@@ -2121,7 +2200,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         );
         if (!reAuditResponse.ok) {
           const error = await parseApiErrorMessage(reAuditResponse);
-          broadcast("assistant:step:fail", {
+          emitAssistantTaskEvent("assistant:step:fail", {
             taskId,
             sessionId,
             stepId: reAuditStep.stepId,
@@ -2131,10 +2210,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             chapter: reAuditStep.chapter,
             error,
           });
-          broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+          emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
           return;
         }
-        broadcast("assistant:step:success", {
+        emitAssistantTaskEvent("assistant:step:success", {
           taskId,
           sessionId,
           stepId: reAuditStep.stepId,
@@ -2143,10 +2222,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           bookId: reAuditStep.bookId,
           chapter: reAuditStep.chapter,
         });
-        broadcast("assistant:done", { taskId, sessionId, status: "succeeded" });
+        emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "succeeded" });
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e);
-        broadcast("assistant:done", { taskId, sessionId, status: "failed", error });
+        emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
       }
     })();
 
@@ -2161,6 +2240,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       },
       currentStepId: reviseStep.stepId,
     });
+  });
+
+  app.get("/api/assistant/tasks/:taskId", (c) => {
+    const taskId = c.req.param("taskId");
+    const snapshot = assistantTaskSnapshots.get(taskId);
+    if (!snapshot) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_TASK_NOT_FOUND",
+          message: "Assistant task was not found.",
+        },
+      }, 404);
+    }
+    return c.json(snapshot);
   });
 
   // --- Language setup ---

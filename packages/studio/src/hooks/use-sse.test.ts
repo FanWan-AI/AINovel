@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeStudioEventName, STUDIO_SSE_EVENTS } from "./use-sse";
+import { normalizeStudioEventName, STUDIO_SSE_EVENTS, subscribeStudioSSEEvents } from "./use-sse";
 
 describe("STUDIO_SSE_EVENTS", () => {
   it("covers the server lifecycle events that drive the UI", () => {
@@ -60,6 +60,10 @@ describe("STUDIO_SSE_EVENTS", () => {
       "agent:start",
       "agent:complete",
       "agent:error",
+      "assistant:step:start",
+      "assistant:step:success",
+      "assistant:step:fail",
+      "assistant:done",
       "import:start",
       "import:complete",
       "import:error",
@@ -90,5 +94,24 @@ describe("STUDIO_SSE_EVENTS", () => {
     expect(normalizeStudioEventName("resync:error")).toBe("resync:fail");
     expect(normalizeStudioEventName("anti-detect:error")).toBe("anti-detect:fail");
     expect(normalizeStudioEventName("rewrite:success")).toBe("rewrite:success");
+  });
+
+  it("subscribes and unsubscribes all studio sse events", () => {
+    const added: string[] = [];
+    const removed: string[] = [];
+    const source = {
+      addEventListener: (event: string) => {
+        added.push(event);
+      },
+      removeEventListener: (event: string) => {
+        removed.push(event);
+      },
+    };
+    const unsubscribe = subscribeStudioSSEEvents(source, () => undefined);
+
+    expect(added).toEqual(STUDIO_SSE_EVENTS);
+
+    unsubscribe();
+    expect(removed).toEqual(STUDIO_SSE_EVENTS);
   });
 });

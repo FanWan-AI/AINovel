@@ -521,6 +521,20 @@ describe("createStudioServer daemon lifecycle", () => {
       expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "spot-fix");
       expect(auditChapterMock).toHaveBeenCalledTimes(2);
     });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_001");
+      expect(task.status).toBe(200);
+      const payload = await task.json() as { status: string; lastUpdatedAt: string };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.lastUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    const assistantEvents = await app.request("http://localhost/api/runtime/events?event=assistant:step:start&limit=5");
+    expect(assistantEvents.status).toBe(200);
+    const assistantEventBody = await assistantEvents.json() as { entries: Array<{ data: { taskId?: string; timestamp?: string } }> };
+    expect(assistantEventBody.entries[0]?.data.taskId).toBe("asst_t_execute_001");
+    expect(assistantEventBody.entries[0]?.data.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it("blocks unapproved assistant execute requests", async () => {
