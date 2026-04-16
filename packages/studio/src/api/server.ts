@@ -722,14 +722,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     timeoutMs = 30_000,
   ): Promise<ChapterRunRecord> {
     const started = Date.now();
+    let delayMs = 100;
     while (Date.now() - started < timeoutMs) {
       const run = await chapterRunStore.getRun(bookId, runId);
       if (run && run.status !== "running") {
         return run;
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
     }
     throw new Error(`Timed out waiting for chapter run ${runId}`);
+  }
+
+  function generateAssistantRunId(): string {
+    return `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   }
 
   function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
@@ -1982,8 +1988,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 422);
     }
 
-    const auditRunId = `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-    const reAuditRunId = `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const auditRunId = generateAssistantRunId();
+    const reAuditRunId = generateAssistantRunId();
 
     broadcast("assistant:step:start", {
       taskId,
@@ -2048,7 +2054,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         sessionId,
         stepId: reviseStep.stepId,
         action: reviseStep.action,
-        runId: null,
         bookId: reviseStep.bookId,
         chapter: reviseStep.chapter,
         error,
