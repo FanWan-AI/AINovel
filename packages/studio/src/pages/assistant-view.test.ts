@@ -11,6 +11,7 @@ import {
   applyAssistantTaskEventFromSSE,
   buildAssistantConfirmationDraft,
   buildAssistantNextActionPrompt,
+  collectAssistantStepRunIds,
   cancelAssistantPendingAction,
   confirmAssistantPendingAction,
   completeAssistantTaskPlanExecution,
@@ -216,5 +217,13 @@ describe("AssistantView", () => {
     expect(buildAssistantNextActionPrompt("spot-fix", state.taskPlan)).toContain("spot-fix");
     expect(buildAssistantNextActionPrompt("re-audit", state.taskPlan)).toContain("第3章");
     expect(buildAssistantNextActionPrompt("write-next", state.taskPlan)).toBe("请写下一章。");
+  });
+
+  it("collects non-empty run ids from step run mapping", () => {
+    expect(collectAssistantStepRunIds({
+      s1: "run_1",
+      s2: "",
+      s3: "run_3",
+    })).toEqual(["run_1", "run_3"]);
   });
 });

@@ -80,6 +80,8 @@ type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | 
 type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged";
 const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
+const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
+const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
 const BRIEF_TRACE_MAX_ITEMS = 8;
 const WRITING_GOVERNANCE_SCHEMA_VERSION = 1;
 const WRITING_STYLE_TEMPLATE_VALUES = ["narrative-balance", "dialogue-driven", "cinematic"] as const;
@@ -993,10 +995,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const blockingIssues = [
       ...failedRuns
-        .map((run) => run.error?.trim() || `章节 ${run.chapter} 的 ${run.actionType} 运行失败`)
+        .map((run) => run.error?.trim() || `章节 ${run.chapter} 的 ${run.actionType}${ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE}`)
         .filter((issue) => issue.length > 0),
       ...unchangedRuns
-        .map((run) => run.unchangedReason?.trim() || `章节 ${run.chapter} 未应用修订，建议人工复核`)
+        .map((run) => run.unchangedReason?.trim() || `章节 ${run.chapter}${ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE}`)
         .filter((issue) => issue.length > 0),
     ];
 

@@ -553,6 +553,16 @@ export function buildAssistantNextActionPrompt(action: string, taskPlan: Assista
   return `请执行下一步动作：${action}`;
 }
 
+export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | undefined): string[] {
+  if (!stepRunIds) return [];
+  return Object.entries(stepRunIds).reduce<string[]>((acc, [, runId]) => {
+    if (runId.length > 0) {
+      acc.push(runId);
+    }
+    return acc;
+  }, []);
+}
+
 function EmptyConversation() {
   return (
     <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground/80 px-6" data-testid="assistant-empty-state">
@@ -676,7 +686,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     if (!scope.bookId) {
       return;
     }
-    const runIds = Object.values(state.taskExecution.stepRunIds ?? {}).filter((runId) => runId.length > 0);
+    const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
     void (async () => {
       try {
         const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {

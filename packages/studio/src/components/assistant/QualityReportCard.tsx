@@ -79,17 +79,22 @@ export function QualityReportCard({
       </div>
       <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
         {dimensionRows.map((dimension) => (
-          <div key={dimension.key} className="rounded-md border border-border/50 px-2 py-1" data-testid="assistant-quality-dimension-row">
+          <div
+            key={dimension.key}
+            className="rounded-md border border-border/50 px-2 py-1"
+            data-testid="assistant-quality-dimension-row"
+            aria-label={`${dimension.label} ${dimension.score}`}
+          >
             {dimension.label}：{dimension.score}
           </div>
         ))}
       </div>
       {report.blockingIssues.length > 0 && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-destructive">阻断问题</div>
-          <ul className="space-y-1 text-xs text-destructive/90">
+        <div className="text-xs font-medium text-destructive">阻断问题</div>
+          <ul className="list-disc pl-4 space-y-1 text-xs text-destructive/90">
             {report.blockingIssues.map((issue, index) => (
-              <li key={`${issue}-${index}`} data-testid="assistant-quality-blocking-issue">• {issue}</li>
+              <li key={`${issue}-${index}`} data-testid="assistant-quality-blocking-issue">{issue}</li>
             ))}
           </ul>
         </div>
@@ -114,6 +119,7 @@ export function QualityReportCard({
               onClick={() => onRunNextAction(action)}
               className="h-8 rounded-md border border-border px-3 text-xs text-muted-foreground hover:text-primary"
               data-testid="assistant-quality-next-action"
+              aria-label={`执行下一步动作 ${action}`}
             >
               下一步：{action}
             </button>
