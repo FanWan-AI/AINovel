@@ -789,12 +789,12 @@ describe("createStudioServer daemon lifecycle", () => {
       terminationReason: string;
       targetScore: number;
       iterations: Array<{ iteration: number; score?: number; reason?: string }>;
-      retryContext: unknown;
+      retryContext?: unknown;
     };
     expect(payload.status).toBe("succeeded");
     expect(payload.terminationReason).toBe("target-score-reached");
     expect(payload.targetScore).toBe(80);
-    expect(payload.retryContext).toBeNull();
+    expect(payload.retryContext).toBeUndefined();
     expect(payload.iterations).toHaveLength(1);
     expect(payload.iterations[0]?.iteration).toBe(1);
     expect(payload.iterations[0]?.score).toBeGreaterThanOrEqual(80);

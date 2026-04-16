@@ -2658,7 +2658,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const targetScore = clampSerializableScore(rawTargetScore);
     const runIds: string[] = [];
     const iterations: AssistantOptimizeIteration[] = [];
-    let terminationReason: "target-score-reached" | "max-iterations-reached" | "iteration-failed" = "max-iterations-reached";
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       const stepId = `optimize-${iteration}`;
@@ -2794,7 +2793,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const report = deriveAssistantEvaluateReport(optimizeRuns, scope);
       const score = report.overallScore;
       const reachedTarget = score >= targetScore;
-      const isLastIteration = iteration >= maxIterations;
+      const isLastIteration = iteration === maxIterations;
       const stopReason = reachedTarget ? "target-score-reached" : isLastIteration ? "max-iterations-reached" : undefined;
       iterations.push({
         iteration,
@@ -2825,7 +2824,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         timestamp: new Date().toISOString(),
       });
       if (reachedTarget) {
-        terminationReason = "target-score-reached";
         emitAssistantTaskEvent("assistant:done", {
           taskId,
           sessionId,
@@ -2836,16 +2834,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           taskId,
           sessionId,
           status: "succeeded",
-          terminationReason,
+          terminationReason: "target-score-reached",
           finalScore: score,
           targetScore,
           maxIterations,
           iterations,
-          retryContext: null,
         });
       }
       if (isLastIteration) {
-        terminationReason = "max-iterations-reached";
         const retryContext = {
           scope,
           targetScore,
@@ -2866,7 +2862,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           taskId,
           sessionId,
           status: "needs_confirmation",
-          terminationReason,
+          terminationReason: "max-iterations-reached",
           finalScore: score,
           targetScore,
           maxIterations,
@@ -2878,22 +2874,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     return c.json({
-      taskId,
-      sessionId,
-      status: "needs_confirmation",
-      terminationReason,
-      targetScore,
-      maxIterations,
-      iterations,
-      nextAction: "manual-confirmation",
-      retryContext: {
-        scope,
-        targetScore,
-        maxIterations,
-        completedIterations: iterations.length,
-        runIds,
+      error: {
+        code: "ASSISTANT_OPTIMIZE_TERMINATION_UNREACHABLE",
+        message: "Optimize loop ended without a terminal state.",
       },
-    });
+    }, 500);
+
   });
 
   app.get("/api/assistant/tasks/:taskId", (c) => {
