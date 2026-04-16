@@ -8,6 +8,7 @@ import {
   resolveInitialRouteFromSearch,
   routeToRuntimeCenterFromLegacy,
   routeToSettingsFromLegacy,
+  routeToAssistant,
 } from "./App";
 
 describe("deriveActiveBookId", () => {
@@ -116,5 +117,20 @@ describe("buildHeaderQuickActions", () => {
     expect(toSettings).toHaveBeenCalledTimes(1);
     expect(actions[0]?.active).toBe(true);
     expect(actions[1]?.active).toBe(false);
+  });
+});
+
+describe("routeToAssistant", () => {
+  it("returns assistant route with trimmed prompt payload for ChatBar handoff", () => {
+    expect(routeToAssistant("  审计第5章  ", 123456)).toEqual({
+      page: "assistant",
+      prompt: "审计第5章",
+      promptKey: "123456",
+    });
+  });
+
+  it("returns plain assistant route when prompt is empty", () => {
+    expect(routeToAssistant("   ")).toEqual({ page: "assistant" });
+    expect(routeToAssistant()).toEqual({ page: "assistant" });
   });
 });
