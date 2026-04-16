@@ -8,6 +8,7 @@ import {
   AssistantTimeline,
   AssistantView,
   applyAssistantInput,
+  applyAssistantIncomingPrompt,
   applyAssistantOperatorCommand,
   applyAssistantQuickAction,
   applyAssistantTaskEventFromSSE,
@@ -62,6 +63,13 @@ describe("AssistantView", () => {
     expect(completed.loading).toBe(false);
     expect(completed.messages).toHaveLength(2);
     expect(completed.messages[1]?.role).toBe("assistant");
+  });
+
+  it("hydrates assistant input from forwarded ChatBar prompt", () => {
+    const state = createAssistantInitialState();
+    const next = applyAssistantIncomingPrompt(state, "  请帮我审计第5章  ");
+    expect(next.input).toBe("请帮我审计第5章");
+    expect(applyAssistantIncomingPrompt(state, "   ")).toBe(state);
   });
 
   it("submits prompt when quick action is clicked", () => {

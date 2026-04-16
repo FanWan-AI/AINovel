@@ -1,6 +1,5 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect } from "react";
 import type { TFunction } from "../hooks/use-i18n";
-import type { SSEMessage } from "../hooks/use-sse";
 import { cn } from "../lib/utils";
 import { fetchJson, postApi } from "../hooks/use-api";
 import {
@@ -316,26 +315,15 @@ function QuickChip({ icon, label, onClick }: {
 
 // ── Main Component ──
 
-export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
+export function ChatPanel({ open, onClose, onSubmitPrompt, t }: {
   readonly open: boolean;
   readonly onClose: () => void;
+  readonly onSubmitPrompt: (prompt: string) => void;
   readonly t: TFunction;
-  readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
-  readonly activeBookId?: string;
 }) {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ReadonlyArray<ChatMessage>>([]);
-  const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const isZh = t("nav.connected") === "已连接";
-
-  // Auto-scroll on new messages
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-    }
-  }, [messages, sse.messages.length]);
 
   // Focus input when panel opens
   useEffect(() => {
@@ -344,152 +332,17 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
     }
   }, [open]);
 
-  // SSE events → assistant messages
-  useEffect(() => {
-    const recent = sse.messages.slice(-1)[0];
-    if (!recent || recent.event === "ping") return;
-
-    const d = recent.data as Record<string, unknown>;
-    const actionUpdate = resolveChatActionSseUpdate(recent.event, d, isZh);
-    if (actionUpdate) {
-      if (actionUpdate.done) {
-        setLoading(false);
-      }
-      setMessages((prev) => {
-        if (actionUpdate.message.startsWith("⋯")) {
-          const last = prev[prev.length - 1];
-          if (last?.role === "assistant" && last.content.startsWith("⋯")) {
-            return [...prev.slice(0, -1), { role: "assistant", content: actionUpdate.message, timestamp: Date.now() }];
-          }
-        }
-        return [...prev, { role: "assistant", content: actionUpdate.message, timestamp: Date.now() }];
-      });
+  const handleSubmitPrompt = (rawPrompt: string) => {
+    const normalizedPrompt = rawPrompt.trim();
+    if (!normalizedPrompt) {
       return;
     }
-
-    if (recent.event === "log" && loading) {
-      const msg = d.message as string;
-      if (msg && (msg.includes("Phase") || msg.includes("streaming") || msg.includes("Writing") || msg.includes("Audit") || msg.includes("Revis"))) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.role === "assistant" && last.content.startsWith("⋯")) {
-            return [...prev.slice(0, -1), { role: "assistant", content: `⋯ ${msg}`, timestamp: Date.now() }];
-          }
-          return [...prev, { role: "assistant", content: `⋯ ${msg}`, timestamp: Date.now() }];
-        });
-      }
-    }
-  }, [isZh, loading, sse.messages.length]);
-
-  // Current phase for status bar
-  const currentPhase = useMemo(() => {
-    const lastStatus = [...messages].reverse().find((m) => m.role === "assistant" && m.content.startsWith("⋯"));
-    return lastStatus?.content.replace("⋯ ", "") ?? "Initializing...";
-  }, [messages]);
-
-  const handleSubmit = async () => {
-    const text = input.trim();
-    if (!text || loading) return;
-
+    onSubmitPrompt(normalizedPrompt);
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: text, timestamp: Date.now() }]);
-    setLoading(true);
-
-    const normalizedPrompt = text.trim();
-
-    try {
-      const intent = detectChatActionIntent(normalizedPrompt);
-      if (intent) {
-        if (intent.type === "audit" && !intent.chapterNumber) {
-          setLoading(false);
-          setMessages((prev) => [...prev, {
-            role: "assistant",
-            content: isZh ? "✗ 请指定要审计的章节，例如“审计第5章”。" : '✗ Please specify a chapter to audit, e.g. "audit chapter 5".',
-            timestamp: Date.now(),
-          }]);
-          return;
-        }
-
-        let targetBookId: string | null = null;
-        if (intent.type !== "market-radar") {
-          const { books } = await fetchJson<{ books: ReadonlyArray<BookRef> }>("/books");
-          const target = resolveDirectWriteTarget(activeBookId, books);
-          targetBookId = target.bookId;
-          if (!targetBookId) {
-            setLoading(false);
-            setMessages((prev) => [...prev, {
-              role: "assistant",
-              content:
-                target.reason === "missing"
-                  ? (isZh ? "✗ 还没有书，先创建一本再执行该动作。" : "✗ No books yet. Create one first.")
-                  : (isZh ? "✗ 当前有多本书，请先打开目标书籍后再执行。" : "✗ Multiple books found. Open the target book first."),
-              timestamp: Date.now(),
-            }]);
-            return;
-          }
-        }
-
-        const path = buildChatActionApiPath(intent, targetBookId);
-        if (!path) {
-          setLoading(false);
-          setMessages((prev) => [...prev, {
-            role: "assistant",
-            content: isZh ? "✗ 参数不完整，无法执行该动作。" : "✗ Missing parameters for this action.",
-            timestamp: Date.now(),
-          }]);
-          return;
-        }
-
-        setMessages((prev) => [...prev, {
-          role: "assistant",
-          content: isZh ? "⋯ 动作已启动，正在执行…" : "⋯ Action started, running...",
-          timestamp: Date.now(),
-        }]);
-
-        const result = await postApi<Record<string, unknown>>(path);
-        if (intent.type === "write-next") {
-          setMessages((prev) => [...prev, {
-            role: "assistant",
-            content: isZh ? "⋯ 写作任务已提交，等待完成事件…" : "⋯ Write-next request accepted, waiting for completion...",
-            timestamp: Date.now(),
-          }]);
-          return;
-        }
-        setLoading(false);
-        setMessages((prev) => [...prev, {
-          role: "assistant",
-          content: buildChatActionSuccessMessage(intent, isZh, result),
-          timestamp: Date.now(),
-        }]);
-        return;
-      }
-
-      const data = await fetchJson<{ response?: string; error?: string }>("/agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction: text }),
-      });
-      setLoading(false);
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: data.response ?? data.error ?? "Acknowledged.",
-        timestamp: Date.now(),
-      }]);
-    } catch (e) {
-      setLoading(false);
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: `✗ ${e instanceof Error ? e.message : String(e)}`,
-        timestamp: Date.now(),
-      }]);
-    }
   };
 
   const handleQuickCommand = (command: string) => {
-    setInput(command);
-    setTimeout(() => {
-      handleSubmit();
-    }, 50);
+    handleSubmitPrompt(command);
   };
 
   // Rotating tips
@@ -526,9 +379,6 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
             <div className="flex items-center gap-2.5">
               <div className="relative">
                 <Sparkles size={15} className="text-primary chat-icon-glow" />
-                {loading && (
-                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-primary rounded-full animate-ping" />
-                )}
               </div>
               <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-muted-foreground">
                 NovaScribe Assistant
@@ -536,9 +386,9 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
             </div>
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setMessages([])}
+                onClick={() => setInput("")}
                 className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors group"
-                title="Clear conversation"
+                title="Clear input"
               >
                 <Trash2 size={14} className="group-hover:animate-[shake_0.3s_ease-in-out]" />
               </button>
@@ -552,37 +402,10 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
             </div>
           </div>
 
-          {/* ── Section 2: Status Bar (when loading) ── */}
-          {loading && (
-            <div className="shrink-0 px-4 py-2 border-b border-border/30 bg-primary/[0.03] fade-in">
-              <div className="flex items-center gap-2.5">
-                <StatusIcon phase={currentPhase} />
-                <span className="text-xs font-medium text-primary truncate flex-1">
-                  {currentPhase}
-                </span>
-                <div className="flex gap-1">
-                  <span className="w-1 h-1 bg-primary/40 rounded-full chat-typing-dot" />
-                  <span className="w-1 h-1 bg-primary/40 rounded-full chat-typing-dot" />
-                  <span className="w-1 h-1 bg-primary/40 rounded-full chat-typing-dot" />
-                </div>
-              </div>
+          <div className="flex-1 px-4 py-4">
+            <div className="h-full rounded-xl border border-dashed border-border/40 bg-secondary/10 px-4 py-3 text-xs text-muted-foreground leading-relaxed">
+              {isZh ? "输入后将跳转到 Assistant 主工作区，并保留该 prompt。" : "Submitting here opens Assistant workspace with the same prompt."}
             </div>
-          )}
-
-          {/* ── Section 3: Messages ── */}
-          <div
-            ref={scrollRef}
-            className="flex-1 overflow-y-auto px-4 py-4 space-y-3"
-          >
-            {messages.length === 0 && !loading && <EmptyState />}
-
-            {messages.map((msg) => (
-              <MessageBubble key={msg.timestamp} msg={msg} />
-            ))}
-
-            {loading && !messages.some((m) => m.content.startsWith("⋯")) && (
-              <ThinkingBubble />
-            )}
           </div>
 
           {/* ── Section 4: Quick Commands ── */}
@@ -621,24 +444,19 @@ export function ChatPanel({ open, onClose, t, sse, activeBookId }: {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    handleSubmit();
+                    handleSubmitPrompt(input);
                   }
                 }}
                 placeholder={t("common.enterCommand")}
-                disabled={loading}
                 className="flex-1 bg-transparent text-sm placeholder:text-muted-foreground/50 outline-none ring-0 shadow-none disabled:opacity-50"
                 style={{ outline: "none", boxShadow: "none" }}
               />
               <button
-                onClick={handleSubmit}
-                disabled={!input.trim() || loading}
+                onClick={() => handleSubmitPrompt(input)}
+                disabled={!input.trim()}
                 className="w-7 h-7 rounded-lg bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 active:scale-95 transition-all disabled:opacity-20 disabled:scale-100 shadow-sm shadow-primary/20"
               >
-                {loading ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <ArrowUp size={14} strokeWidth={2.5} />
-                )}
+                <ArrowUp size={14} strokeWidth={2.5} />
               </button>
             </div>
 

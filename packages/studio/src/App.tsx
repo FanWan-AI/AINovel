@@ -34,7 +34,7 @@ import type { SSEMessage } from "./hooks/use-sse";
 
 export type Route =
   | { page: "dashboard" }
-  | { page: "assistant" }
+  | { page: "assistant"; prompt?: string; promptKey?: string }
   | { page: "book"; bookId: string }
   | { page: "book-create" }
   | { page: "book-create-entry" }
@@ -96,6 +96,14 @@ export function resolveInitialRouteFromSearch(search: string): Route {
     return { page: "settings", tab };
   }
   return { page: "dashboard" };
+}
+
+export function routeToAssistant(prompt?: string, now = Date.now()): Route {
+  const normalizedPrompt = prompt?.trim() ?? "";
+  if (!normalizedPrompt) {
+    return { page: "assistant" };
+  }
+  return { page: "assistant", prompt: normalizedPrompt, promptKey: String(now) };
 }
 
 function replaceSearchParams(params: URLSearchParams) {
@@ -239,7 +247,7 @@ export function App() {
 
   const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
-    toAssistant: () => setRoute({ page: "assistant" }),
+    toAssistant: () => setRoute(routeToAssistant()),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookCreate: () => setRoute({ page: "book-create-entry" }),
     toBookCreateEntry: () => setRoute({ page: "book-create-entry" }),
@@ -454,7 +462,15 @@ export function App() {
         <main className="flex-1 overflow-y-auto scroll-smooth">
           <div className={contentContainerClass}>
             {currentRoute.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
-            {currentRoute.page === "assistant" && <AssistantView nav={nav} theme={theme} t={t} />}
+            {currentRoute.page === "assistant" && (
+              <AssistantView
+                nav={nav}
+                theme={theme}
+                t={t}
+                initialPrompt={currentRoute.prompt}
+                initialPromptKey={currentRoute.promptKey}
+              />
+            )}
             {currentRoute.page === "book" && <BookDetail bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} sse={sse} />}
             {currentRoute.page === "book-create" && <BookCreate nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "book-create-entry" && <BookCreateEntry nav={nav} theme={theme} t={t} />}
@@ -486,9 +502,11 @@ export function App() {
       <ChatPanel
         open={chatOpen}
         onClose={() => setChatOpen(false)}
+        onSubmitPrompt={(prompt) => {
+          setRoute(routeToAssistant(prompt));
+          setChatOpen(false);
+        }}
         t={t}
-        sse={sse}
-        activeBookId={activeBookId}
       />
     </div>
   );

@@ -383,6 +383,14 @@ export function applyAssistantInput(state: AssistantComposerState, input: string
   };
 }
 
+export function applyAssistantIncomingPrompt(state: AssistantComposerState, prompt: string): AssistantComposerState {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return state;
+  }
+  return applyAssistantInput(state, normalizedPrompt);
+}
+
 export function submitAssistantInput(
   state: AssistantComposerState,
   prompt: string,
@@ -785,7 +793,19 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
   );
 }
 
-export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
+export function AssistantView({
+  nav,
+  theme: _theme,
+  t,
+  initialPrompt,
+  initialPromptKey,
+}: {
+  nav: Nav;
+  theme: Theme;
+  t: TFunction;
+  initialPrompt?: string;
+  initialPromptKey?: string;
+}) {
   const [state, setState] = useState<AssistantComposerState>(() => createAssistantInitialState());
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { messages: sseMessages } = useSSE();
@@ -798,6 +818,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
   const [scopeMode, setScopeMode] = useState<AssistantBookScopeMode>("all-active");
   const [selectedBookIds, setSelectedBookIds] = useState<ReadonlyArray<string>>([]);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
+  const consumedPromptKeyRef = useRef<string | null>(null);
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
   const activeBookIds = useMemo(() => activeBooks.map((book) => book.id), [activeBooks]);
@@ -817,6 +838,19 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBookTitleById, t) : []),
     [state.taskPlan, activeBookTitleById, t],
   );
+
+  useEffect(() => {
+    const key = initialPromptKey ?? initialPrompt ?? "";
+    if (!key || consumedPromptKeyRef.current === key) {
+      return;
+    }
+    consumedPromptKeyRef.current = key;
+    if (!initialPrompt) {
+      return;
+    }
+    setScopeBlockHint("");
+    setState((prev) => applyAssistantIncomingPrompt(prev, initialPrompt));
+  }, [initialPrompt, initialPromptKey]);
 
   useEffect(() => {
     if (sseCursorRef.current >= sseMessages.length) {
