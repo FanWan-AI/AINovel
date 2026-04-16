@@ -3,6 +3,10 @@ import { BotMessageSquare, Loader2, Send, Sparkles } from "lucide-react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { fetchJson, postApi, useApi } from "../hooks/use-api";
+import {
+  parseAssistantOperatorCommand,
+  type AssistantOperatorParseResult,
+} from "../api/services/assistant-command-parser";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
 import { QualityReportCard, type QualityReportPayload } from "../components/assistant/QualityReportCard";
 import { cn } from "../lib/utils";
@@ -28,6 +32,7 @@ export interface AssistantComposerState {
   readonly taskExecution: AssistantTaskExecution | null;
   readonly qualityReport: QualityReportPayload | null;
   readonly suggestedNextActions: ReadonlyArray<string>;
+  readonly operatorSession: AssistantOperatorSession;
 }
 
 export interface AssistantQuickAction {
@@ -40,6 +45,19 @@ interface BookSummary {
   readonly id: string;
   readonly title: string;
   readonly status: string;
+}
+
+export interface AssistantOperatorSession {
+  readonly goal: string | null;
+  readonly paused: boolean;
+  readonly traceEnabled: boolean;
+  readonly lastApprovedTarget: string | null;
+  readonly lastRollbackRunId: string | null;
+  readonly budget: {
+    readonly spent: number;
+    readonly limit: number;
+    readonly currency: string;
+  };
 }
 
 export type AssistantBookScopeMode = "single" | "multi" | "all-active";
@@ -131,6 +149,19 @@ const VALID_ASSISTANT_TASK_PLAN_TRANSITIONS: Record<AssistantTaskPlanStatus, Rea
   failed: [],
   cancelled: [],
 };
+const ASSISTANT_OPERATOR_RECEIPT_PREFIX = "[Operator Receipt]";
+const ASSISTANT_DEFAULT_OPERATOR_SESSION: AssistantOperatorSession = {
+  goal: null,
+  paused: false,
+  traceEnabled: false,
+  lastApprovedTarget: null,
+  lastRollbackRunId: null,
+  budget: {
+    spent: 0,
+    limit: 0,
+    currency: "tokens",
+  },
+};
 
 export const ASSISTANT_QUICK_ACTIONS: ReadonlyArray<AssistantQuickAction> = [
   { id: "outline", label: "生成大纲", prompt: "请帮我生成下一章节的大纲。" },
@@ -148,6 +179,7 @@ export function createAssistantInitialState(): AssistantComposerState {
     taskExecution: null,
     qualityReport: null,
     suggestedNextActions: [],
+    operatorSession: ASSISTANT_DEFAULT_OPERATOR_SESSION,
   };
 }
 
@@ -370,6 +402,7 @@ export function submitAssistantInput(
     taskExecution: state.taskExecution,
     qualityReport: state.qualityReport,
     suggestedNextActions: state.suggestedNextActions,
+    operatorSession: state.operatorSession,
   };
 }
 
@@ -385,6 +418,7 @@ export function completeAssistantResponse(
     taskExecution: state.taskExecution,
     qualityReport: state.qualityReport,
     suggestedNextActions: state.suggestedNextActions,
+    operatorSession: state.operatorSession,
     messages: [...state.messages, {
       id: `msg-${state.nextMessageId}`,
       role: "assistant",
@@ -401,6 +435,153 @@ export function applyAssistantQuickAction(
   now = Date.now(),
 ): AssistantComposerState {
   return submitAssistantInput(state, action.prompt, now);
+}
+
+function appendAssistantOperatorExchange(
+  state: AssistantComposerState,
+  prompt: string,
+  receipt: string,
+  now = Date.now(),
+): AssistantComposerState {
+  return {
+    ...state,
+    input: "",
+    loading: false,
+    messages: [
+      ...state.messages,
+      { id: `msg-${state.nextMessageId}`, role: "user", content: prompt, timestamp: now },
+      { id: `msg-${state.nextMessageId + 1}`, role: "assistant", content: receipt, timestamp: now },
+    ],
+    nextMessageId: state.nextMessageId + 2,
+    qualityReport: state.qualityReport,
+    suggestedNextActions: state.suggestedNextActions,
+  };
+}
+
+function buildAssistantOperatorReceipt(rawCommand: string, result: "ok" | "error", message: string): string {
+  const safeCommand = sanitizeAssistantOperatorReceiptValue(rawCommand);
+  const safeMessage = sanitizeAssistantOperatorReceiptValue(message);
+  return `${ASSISTANT_OPERATOR_RECEIPT_PREFIX}\n- command: ${safeCommand}\n- result: ${result}\n- message: ${safeMessage}`;
+}
+
+function sanitizeAssistantOperatorReceiptValue(value: string): string {
+  return value.replace(/\r?\n/gu, " ").trim();
+}
+
+function buildAssistantOperatorStatusMessage(operatorSession: AssistantOperatorSession): string {
+  const budget = operatorSession.budget;
+  return [
+    `goal=${operatorSession.goal ?? "未设置"}`,
+    `session=${operatorSession.paused ? "paused" : "running"}`,
+    `trace=${operatorSession.traceEnabled ? "on" : "off"}`,
+    `budget=${budget.spent}/${budget.limit} ${budget.currency}`,
+  ].join("; ");
+}
+
+export function applyAssistantOperatorCommand(
+  state: AssistantComposerState,
+  prompt: string,
+  now = Date.now(),
+): AssistantComposerState | null {
+  const parsed = parseAssistantOperatorCommand(prompt);
+  if (parsed.kind === "not-command") {
+    return null;
+  }
+  if (parsed.kind === "error") {
+    return appendAssistantOperatorExchange(
+      state,
+      parsed.raw,
+      buildAssistantOperatorReceipt(parsed.raw, "error", parsed.error),
+      now,
+    );
+  }
+
+  const rawCommand = parsed.raw;
+  const commandResult = runAssistantOperatorCommand(state.operatorSession, parsed);
+  return appendAssistantOperatorExchange(
+    {
+      ...state,
+      operatorSession: commandResult.session,
+    },
+    rawCommand,
+    buildAssistantOperatorReceipt(rawCommand, commandResult.result, commandResult.message),
+    now,
+  );
+}
+
+function runAssistantOperatorCommand(
+  operatorSession: AssistantOperatorSession,
+  parsed: Extract<AssistantOperatorParseResult, { kind: "command" }>,
+): { readonly session: AssistantOperatorSession; readonly result: "ok" | "error"; readonly message: string } {
+  const command = parsed.command;
+  switch (command.name) {
+    case "goal":
+      return {
+        session: { ...operatorSession, goal: command.goal },
+        result: "ok",
+        message: `已更新目标：${command.goal}`,
+      };
+    case "status":
+      return {
+        session: operatorSession,
+        result: "ok",
+        message: buildAssistantOperatorStatusMessage(operatorSession),
+      };
+    case "pause":
+      if (operatorSession.paused) {
+        return {
+          session: operatorSession,
+          result: "error",
+          message: "命令执行失败：会话已处于暂停状态。",
+        };
+      }
+      return {
+        session: { ...operatorSession, paused: true },
+        result: "ok",
+        message: "会话已暂停。",
+      };
+    case "resume":
+      if (!operatorSession.paused) {
+        return {
+          session: operatorSession,
+          result: "error",
+          message: "命令执行失败：会话当前未暂停。",
+        };
+      }
+      return {
+        session: { ...operatorSession, paused: false },
+        result: "ok",
+        message: "会话已恢复。",
+      };
+    case "approve":
+      return {
+        session: { ...operatorSession, lastApprovedTarget: command.targetId },
+        result: "ok",
+        message: `已审批：${command.targetId}`,
+      };
+    case "rollback":
+      return {
+        session: { ...operatorSession, lastRollbackRunId: command.runId },
+        result: "ok",
+        message: `已触发回滚：${command.runId}`,
+      };
+    case "trace":
+      return {
+        session: { ...operatorSession, traceEnabled: command.enabled },
+        result: "ok",
+        message: `追踪已${command.enabled ? "开启" : "关闭"}。`,
+      };
+    case "budget":
+      return {
+        session: operatorSession,
+        result: "ok",
+        message: `预算使用：${operatorSession.budget.spent}/${operatorSession.budget.limit} ${operatorSession.budget.currency}`,
+      };
+    default: {
+      const exhaustive: never = command;
+      return exhaustive;
+    }
+  }
 }
 
 export function resolveAssistantScopeBookIds(
@@ -487,6 +668,7 @@ export function requestAssistantConfirmation(
     taskExecution: null,
     qualityReport: null,
     suggestedNextActions: [],
+    operatorSession: state.operatorSession,
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalizedPrompt, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
   };
@@ -687,10 +869,11 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
       return;
     }
     const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
+    const taskId = state.taskExecution.taskId;
     void (async () => {
       try {
         const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-          taskId: state.taskExecution.taskId,
+          taskId,
           scope,
           ...(runIds.length > 0 ? { runIds } : {}),
         });
@@ -707,7 +890,17 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
 
   const sendPrompt = (rawPrompt: string) => {
     const normalizedPrompt = rawPrompt.trim();
-    if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
+    if (!normalizedPrompt) {
+      return;
+    }
+
+    const commandState = applyAssistantOperatorCommand(state, normalizedPrompt);
+    if (commandState) {
+      setScopeBlockHint("");
+      setState(commandState);
+      return;
+    }
+    if (state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
       return;
     }
 
