@@ -19,6 +19,7 @@ const saveChapterIndexMock = vi.fn();
 const loadChapterIndexMock = vi.fn();
 const createLLMClientMock = vi.fn(() => ({}));
 const chatCompletionMock = vi.fn();
+const runAgentLoopMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
 const pipelineConfigs: unknown[] = [];
 
@@ -113,6 +114,7 @@ vi.mock("@actalk/inkos-core", () => {
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
     chatCompletion: chatCompletionMock,
+    runAgentLoop: runAgentLoopMock,
     loadProjectConfig: loadProjectConfigMock,
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
@@ -275,6 +277,8 @@ describe("createStudioServer daemon lifecycle", () => {
       content: "pong",
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
     });
+    runAgentLoopMock.mockReset();
+    runAgentLoopMock.mockResolvedValue("mock-agent-reply");
     loadProjectConfigMock.mockReset();
     loadProjectConfigMock.mockImplementation(async () => {
       const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8")) as Record<string, unknown>;
@@ -813,6 +817,24 @@ describe("createStudioServer daemon lifecycle", () => {
       expect(payload.evidence[0]?.locator).toContain("line:");
       expect(payload.evidence[0]?.excerpt).toEqual(expect.any(String));
     }
+  });
+
+  it("routes assistant general chat through agent loop", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "你是谁？",
+        instruction: "请直接回答并说明你是小说创作助手。",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, response: "mock-agent-reply" });
+    expect(runAgentLoopMock).toHaveBeenCalledTimes(1);
   });
 
   it("supports assistant soft-delete preview/execute/restore for chapter and run", async () => {

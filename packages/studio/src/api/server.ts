@@ -515,9 +515,9 @@ interface AssistantOptimizeIteration {
   readonly reason?: string;
 }
 
-const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
+const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
-const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
+const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
 const ASSISTANT_CRUD_READ_PATTERN = /查询|查看|检索|read|search/iu;
 const ASSISTANT_CRUD_DELETE_PATTERN = /删除|delete/iu;
 const ASSISTANT_CRUD_RESTORE_PATTERN = /恢复|restore/iu;
@@ -530,6 +530,21 @@ const ASSISTANT_CRUD_RESTORE_ID_PATTERN = /(asst_restore_[a-z0-9]+)/iu;
 const ASSISTANT_INTERNAL_API_BASE = "http://localhost";
 const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
+const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
+
+function buildAssistantModelIdentityReply(config: ProjectConfig): string {
+  const llm = config.llm;
+  const provider = llm.provider || "unknown";
+  const model = llm.model || "unknown";
+  const baseUrl = llm.baseUrl || "";
+  const overrideCount = Object.keys(config.modelOverrides ?? {}).length;
+  const endpointHint = baseUrl.length > 0 ? `，baseUrl=${baseUrl}` : "";
+  const overrideHint = overrideCount > 0
+    ? `。另外已配置 ${overrideCount} 个角色模型覆盖`
+    : "";
+  return `当前项目真实配置是 provider=${provider}，model=${model}${endpointHint}${overrideHint}。`;
+}
 
 function parseAssistantChapterFromInput(input: string): number | undefined {
   const zhMatch = input.match(ASSISTANT_CHAPTER_ZH_PATTERN);
@@ -2611,6 +2626,58 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       summary: result.summary,
       evidence: result.evidence,
     });
+  });
+
+  app.post("/api/assistant/chat", async (c) => {
+    const body = await c.req.json<unknown>().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({
+        code: "ASSISTANT_CHAT_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const payload = body as Record<string, unknown>;
+    const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+    const instruction = typeof payload.instruction === "string" ? payload.instruction.trim() : "";
+    if (!prompt && !instruction) {
+      return c.json({
+        code: "ASSISTANT_CHAT_VALIDATION_FAILED",
+        errors: [{ field: "prompt", message: "prompt or instruction must be a non-empty string" }],
+      }, 422);
+    }
+
+    if (prompt && ASSISTANT_MODEL_IDENTITY_PATTERN.test(prompt)) {
+      const currentConfig = await loadCurrentProjectConfig({ requireApiKey: false });
+      return c.json({ ok: true, response: buildAssistantModelIdentityReply(currentConfig) });
+    }
+
+    if (prompt && ASSISTANT_VAGUE_PROMPT_PATTERN.test(prompt)) {
+      return c.json({
+        ok: true,
+        response: "直接告诉我你要做哪件事：查看状态、续写下一章、审计某章，或问我具体问题。",
+      });
+    }
+
+    const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: instruction || prompt }),
+    });
+    const result = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (!response.ok) {
+      return new Response(JSON.stringify({
+        error: {
+          code: "ASSISTANT_CHAT_UPSTREAM_FAILED",
+          message: typeof result?.error === "string" ? result.error : "Agent chat request failed.",
+        },
+      }), {
+        status: response.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const reply = typeof result?.response === "string" ? result.response : "";
+    return c.json({ ok: true, response: reply });
   });
 
   app.post("/api/assistant/delete/preview", async (c) => {

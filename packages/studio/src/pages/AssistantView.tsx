@@ -158,6 +158,11 @@ export interface AssistantCrudDeleteExecuteResponse {
   readonly recoverBefore: string;
 }
 
+interface AssistantChatResponse {
+  readonly ok: boolean;
+  readonly response: string;
+}
+
 interface AssistantTaskSnapshot {
   readonly taskId: string;
   readonly sessionId: string;
@@ -175,13 +180,12 @@ interface AssistantTaskSnapshot {
   readonly error?: string;
 }
 
-const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
 const ASSISTANT_TIMELINE_MAX_ENTRIES = 50;
 const ASSISTANT_TASK_SNAPSHOT_POLL_INTERVAL_MS = 2000;
 const ASSISTANT_TASK_RECOVERY_STORAGE_KEY = "inkos.assistant.task-recovery";
 const BOOK_STATUS_ACTIVE = "active";
-const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
-const AUDIT_ACTION_PATTERN = /审计|audit/iu;
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
+const AUDIT_ACTION_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const CRUD_READ_ACTION_PATTERN = /查询|查看|检索|read|search/iu;
 const CRUD_DELETE_ACTION_PATTERN = /删除|delete/iu;
 const CRUD_RESTORE_ACTION_PATTERN = /恢复|restore/iu;
@@ -190,6 +194,7 @@ const CRUD_DIMENSION_VOLUME_PATTERN = /卷|volume/iu;
 const CRUD_DIMENSION_CHAPTER_PATTERN = /章|chapter/iu;
 const CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
 const CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
+const NOVEL_QA_HINT_PATTERN = /主角|角色|人物|设定|世界观|伏笔|章节|剧情|冲突|书里|book|chapter|character|hook|volume/iu;
 const CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
@@ -568,9 +573,10 @@ export function submitAssistantInput(
 
 export function completeAssistantResponse(
   state: AssistantComposerState,
-  prompt: string,
+  responseText: string,
   now = Date.now(),
 ): AssistantComposerState {
+  const content = responseText.trim() || "已完成，请继续下一步操作。";
   return {
     ...state,
     loading: false,
@@ -583,7 +589,7 @@ export function completeAssistantResponse(
     messages: [...state.messages, {
       id: `msg-${state.nextMessageId}`,
       role: "assistant",
-      content: generateAssistantSkeletonReply(prompt),
+      content,
       timestamp: now,
     }],
     nextMessageId: state.nextMessageId + 1,
@@ -814,6 +820,41 @@ export function parseAssistantCrudReadRequest(prompt: string): {
   };
 }
 
+function inferAssistantReadRequestFromPrompt(prompt: string): {
+  readonly dimension: AssistantCrudReadDimension;
+  readonly chapter?: number;
+  readonly keyword?: string;
+} | null {
+  const normalized = prompt.trim();
+  if (!normalized) return null;
+  if (detectAssistantBookAction(normalized)) return null;
+  if (CRUD_DELETE_ACTION_PATTERN.test(normalized) || CRUD_RESTORE_ACTION_PATTERN.test(normalized)) return null;
+  if (WORLD_REPORT_ACTION_PATTERN.test(normalized)) return null;
+
+  const looksLikeNovelQ = NOVEL_QA_HINT_PATTERN.test(normalized);
+  if (!looksLikeNovelQ) {
+    return null;
+  }
+
+  const dimension: AssistantCrudReadDimension = CRUD_DIMENSION_HOOK_PATTERN.test(normalized)
+    ? "hook"
+    : CRUD_DIMENSION_CHARACTER_PATTERN.test(normalized)
+      ? "character"
+      : CRUD_DIMENSION_VOLUME_PATTERN.test(normalized)
+        ? "volume"
+        : CRUD_DIMENSION_CHAPTER_PATTERN.test(normalized)
+          ? "chapter"
+          : "book";
+  const chapter = dimension === "chapter" ? extractAssistantAuditChapter(normalized) : undefined;
+  const keyword = normalized.length > 80 ? normalized.slice(0, 80) : normalized;
+
+  return {
+    dimension,
+    ...(chapter !== undefined ? { chapter } : {}),
+    ...(keyword ? { keyword } : {}),
+  };
+}
+
 export function parseAssistantCrudDeleteRequest(prompt: string): { readonly target: "chapter" | "run"; readonly chapter?: number; readonly runId?: string } | null {
   const normalized = prompt.trim();
   if (!normalized || !CRUD_DELETE_ACTION_PATTERN.test(normalized)) {
@@ -934,10 +975,6 @@ export function completeAssistantTaskPlanExecution(
   };
 }
 
-export function generateAssistantSkeletonReply(prompt: string): string {
-  return `收到：${prompt}\n\n这是主页面骨架阶段的模拟响应，后续将接入编排与工具调用。`;
-}
-
 export function buildAssistantNextActionPrompt(action: string, taskPlan: AssistantTaskPlan | null): string {
   const normalized = action.trim().toLowerCase();
   const chapterLabel = taskPlan?.chapterNumber ? `第${taskPlan.chapterNumber}章` : "当前章节";
@@ -972,6 +1009,22 @@ export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | 
     }
     return acc;
   }, []);
+}
+
+function buildAssistantAgentInstruction(
+  prompt: string,
+  selectedBookTitles: ReadonlyArray<string>,
+): string {
+  const scopeHint = selectedBookTitles.length > 0
+    ? `当前关注书籍：${selectedBookTitles.join("、")}`
+    : "当前未选择具体书籍";
+  return [
+    "你是 InkOS Studio 的小说创作 Agent。",
+    "优先直接回答用户问题，不要输出模板化套话。",
+    "如果用户意图是写作执行、审计、删除或恢复章节，再明确指出需要调用对应任务能力。",
+    scopeHint,
+    `用户输入：${prompt}`,
+  ].join("\n");
 }
 
 function EmptyConversation() {
@@ -1279,11 +1332,13 @@ export function AssistantView({
       return;
     }
 
-    const readRequest = parseAssistantCrudReadRequest(normalizedPrompt);
+    const readRequest = parseAssistantCrudReadRequest(normalizedPrompt) ?? inferAssistantReadRequestFromPrompt(normalizedPrompt);
     if (readRequest) {
       const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
       if (!targetBookId) {
         setScopeBlockHint(t("assistant.scopeBlocked"));
+        setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+        setState((prev) => completeAssistantResponse(prev, "当前没有可用书籍范围。请先选择一本书，我再基于书内内容回答。"));
         return;
       }
       setScopeBlockHint("");
@@ -1298,7 +1353,11 @@ export function AssistantView({
           setCrudReadResult(response);
           setCrudDeletePreview(null);
           setCrudDeleteResult(null);
-          setState((prev) => completeAssistantResponse(prev, `已返回 ${response.dimension} 查询结果。`));
+          const topEvidence = response.evidence[0]?.excerpt;
+          const reply = topEvidence
+            ? `根据书内资料：${response.summary}\n\n先给你一个关键片段：${topEvidence}`
+            : `根据书内资料：${response.summary}`;
+          setState((prev) => completeAssistantResponse(prev, reply));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           setScopeBlockHint(`查询失败：${message}`);
@@ -1404,10 +1463,22 @@ export function AssistantView({
 
     setScopeBlockHint("");
     setState((prev) => submitAssistantInput(prev, normalizedPrompt));
-
-    setTimeout(() => {
-      setState((prev) => completeAssistantResponse(prev, normalizedPrompt));
-    }, MOCK_ASSISTANT_RESPONSE_DELAY_MS);
+    void (async () => {
+      try {
+        const response = await postApi<AssistantChatResponse>("/assistant/chat", {
+          prompt: normalizedPrompt,
+          scopeBookIds: selectedScopeBookIds,
+          scopeBookTitles: selectedBookTitles,
+          instruction: buildAssistantAgentInstruction(normalizedPrompt, selectedBookTitles),
+        });
+        const reply = response.response?.trim() || "我在，继续说你的目标，我会按 Agent 方式推进。";
+        setState((prev) => completeAssistantResponse(prev, reply));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setScopeBlockHint(`聊天失败：${message}`);
+        setState((prev) => completeAssistantResponse(prev, "聊天请求失败，请检查模型配置和 API Key 后重试。"));
+      }
+    })();
   };
 
   const handleConfirmAction = async () => {
