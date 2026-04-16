@@ -527,6 +527,7 @@ const ASSISTANT_CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
 const ASSISTANT_CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
 const ASSISTANT_CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const ASSISTANT_CRUD_RESTORE_ID_PATTERN = /(asst_restore_[a-z0-9]+)/iu;
+const ASSISTANT_INTERNAL_API_BASE = "http://localhost";
 const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 
@@ -778,16 +779,14 @@ function readRelativeSource(root: string, filePath: string): string {
 
 function pickEvidenceLines(content: string, keyword?: string, maxItems = 3): Array<{ line: number; excerpt: string }> {
   const lines = content.split(/\r?\n/u);
-  const normalizedKeyword = keyword?.toLowerCase();
-  const matched = lines
+  const nonEmptyLines = lines
     .map((line, index) => ({ line: index + 1, excerpt: line.trim() }))
-    .filter((entry) => entry.excerpt.length > 0)
+    .filter((entry) => entry.excerpt.length > 0);
+  const normalizedKeyword = keyword?.toLowerCase();
+  const matched = nonEmptyLines
     .filter((entry) => !normalizedKeyword || entry.excerpt.toLowerCase().includes(normalizedKeyword));
   if (matched.length > 0) return matched.slice(0, maxItems);
-  return lines
-    .map((line, index) => ({ line: index + 1, excerpt: line.trim() }))
-    .filter((entry) => entry.excerpt.length > 0)
-    .slice(0, maxItems);
+  return nonEmptyLines.slice(0, maxItems);
 }
 
 function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dimension: AssistantCrudReadDimension; bookId: string; chapter?: number; keyword?: string } } | { ok: false; errors: Array<{ field: string; message: string }> } {
@@ -2707,7 +2706,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const recoverBefore = new Date(Date.now() + ASSISTANT_DELETE_RECOVERY_WINDOW_MS).toISOString();
     const restoreId = `asst_restore_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
     if (draft.body.target === "chapter") {
-      const chapter = draft.body.chapter!;
+      const chapter = draft.body.chapter;
+      if (!chapter) {
+        return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_INVALID", message: "Chapter preview payload is invalid." } }, 500);
+      }
       const chapterFile = await resolveChapterFile(draft.body.bookId, chapter);
       if (!chapterFile) {
         return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Chapter not found." } }, 404);
@@ -2742,11 +2744,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
 
-    const run = await chapterRunStore.getRun(draft.body.bookId, draft.body.runId!, { includeDeleted: true });
+    const runId = draft.body.runId;
+    if (!runId) {
+      return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_INVALID", message: "Run preview payload is invalid." } }, 500);
+    }
+    const run = await chapterRunStore.getRun(draft.body.bookId, runId, { includeDeleted: true });
     if (!run) {
       return c.json({ error: { code: "ASSISTANT_DELETE_TARGET_NOT_FOUND", message: "Run not found." } }, 404);
     }
-    const removed = await chapterRunStore.deleteRun(draft.body.bookId, draft.body.runId!);
+    const removed = await chapterRunStore.deleteRun(draft.body.bookId, runId);
     if (!removed) {
       return c.json({ error: { code: "ASSISTANT_DELETE_ALREADY_DELETED", message: "Run already soft-deleted." } }, 409);
     }
@@ -2841,6 +2847,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   app.post("/api/assistant/crud", async (c) => {
+    const relay = (payload: unknown, status: number) =>
+      new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
     const body = await c.req.json<unknown>().catch(() => null);
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
       return c.json({
@@ -2862,26 +2870,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       if (!restoreId) {
         return c.json({ code: "ASSISTANT_CRUD_VALIDATION_FAILED", errors: [{ field: "restoreId", message: "restoreId is required for restore prompts" }] }, 422);
       }
-      const response = await app.request("http://localhost/api/assistant/delete/restore", {
+      const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/assistant/delete/restore`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ restoreId }),
       });
       const result = await response.json().catch(() => null);
-      if (!response.ok) return c.json(result, response.status as 400);
+      if (!response.ok) return relay(result, response.status);
       return c.json({ kind: "delete-restored", restoreId, result });
     }
 
     if (ASSISTANT_CRUD_DELETE_PATTERN.test(input)) {
       const previewId = typeof payload.previewId === "string" ? payload.previewId.trim() : "";
       if (payload.confirmed === true && previewId) {
-        const response = await app.request("http://localhost/api/assistant/delete/execute", {
+        const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/assistant/delete/execute`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ previewId, confirmed: true }),
         });
         const result = await response.json().catch(() => null);
-        if (!response.ok) return c.json(result, response.status as 400);
+        if (!response.ok) return relay(result, response.status);
         return c.json({ kind: "delete-executed", result });
       }
       if (!bookId) {
@@ -2892,13 +2900,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const targetPayload = runId
         ? { target: "run", bookId, runId }
         : { target: "chapter", bookId, chapter };
-      const response = await app.request("http://localhost/api/assistant/delete/preview", {
+      const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/assistant/delete/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(targetPayload),
       });
       const result = await response.json().catch(() => null);
-      if (!response.ok) return c.json(result, response.status as 400);
+      if (!response.ok) return relay(result, response.status);
       return c.json({ kind: "delete-preview", result });
     }
 
@@ -2908,7 +2916,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
       const dimension = parseAssistantCrudDimensionFromInput(input);
       const chapter = dimension === "chapter" ? parseAssistantChapterFromInput(input) : undefined;
-      const response = await app.request("http://localhost/api/assistant/read", {
+      const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/assistant/read`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2919,7 +2927,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }),
       });
       const result = await response.json().catch(() => null);
-      if (!response.ok) return c.json(result, response.status as 400);
+      if (!response.ok) return relay(result, response.status);
       return c.json({ kind: "read", result });
     }
 
