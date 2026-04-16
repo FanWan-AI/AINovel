@@ -234,6 +234,9 @@ describe("createStudioServer daemon lifecycle", () => {
     saveChapterIndexMock.mockResolvedValue(undefined);
     rollbackToChapterMock.mockResolvedValue([]);
     pipelineConfigs.length = 0;
+    logger.info.mockReset();
+    logger.warn.mockReset();
+    logger.error.mockReset();
   });
 
   afterEach(async () => {
@@ -509,6 +512,52 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("returns assistant skills list with layered metadata and permission view", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request(
+      "http://localhost/api/assistant/skills?permissions=assistant.execute.rewrite,assistant.execute.project.style-governance",
+    );
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      permissions: string[];
+      skills: Array<{
+        skillId: string;
+        layer: string;
+        metadata: { allowedScopes: string[] };
+        authorized: boolean;
+        missingPermissions: string[];
+      }>;
+    };
+
+    expect(payload.permissions).toEqual([
+      "assistant.execute.rewrite",
+      "assistant.execute.project.style-governance",
+    ]);
+    expect(payload.skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        skillId: "builtin.audit",
+        layer: "builtin",
+        authorized: true,
+        metadata: expect.objectContaining({
+          allowedScopes: ["single", "multi", "all-active"],
+        }),
+      }),
+      expect.objectContaining({
+        skillId: "project.style-governance",
+        layer: "project",
+        authorized: true,
+      }),
+      expect.objectContaining({
+        skillId: "trusted.anti-detect",
+        layer: "trusted",
+        authorized: false,
+        missingPermissions: ["assistant.execute.anti-detect"],
+      }),
+    ]));
+  });
+
   it("aggregates assistant evaluate report with serializable scores and traceable evidence", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -669,6 +718,55 @@ describe("createStudioServer daemon lifecycle", () => {
     const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002");
     expect(task.status).toBe(200);
     await expect(task.json()).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("rejects assistant execute when skill permission is missing and logs reasons", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_skill_001",
+        sessionId: "asst_s_skill_001",
+        approved: true,
+        permissions: [],
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "anti-detect", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "ASSISTANT_SKILL_UNAUTHORIZED",
+        taskId: "asst_t_execute_skill_001",
+        denied: expect.arrayContaining([
+          expect.objectContaining({
+            stepId: "s2",
+            skillId: "trusted.anti-detect",
+          }),
+        ]),
+      },
+    });
+    expect(auditChapterMock).not.toHaveBeenCalled();
+    expect(reviseDraftMock).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "assistant skill authorization blocked",
+      expect.objectContaining({
+        taskId: "asst_t_execute_skill_001",
+      }),
+    );
+
+    const blockedEvents = await app.request("http://localhost/api/runtime/events?event=assistant:policy:blocked&limit=5");
+    expect(blockedEvents.status).toBe(200);
+    const blockedEventsBody = await blockedEvents.json() as { entries: Array<{ data: { taskId: string; reasons: string[] } }> };
+    expect(blockedEventsBody.entries[0]).toBeDefined();
+    expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_skill_001");
+    expect(blockedEventsBody.entries[0]!.data.reasons[0]).toContain("assistant.execute.anti-detect");
   });
 
   it("emits budget warning and blocks assistant execute when budget is exceeded", async () => {
