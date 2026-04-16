@@ -405,6 +405,67 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("builds assistant plan draft and returns validation/business error codes", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const successResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_001",
+        input: "审计第14章并自动修复主要问题",
+        scope: { type: "book-list", bookIds: ["demo-book", "demo-book"] },
+      }),
+    });
+    expect(successResponse.status).toBe(200);
+    await expect(successResponse.json()).resolves.toMatchObject({
+      taskId: expect.stringMatching(/^asst_t_/),
+      intent: "audit_and_optimize",
+      requiresConfirmation: true,
+      plan: [
+        { stepId: "s1", action: "audit", chapter: 14, bookId: "demo-book" },
+        { stepId: "s2", action: "revise", mode: "spot-fix", chapter: 14, bookId: "demo-book" },
+        { stepId: "s3", action: "re-audit", chapter: 14, bookId: "demo-book" },
+      ],
+      risk: {
+        level: "medium",
+        reasons: expect.arrayContaining(["涉及章节内容改写"]),
+      },
+    });
+
+    const missingInputResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_002",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(missingInputResponse.status).toBe(422);
+    await expect(missingInputResponse.json()).resolves.toMatchObject({
+      code: "ASSISTANT_PLAN_VALIDATION_FAILED",
+      errors: [{ field: "input" }],
+    });
+
+    const unknownIntentResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_003",
+        input: "帮我随便聊聊最近剧情",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(unknownIntentResponse.status).toBe(422);
+    await expect(unknownIntentResponse.json()).resolves.toEqual({
+      error: {
+        code: "ASSISTANT_PLAN_INTENT_UNKNOWN",
+        message: "Unable to recognize assistant intent from input.",
+      },
+    });
+  });
+
   it("daemon session and events expose pause/resume transitions", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
