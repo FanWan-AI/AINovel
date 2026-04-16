@@ -10,6 +10,7 @@ import {
   applyAssistantQuickAction,
   applyAssistantTaskEventFromSSE,
   buildAssistantConfirmationDraft,
+  buildAssistantNextActionPrompt,
   cancelAssistantPendingAction,
   confirmAssistantPendingAction,
   completeAssistantTaskPlanExecution,
@@ -207,5 +208,13 @@ describe("AssistantView", () => {
 
     expect(html).toContain("assistant-task-timeline");
     expect(html).toContain("步骤 s1");
+  });
+
+  it("maps suggested next actions to executable prompts", () => {
+    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const state = requestAssistantConfirmation(createAssistantInitialState(), draft!, 10_000);
+    expect(buildAssistantNextActionPrompt("spot-fix", state.taskPlan)).toContain("spot-fix");
+    expect(buildAssistantNextActionPrompt("re-audit", state.taskPlan)).toContain("第3章");
+    expect(buildAssistantNextActionPrompt("write-next", state.taskPlan)).toBe("请写下一章。");
   });
 });
