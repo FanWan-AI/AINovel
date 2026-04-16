@@ -205,6 +205,70 @@ export interface ImportChaptersResult {
   readonly nextChapter: number;
 }
 
+export type WorldConsistencyDimension = "character" | "setting" | "foreshadowing";
+
+export interface WorldConsistencyIssueEvidence {
+  readonly source: string;
+  readonly line: number;
+  readonly excerpt: string;
+}
+
+export interface WorldConsistencyIssue {
+  readonly issueId: string;
+  readonly dimension: WorldConsistencyDimension;
+  readonly severity: "blocking" | "warning";
+  readonly title: string;
+  readonly description: string;
+  readonly recommendation: string;
+  readonly chapter?: number;
+  readonly evidence: WorldConsistencyIssueEvidence;
+}
+
+export interface WorldConsistencySectionReport {
+  readonly dimension: WorldConsistencyDimension;
+  readonly summary: string;
+  readonly issues: ReadonlyArray<WorldConsistencyIssue>;
+}
+
+export interface MarketSignalRecommendation {
+  readonly signalId: string;
+  readonly source: string;
+  readonly timestamp: string;
+  readonly trend: string;
+  readonly recommendation: string;
+  readonly confidence: number;
+  readonly rationale: string;
+  readonly benchmarkTitles: ReadonlyArray<string>;
+}
+
+export interface WorldConsistencyRepairTask {
+  readonly stepId: string;
+  readonly action: "revise";
+  readonly mode: "spot-fix";
+  readonly bookId: string;
+  readonly chapter: number;
+  readonly objective: string;
+  readonly issueIds: ReadonlyArray<string>;
+}
+
+export interface WorldConsistencyMarketReport {
+  readonly bookId: string;
+  readonly generatedAt: string;
+  readonly trace: {
+    readonly version: "world-consistency-market-v1";
+    readonly inputs: ReadonlyArray<{ source: string; checksum: string }>;
+  };
+  readonly consistency: {
+    readonly sections: ReadonlyArray<WorldConsistencySectionReport>;
+    readonly blockingIssues: ReadonlyArray<WorldConsistencyIssue>;
+  };
+  readonly market: {
+    readonly summary: string;
+    readonly signals: ReadonlyArray<MarketSignalRecommendation>;
+  };
+  readonly repairTasks: ReadonlyArray<WorldConsistencyRepairTask>;
+}
+
 export class PipelineRunner {
   private readonly state: StateManager;
   private readonly config: PipelineConfig;
@@ -481,6 +545,216 @@ export class PipelineRunner {
   async runRadar(): Promise<RadarResult> {
     const radar = new RadarAgent(this.agentCtxFor("radar"), this.config.radarSources);
     return radar.scan();
+  }
+
+  async inspectWorldConsistencyAndMarket(bookId: string): Promise<WorldConsistencyMarketReport> {
+    const bookDir = this.state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const sourceFiles = [
+      { source: "story/current_state.md", filePath: join(storyDir, "current_state.md") },
+      { source: "story/story_bible.md", filePath: join(storyDir, "story_bible.md") },
+      { source: "story/book_rules.md", filePath: join(storyDir, "book_rules.md") },
+      { source: "story/pending_hooks.md", filePath: join(storyDir, "pending_hooks.md") },
+      { source: "story/chapter_summaries.md", filePath: join(storyDir, "chapter_summaries.md") },
+    ] as const;
+    const sourceContents = await Promise.all(
+      sourceFiles.map(async ({ source, filePath }) => ({
+        source,
+        content: await this.readOptionalFile(filePath),
+      })),
+    );
+    const contentBySource = new Map(sourceContents.map((entry) => [entry.source, entry.content] as const));
+    const currentState = contentBySource.get("story/current_state.md") ?? "";
+    const storyBible = contentBySource.get("story/story_bible.md") ?? "";
+    const bookRules = contentBySource.get("story/book_rules.md") ?? "";
+    const pendingHooks = contentBySource.get("story/pending_hooks.md") ?? "";
+    const chapterSummaries = contentBySource.get("story/chapter_summaries.md") ?? "";
+    const issues: WorldConsistencyIssue[] = [];
+
+    const protagonistUnsetLine = this.findFirstLine(
+      currentState,
+      (line) => /\|\s*(主角状态|Protagonist State)\s*\|/iu.test(line) && /(未设定|not set|n\/a|none)/iu.test(line),
+    );
+    if (protagonistUnsetLine) {
+      issues.push({
+        issueId: "wc-character-protagonist-state-unset",
+        dimension: "character",
+        severity: "blocking",
+        title: "主角状态缺失",
+        description: "当前状态卡中的主角状态未设定，会导致人物弧线一致性失真。",
+        recommendation: "补齐主角当前状态并在后续章节保持连续推进。",
+        evidence: {
+          source: "story/current_state.md",
+          line: protagonistUnsetLine.line,
+          excerpt: protagonistUnsetLine.excerpt,
+        },
+      });
+    }
+
+    const summaryRows = this.parseChapterSummaryRows(chapterSummaries);
+    for (const row of summaryRows) {
+      const normalizedCharacters = row.characters.trim();
+      if (!normalizedCharacters || /^(none|无|—|-|n\/a)$/iu.test(normalizedCharacters)) {
+        issues.push({
+          issueId: `wc-character-missing-chapter-${row.chapter}`,
+          dimension: "character",
+          severity: "warning",
+          title: `第${row.chapter}章人物缺失`,
+          description: "章节摘要未记录出场人物，人物连续性追踪信息不足。",
+          recommendation: `补全第${row.chapter}章摘要中的出场人物字段。`,
+          chapter: row.chapter,
+          evidence: {
+            source: "story/chapter_summaries.md",
+            line: row.line,
+            excerpt: row.raw,
+          },
+        });
+      }
+    }
+
+    const storyBiblePlaceholderLine = this.findFirstLine(
+      storyBible,
+      (line) => /(未设定|todo|tbd|\(未设定\)|（未设定）)/iu.test(line),
+    );
+    if (!storyBible.trim()) {
+      issues.push({
+        issueId: "wc-setting-story-bible-missing",
+        dimension: "setting",
+        severity: "blocking",
+        title: "世界设定缺失",
+        description: "story_bible.md 为空，无法复算世界观基线。",
+        recommendation: "补齐世界规则与核心设定，并提交到 story_bible.md。",
+        evidence: {
+          source: "story/story_bible.md",
+          line: 1,
+          excerpt: "(empty)",
+        },
+      });
+    } else if (storyBiblePlaceholderLine) {
+      issues.push({
+        issueId: "wc-setting-story-bible-placeholder",
+        dimension: "setting",
+        severity: "blocking",
+        title: "世界设定存在占位内容",
+        description: "story_bible.md 包含未完成占位文本，存在设定冲突风险。",
+        recommendation: "将占位内容替换为可执行、可核验的设定条款。",
+        evidence: {
+          source: "story/story_bible.md",
+          line: storyBiblePlaceholderLine.line,
+          excerpt: storyBiblePlaceholderLine.excerpt,
+        },
+      });
+    }
+
+    if (!bookRules.trim()) {
+      issues.push({
+        issueId: "wc-setting-book-rules-missing",
+        dimension: "setting",
+        severity: "warning",
+        title: "本书规则缺失",
+        description: "book_rules.md 为空，规则约束无法被一致性巡检引用。",
+        recommendation: "补充本书硬规则与禁改条目。",
+        evidence: {
+          source: "story/book_rules.md",
+          line: 1,
+          excerpt: "(empty)",
+        },
+      });
+    }
+
+    const unresolvedHookLines = this.findLines(
+      pendingHooks,
+      (line) => /^[-*]\s+/u.test(line) && /(未回收|未揭示|待揭示|待回收|todo|tbd)/iu.test(line),
+    );
+    if (!pendingHooks.trim()) {
+      issues.push({
+        issueId: "wc-foreshadowing-hook-pool-missing",
+        dimension: "foreshadowing",
+        severity: "blocking",
+        title: "伏笔池缺失",
+        description: "pending_hooks.md 为空，伏笔追踪链断裂。",
+        recommendation: "建立伏笔池并记录每条伏笔的状态与回收计划。",
+        evidence: {
+          source: "story/pending_hooks.md",
+          line: 1,
+          excerpt: "(empty)",
+        },
+      });
+    } else if (unresolvedHookLines.length >= 3) {
+      const firstLine = unresolvedHookLines[0]!;
+      issues.push({
+        issueId: "wc-foreshadowing-unresolved-overload",
+        dimension: "foreshadowing",
+        severity: "blocking",
+        title: "未回收伏笔积压",
+        description: `检测到 ${unresolvedHookLines.length} 条待回收伏笔，超过稳态阈值。`,
+        recommendation: "优先安排章节回收积压伏笔，并更新伏笔状态。",
+        evidence: {
+          source: "story/pending_hooks.md",
+          line: firstLine.line,
+          excerpt: firstLine.excerpt,
+        },
+      });
+    }
+
+    const sections: WorldConsistencySectionReport[] = (["character", "setting", "foreshadowing"] as const).map((dimension) => {
+      const dimensionIssues = issues.filter((issue) => issue.dimension === dimension);
+      const blockingCount = dimensionIssues.filter((issue) => issue.severity === "blocking").length;
+      return {
+        dimension,
+        summary: blockingCount > 0
+          ? `发现 ${blockingCount} 条阻断问题，需优先修复。`
+          : dimensionIssues.length > 0
+            ? `发现 ${dimensionIssues.length} 条非阻断问题。`
+            : "未发现异常。",
+        issues: dimensionIssues,
+      };
+    });
+
+    const blockingIssues = issues.filter((issue) => issue.severity === "blocking");
+    const chapterTarget = summaryRows.find((row) => row.chapter > 0)?.chapter ?? 1;
+    const repairTasks: WorldConsistencyRepairTask[] = blockingIssues.map((issue, index) => ({
+      stepId: `wc_fix_${String(index + 1).padStart(2, "0")}`,
+      action: "revise",
+      mode: "spot-fix",
+      bookId,
+      chapter: issue.chapter ?? chapterTarget,
+      objective: issue.recommendation,
+      issueIds: [issue.issueId],
+    }));
+
+    const radar = await this.runRadar();
+    const marketSignals: MarketSignalRecommendation[] = radar.recommendations.map((item, index) => ({
+      signalId: `market_signal_${String(index + 1).padStart(2, "0")}`,
+      source: `radar:${item.platform}`,
+      timestamp: radar.timestamp,
+      trend: item.concept,
+      recommendation: item.reasoning,
+      confidence: Number.isFinite(item.confidence) ? Math.max(0, Math.min(1, item.confidence)) : 0,
+      rationale: `${item.platform} ${item.genre}`,
+      benchmarkTitles: item.benchmarkTitles,
+    }));
+
+    return {
+      bookId,
+      generatedAt: new Date().toISOString(),
+      trace: {
+        version: "world-consistency-market-v1",
+        inputs: sourceContents.map((entry) => ({
+          source: entry.source,
+          checksum: this.computeDeterministicChecksum(entry.content),
+        })),
+      },
+      consistency: {
+        sections,
+        blockingIssues,
+      },
+      market: {
+        summary: radar.marketSummary,
+        signals: marketSignals,
+      },
+      repairTasks,
+    };
   }
 
   async initBook(book: BookConfig): Promise<void> {
@@ -3070,6 +3344,85 @@ ${matrix}`,
       chapterNumber,
       externalContext,
     });
+  }
+
+  private async readOptionalFile(filePath: string): Promise<string> {
+    try {
+      return await readFile(filePath, "utf-8");
+    } catch {
+      return "";
+    }
+  }
+
+  private findFirstLine(
+    content: string,
+    predicate: (line: string) => boolean,
+  ): { line: number; excerpt: string } | null {
+    const lines = content.split(/\r?\n/u);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (predicate(line)) {
+        return { line: index + 1, excerpt: line.trim() };
+      }
+    }
+    return null;
+  }
+
+  private findLines(
+    content: string,
+    predicate: (line: string) => boolean,
+  ): Array<{ line: number; excerpt: string }> {
+    const lines = content.split(/\r?\n/u);
+    const matches: Array<{ line: number; excerpt: string }> = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (predicate(line)) {
+        matches.push({ line: index + 1, excerpt: line.trim() });
+      }
+    }
+    return matches;
+  }
+
+  private parseChapterSummaryRows(content: string): Array<{
+    chapter: number;
+    characters: string;
+    hooks: string;
+    line: number;
+    raw: string;
+  }> {
+    const lines = content.split(/\r?\n/u);
+    const rows: Array<{
+      chapter: number;
+      characters: string;
+      hooks: string;
+      line: number;
+      raw: string;
+    }> = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (!line.trim().startsWith("|")) continue;
+      if (line.includes("---")) continue;
+      const cells = line.split("|").map((cell) => cell.trim());
+      const chapter = Number.parseInt(cells[1] ?? "", 10);
+      if (!Number.isInteger(chapter) || chapter < 1) continue;
+      rows.push({
+        chapter,
+        characters: cells[3] ?? "",
+        hooks: cells[6] ?? "",
+        line: index + 1,
+        raw: line.trim(),
+      });
+    }
+    return rows;
+  }
+
+  private computeDeterministicChecksum(content: string): string {
+    let hash = 2166136261;
+    for (let index = 0; index < content.length; index += 1) {
+      hash ^= content.charCodeAt(index);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
   }
 
   private async emitWebhook(

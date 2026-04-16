@@ -5080,4 +5080,96 @@ describe("PipelineRunner", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("generates world consistency report with blocking issues and executable repair tasks", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), [
+        "# Current State",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        "| Current Chapter | 6 |",
+        "| Protagonist State | （未设定） |",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# 世界设定\n- TODO: 补齐力量体系。", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), [
+        "# 伏笔池",
+        "- 黑纹戒指来历未回收",
+        "- 旧门碎片来源待揭示",
+        "- 导师留下的密令待回收",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), [
+        "# 章节摘要",
+        "",
+        "| 章节 | 标题 | 出场人物 | 关键事件 | 状态变化 | 伏笔动态 | 情绪基调 | 章节类型 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 6 | 雨夜 | none | 追查线索 | 压力升高 | none | 冷峻 | 调查 |",
+      ].join("\n"), "utf-8"),
+    ]);
+    vi.spyOn(runner, "runRadar").mockResolvedValue({
+      marketSummary: "都市悬疑与系统流融合热度上升。",
+      timestamp: "2026-04-16T00:00:00.000Z",
+      recommendations: [{
+        platform: "tomato",
+        genre: "urban",
+        concept: "都市悬疑+系统博弈",
+        confidence: 0.86,
+        reasoning: "高位榜单中该组合留存稳定。",
+        benchmarkTitles: ["雨夜追凶录"],
+      }],
+    });
+
+    try {
+      const result = await runner.inspectWorldConsistencyAndMarket(bookId);
+      expect(result.consistency.sections.map((section) => section.dimension))
+        .toEqual(["character", "setting", "foreshadowing"]);
+      expect(result.consistency.blockingIssues.length).toBeGreaterThan(0);
+      expect(result.repairTasks.length).toBeGreaterThan(0);
+      expect(result.repairTasks[0]).toMatchObject({
+        action: "revise",
+        mode: "spot-fix",
+        bookId,
+        chapter: expect.any(Number),
+        issueIds: [expect.any(String)],
+      });
+      expect(result.trace.inputs[0]?.checksum).toContain("fnv1a32:");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits market signals with explicit source and timestamp", async () => {
+    const { root, runner, bookId } = await createRunnerFixture();
+    vi.spyOn(runner, "runRadar").mockResolvedValue({
+      marketSummary: "系统文短节奏叙事持续走强。",
+      timestamp: "2026-04-16T08:00:00.000Z",
+      recommendations: [{
+        platform: "qidian",
+        genre: "xuanhuan",
+        concept: "高压副本+轻系统",
+        confidence: 0.72,
+        reasoning: "榜单前列题材聚集。",
+        benchmarkTitles: ["副本回廊"],
+      }],
+    });
+
+    try {
+      const result = await runner.inspectWorldConsistencyAndMarket(bookId);
+      expect(result.market.signals).toEqual([{
+        signalId: "market_signal_01",
+        source: "radar:qidian",
+        timestamp: "2026-04-16T08:00:00.000Z",
+        trend: "高压副本+轻系统",
+        recommendation: "榜单前列题材聚集。",
+        confidence: 0.72,
+        rationale: "qidian xuanhuan",
+        benchmarkTitles: ["副本回廊"],
+      }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

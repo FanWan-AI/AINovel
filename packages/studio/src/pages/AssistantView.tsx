@@ -9,6 +9,10 @@ import {
 } from "../api/services/assistant-command-parser";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
 import { QualityReportCard, type QualityReportPayload } from "../components/assistant/QualityReportCard";
+import {
+  WorldConsistencyMarketCard,
+  type AssistantWorldConsistencyMarketReport,
+} from "../components/assistant/WorldConsistencyMarketCard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 
@@ -31,6 +35,7 @@ export interface AssistantComposerState {
   readonly taskPlan: AssistantTaskPlan | null;
   readonly taskExecution: AssistantTaskExecution | null;
   readonly qualityReport: QualityReportPayload | null;
+  readonly worldConsistencyReport: AssistantWorldConsistencyMarketReport | null;
   readonly suggestedNextActions: ReadonlyArray<string>;
   readonly operatorSession: AssistantOperatorSession;
 }
@@ -106,6 +111,11 @@ export interface AssistantEvaluateResponse {
   readonly suggestedNextActions: ReadonlyArray<string>;
 }
 
+export interface AssistantWorldReportResponse {
+  readonly bookId: string;
+  readonly report: AssistantWorldConsistencyMarketReport;
+}
+
 export type AssistantCrudReadDimension = "book" | "volume" | "chapter" | "character" | "hook";
 
 export interface AssistantCrudEvidence {
@@ -175,6 +185,7 @@ const AUDIT_ACTION_PATTERN = /审计|audit/iu;
 const CRUD_READ_ACTION_PATTERN = /查询|查看|检索|read|search/iu;
 const CRUD_DELETE_ACTION_PATTERN = /删除|delete/iu;
 const CRUD_RESTORE_ACTION_PATTERN = /恢复|restore/iu;
+const WORLD_REPORT_ACTION_PATTERN = /(一致性报告|world\s*consistency|市场策略|market\s*(strategy|memory)|题材趋势)/iu;
 const CRUD_DIMENSION_VOLUME_PATTERN = /卷|volume/iu;
 const CRUD_DIMENSION_CHAPTER_PATTERN = /章|chapter/iu;
 const CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
@@ -229,6 +240,7 @@ export function createAssistantInitialState(): AssistantComposerState {
     taskPlan: null,
     taskExecution: null,
     qualityReport: null,
+    worldConsistencyReport: null,
     suggestedNextActions: [],
     operatorSession: ASSISTANT_DEFAULT_OPERATOR_SESSION,
   };
@@ -548,6 +560,7 @@ export function submitAssistantInput(
     taskPlan: state.taskPlan,
     taskExecution: state.taskExecution,
     qualityReport: state.qualityReport,
+    worldConsistencyReport: state.worldConsistencyReport,
     suggestedNextActions: state.suggestedNextActions,
     operatorSession: state.operatorSession,
   };
@@ -564,6 +577,7 @@ export function completeAssistantResponse(
     taskPlan: state.taskPlan,
     taskExecution: state.taskExecution,
     qualityReport: state.qualityReport,
+    worldConsistencyReport: state.worldConsistencyReport,
     suggestedNextActions: state.suggestedNextActions,
     operatorSession: state.operatorSession,
     messages: [...state.messages, {
@@ -601,6 +615,7 @@ function appendAssistantOperatorExchange(
     ],
     nextMessageId: state.nextMessageId + 2,
     qualityReport: state.qualityReport,
+    worldConsistencyReport: state.worldConsistencyReport,
     suggestedNextActions: state.suggestedNextActions,
   };
 }
@@ -867,6 +882,7 @@ export function requestAssistantConfirmation(
     taskPlan: transitionAssistantTaskPlan(taskPlanDraft, "awaiting-confirm", now),
     taskExecution: null,
     qualityReport: null,
+    worldConsistencyReport: null,
     suggestedNextActions: [],
     operatorSession: state.operatorSession,
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalizedPrompt, timestamp: now }],
@@ -883,6 +899,7 @@ export function confirmAssistantPendingAction(state: AssistantComposerState, now
     loading: true,
     taskPlan: transitionAssistantTaskPlan(state.taskPlan, "running", now),
     qualityReport: null,
+    worldConsistencyReport: null,
     suggestedNextActions: [],
   };
 }
@@ -897,6 +914,7 @@ export function cancelAssistantPendingAction(state: AssistantComposerState, now 
     taskPlan: transitionAssistantTaskPlan(state.taskPlan, "cancelled", now),
     taskExecution: null,
     qualityReport: null,
+    worldConsistencyReport: null,
     suggestedNextActions: [],
   };
 }
@@ -933,6 +951,17 @@ export function buildAssistantNextActionPrompt(action: string, taskPlan: Assista
     return "请写下一章。";
   }
   return `请执行下一步动作：${action}`;
+}
+
+export function buildAssistantWorldRepairPrompt(
+  report: AssistantWorldConsistencyMarketReport | null,
+  stepId: string,
+): string {
+  const task = report?.repairTasks.find((item) => item.stepId === stepId);
+  if (!task) {
+    return `请执行一致性修复任务 ${stepId}。`;
+  }
+  return `请对第${task.chapter}章执行 ${task.mode} 修复，目标：${task.objective}`;
 }
 
 export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | undefined): string[] {
@@ -1333,6 +1362,35 @@ export function AssistantView({
       return;
     }
 
+    if (WORLD_REPORT_ACTION_PATTERN.test(normalizedPrompt)) {
+      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
+      if (!targetBookId) {
+        setScopeBlockHint(t("assistant.scopeBlocked"));
+        return;
+      }
+      setScopeBlockHint("");
+      setCrudBusy(true);
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      void (async () => {
+        try {
+          const response = await postApi<AssistantWorldReportResponse>("/assistant/world/report", {
+            bookId: targetBookId,
+          });
+          setState((prev) => ({
+            ...completeAssistantResponse(prev, "已生成全书一致性报告与市场策略建议。"),
+            worldConsistencyReport: response.report,
+          }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setScopeBlockHint(`报告生成失败：${message}`);
+          setState((prev) => completeAssistantResponse(prev, "一致性报告生成失败，请重试。"));
+        } finally {
+          setCrudBusy(false);
+        }
+      })();
+      return;
+    }
+
     const draft = buildAssistantConfirmationDraft(normalizedPrompt, scopeMode, selectedBookIds, activeBookIds);
     if (detectAssistantBookAction(normalizedPrompt)) {
       if (!draft) {
@@ -1390,6 +1448,7 @@ export function AssistantView({
           nextSequence: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.nextSequence : 0,
         },
         qualityReport: null,
+        worldConsistencyReport: null,
         suggestedNextActions: [],
       }));
     } catch (error) {
@@ -1401,6 +1460,10 @@ export function AssistantView({
 
   const handleRunNextAction = (action: string) => {
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
+  };
+
+  const handleRunWorldRepairTask = (stepId: string) => {
+    sendPrompt(buildAssistantWorldRepairPrompt(state.worldConsistencyReport, stepId));
   };
 
   const handleConfirmDelete = async () => {
@@ -1558,6 +1621,12 @@ export function AssistantView({
               report={state.qualityReport}
               suggestedNextActions={state.suggestedNextActions}
               onRunNextAction={handleRunNextAction}
+            />
+          )}
+          {state.worldConsistencyReport && (
+            <WorldConsistencyMarketCard
+              report={state.worldConsistencyReport}
+              onRunRepairTask={handleRunWorldRepairTask}
             />
           )}
           {crudReadResult && <AssistantCrudReadCard result={crudReadResult} />}
