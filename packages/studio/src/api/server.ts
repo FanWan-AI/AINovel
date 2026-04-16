@@ -318,6 +318,7 @@ interface AssistantTaskSnapshot {
   readonly steps: Record<string, AssistantTaskStepSnapshot>;
   readonly lastUpdatedAt: string;
   readonly error?: string;
+  readonly retryContext?: Record<string, unknown>;
 }
 
 interface AssistantEvaluateScopeChapter {
@@ -351,6 +352,15 @@ interface AssistantEvaluateReport {
   readonly dimensions: AssistantEvaluateDimensions;
   readonly blockingIssues: ReadonlyArray<string>;
   readonly evidence: ReadonlyArray<AssistantEvaluateEvidence>;
+}
+
+interface AssistantOptimizeIteration {
+  readonly iteration: number;
+  readonly stepId: string;
+  readonly runId?: string;
+  readonly score?: number;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly reason?: string;
 }
 
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
@@ -648,6 +658,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const taskId = payload.taskId;
     const previous = assistantTaskSnapshots.get(taskId);
     const currentStepId = typeof payload.stepId === "string" ? payload.stepId : undefined;
+    const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
+      ? payload.retryContext as Record<string, unknown>
+      : undefined;
 
     if (event === "assistant:done") {
       assistantTaskSnapshots.set(taskId, {
@@ -658,6 +671,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         steps: previous?.steps ?? {},
         lastUpdatedAt: timestamp,
         ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+        ...(retryContext ? { retryContext } : {}),
       });
       broadcast(event, data);
       return;
@@ -692,6 +706,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       steps: nextSteps,
       lastUpdatedAt: timestamp,
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+      ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
     });
 
     broadcast(event, data);
@@ -2598,6 +2613,286 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       taskId,
       report,
       suggestedNextActions,
+    });
+  });
+
+  app.post("/api/assistant/optimize", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return c.json({
+        code: "ASSISTANT_OPTIMIZE_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const body = rawBody as Record<string, unknown>;
+    const errors: Array<{ field: string; message: string }> = [];
+    const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+    if (!taskId) errors.push({ field: "taskId", message: "taskId must be a non-empty string" });
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (!sessionId) errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
+    const parsedScope = parseAssistantEvaluateScope(body.scope);
+    if (!parsedScope.ok) {
+      errors.push(...parsedScope.errors);
+    }
+    const rawTargetScore = typeof body.targetScore === "number" ? body.targetScore : Number.NaN;
+    if (!Number.isFinite(rawTargetScore) || rawTargetScore < 0 || rawTargetScore > 100) {
+      errors.push({ field: "targetScore", message: "targetScore must be a number between 0 and 100" });
+    }
+    const maxIterations = typeof body.maxIterations === "number" ? body.maxIterations : Number.NaN;
+    if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 20) {
+      errors.push({ field: "maxIterations", message: "maxIterations must be an integer between 1 and 20" });
+    }
+    const mode = typeof body.mode === "string" && body.mode.trim().length > 0 ? body.mode.trim() : "spot-fix";
+    const brief = normalizeBriefValue(body.brief);
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_OPTIMIZE_VALIDATION_FAILED", errors }, 422);
+    }
+
+    const scope = (parsedScope as { ok: true; value: AssistantEvaluateScope }).value;
+    if (scope.type !== "chapter") {
+      return c.json({
+        code: "ASSISTANT_OPTIMIZE_VALIDATION_FAILED",
+        errors: [{ field: "scope.type", message: "scope.type must be 'chapter' for optimize" }],
+      }, 422);
+    }
+    const targetScore = clampSerializableScore(rawTargetScore);
+    const runIds: string[] = [];
+    const iterations: AssistantOptimizeIteration[] = [];
+    let terminationReason: "target-score-reached" | "max-iterations-reached" | "iteration-failed" = "max-iterations-reached";
+
+    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+      const stepId = `optimize-${iteration}`;
+      emitAssistantTaskEvent("assistant:step:start", {
+        taskId,
+        sessionId,
+        stepId,
+        action: "optimize-iteration",
+        iteration,
+        maxIterations,
+      });
+      broadcast("assistant:optimize:iteration", {
+        taskId,
+        sessionId,
+        stepId,
+        iteration,
+        maxIterations,
+        status: "running",
+        timestamp: new Date().toISOString(),
+      });
+      const reviseResponse = await app.request(
+        `http://localhost/api/books/${scope.bookId}/revise/${scope.chapter}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode, ...(brief !== undefined ? { brief } : {}) }),
+        },
+      );
+      const revisePayload = await reviseResponse.json().catch(() => null) as Record<string, unknown> | null;
+      const reviseRunId = typeof revisePayload?.["runId"] === "string" ? revisePayload["runId"] : null;
+      if (!reviseResponse.ok || reviseRunId === null) {
+        const reason = !reviseResponse.ok ? await parseApiErrorMessage(reviseResponse) : "revise step did not return runId";
+        const retryContext = {
+          scope,
+          targetScore,
+          maxIterations,
+          nextIteration: iteration,
+          completedIterations: iteration - 1,
+          runIds,
+        };
+        iterations.push({ iteration, stepId, status: "failed", reason });
+        emitAssistantTaskEvent("assistant:step:fail", {
+          taskId,
+          sessionId,
+          stepId,
+          action: "optimize-iteration",
+          error: reason,
+          retryContext,
+        });
+        emitAssistantTaskEvent("assistant:done", {
+          taskId,
+          sessionId,
+          status: "failed",
+          error: reason,
+          stepId,
+          retryContext,
+        });
+        broadcast("assistant:optimize:iteration", {
+          taskId,
+          sessionId,
+          stepId,
+          iteration,
+          maxIterations,
+          status: "failed",
+          reason,
+          timestamp: new Date().toISOString(),
+        });
+        return c.json({
+          taskId,
+          sessionId,
+          status: "failed",
+          terminationReason: "iteration-failed",
+          iterations,
+          retryContext,
+        }, 500);
+      }
+
+      runIds.push(reviseRunId);
+      const run = await waitForChapterRunCompletion(scope.bookId, reviseRunId);
+      if (run.status !== "succeeded") {
+        const reason = run.error?.trim() || "revise step failed";
+        const retryContext = {
+          scope,
+          targetScore,
+          maxIterations,
+          nextIteration: iteration,
+          completedIterations: iteration - 1,
+          runIds,
+          lastRunId: reviseRunId,
+        };
+        iterations.push({ iteration, stepId, runId: reviseRunId, status: "failed", reason });
+        emitAssistantTaskEvent("assistant:step:fail", {
+          taskId,
+          sessionId,
+          stepId,
+          action: "optimize-iteration",
+          runId: reviseRunId,
+          error: reason,
+          retryContext,
+        });
+        emitAssistantTaskEvent("assistant:done", {
+          taskId,
+          sessionId,
+          status: "failed",
+          error: reason,
+          stepId,
+          retryContext,
+        });
+        broadcast("assistant:optimize:iteration", {
+          taskId,
+          sessionId,
+          stepId,
+          iteration,
+          maxIterations,
+          runId: reviseRunId,
+          status: "failed",
+          reason,
+          timestamp: new Date().toISOString(),
+        });
+        return c.json({
+          taskId,
+          sessionId,
+          status: "failed",
+          terminationReason: "iteration-failed",
+          iterations,
+          retryContext,
+        }, 500);
+      }
+
+      const optimizeRuns = (
+        await Promise.all(runIds.map(async (runId) => await chapterRunStore.getRun(scope.bookId, runId)))
+      ).filter((item): item is ChapterRunRecord => item !== null);
+      const report = deriveAssistantEvaluateReport(optimizeRuns, scope);
+      const score = report.overallScore;
+      const reachedTarget = score >= targetScore;
+      const isLastIteration = iteration >= maxIterations;
+      const stopReason = reachedTarget ? "target-score-reached" : isLastIteration ? "max-iterations-reached" : undefined;
+      iterations.push({
+        iteration,
+        stepId,
+        runId: reviseRunId,
+        score,
+        status: "succeeded",
+        ...(stopReason ? { reason: stopReason } : {}),
+      });
+      emitAssistantTaskEvent("assistant:step:success", {
+        taskId,
+        sessionId,
+        stepId,
+        action: "optimize-iteration",
+        runId: reviseRunId,
+      });
+      broadcast("assistant:optimize:iteration", {
+        taskId,
+        sessionId,
+        stepId,
+        iteration,
+        maxIterations,
+        runId: reviseRunId,
+        score,
+        targetScore,
+        status: "succeeded",
+        ...(stopReason ? { reason: stopReason } : {}),
+        timestamp: new Date().toISOString(),
+      });
+      if (reachedTarget) {
+        terminationReason = "target-score-reached";
+        emitAssistantTaskEvent("assistant:done", {
+          taskId,
+          sessionId,
+          status: "succeeded",
+          stepId,
+        });
+        return c.json({
+          taskId,
+          sessionId,
+          status: "succeeded",
+          terminationReason,
+          finalScore: score,
+          targetScore,
+          maxIterations,
+          iterations,
+          retryContext: null,
+        });
+      }
+      if (isLastIteration) {
+        terminationReason = "max-iterations-reached";
+        const retryContext = {
+          scope,
+          targetScore,
+          maxIterations,
+          nextIteration: maxIterations + 1,
+          completedIterations: maxIterations,
+          runIds,
+          lastScore: score,
+        };
+        emitAssistantTaskEvent("assistant:done", {
+          taskId,
+          sessionId,
+          status: "succeeded",
+          stepId,
+          retryContext,
+        });
+        return c.json({
+          taskId,
+          sessionId,
+          status: "needs_confirmation",
+          terminationReason,
+          finalScore: score,
+          targetScore,
+          maxIterations,
+          iterations,
+          nextAction: "manual-confirmation",
+          retryContext,
+        });
+      }
+    }
+
+    return c.json({
+      taskId,
+      sessionId,
+      status: "needs_confirmation",
+      terminationReason,
+      targetScore,
+      maxIterations,
+      iterations,
+      nextAction: "manual-confirmation",
+      retryContext: {
+        scope,
+        targetScore,
+        maxIterations,
+        completedIterations: iterations.length,
+        runIds,
+      },
     });
   });
 

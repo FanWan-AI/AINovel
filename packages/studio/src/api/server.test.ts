@@ -763,6 +763,145 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(reviseDraftMock).not.toHaveBeenCalled();
   });
 
+  it("runs assistant optimize loop and stops automatically when targetScore is reached", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/optimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_optimize_001",
+        sessionId: "asst_s_optimize_001",
+        scope: { type: "chapter", bookId: "demo-book", chapter: 3 },
+        targetScore: 80,
+        maxIterations: 3,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      status: string;
+      terminationReason: string;
+      targetScore: number;
+      iterations: Array<{ iteration: number; score?: number; reason?: string }>;
+      retryContext: unknown;
+    };
+    expect(payload.status).toBe("succeeded");
+    expect(payload.terminationReason).toBe("target-score-reached");
+    expect(payload.targetScore).toBe(80);
+    expect(payload.retryContext).toBeNull();
+    expect(payload.iterations).toHaveLength(1);
+    expect(payload.iterations[0]?.iteration).toBe(1);
+    expect(payload.iterations[0]?.score).toBeGreaterThanOrEqual(80);
+    expect(payload.iterations[0]?.reason).toBe("target-score-reached");
+  });
+
+  it("stops assistant optimize loop at maxIterations and returns manual confirmation context for low-score runs", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    reviseDraftMock.mockResolvedValue({
+      chapterNumber: 3,
+      wordCount: 1800,
+      fixedIssues: [],
+      applied: false,
+      status: "ready-for-review",
+      unchangedReason: "未命中目标改动",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/optimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_optimize_002",
+        sessionId: "asst_s_optimize_002",
+        scope: { type: "chapter", bookId: "demo-book", chapter: 3 },
+        targetScore: 95,
+        maxIterations: 3,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      status: string;
+      terminationReason: string;
+      nextAction?: string;
+      retryContext?: { completedIterations?: number; runIds?: string[] };
+      iterations: Array<{ iteration: number; score?: number; reason?: string }>;
+    };
+    expect(payload.status).toBe("needs_confirmation");
+    expect(payload.terminationReason).toBe("max-iterations-reached");
+    expect(payload.nextAction).toBe("manual-confirmation");
+    expect(payload.iterations).toHaveLength(3);
+    expect(payload.iterations[2]?.reason).toBe("max-iterations-reached");
+    expect(payload.retryContext?.completedIterations).toBe(3);
+    expect(payload.retryContext?.runIds).toHaveLength(3);
+    expect(reviseDraftMock).toHaveBeenCalledTimes(3);
+
+    const task = await app.request("http://localhost/api/assistant/tasks/asst_t_optimize_002");
+    expect(task.status).toBe(200);
+    await expect(task.json()).resolves.toMatchObject({
+      status: "succeeded",
+      retryContext: {
+        completedIterations: 3,
+      },
+    });
+  });
+
+  it("returns retryable context when assistant optimize iteration fails", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    reviseDraftMock.mockRejectedValueOnce(new Error("revise exploded"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/optimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_optimize_003",
+        sessionId: "asst_s_optimize_003",
+        scope: { type: "chapter", bookId: "demo-book", chapter: 3 },
+        targetScore: 90,
+        maxIterations: 2,
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    const payload = await response.json() as {
+      status: string;
+      terminationReason: string;
+      retryContext: { nextIteration?: number; completedIterations?: number; runIds?: string[] };
+      iterations: Array<{ status: string }>;
+    };
+    expect(payload.status).toBe("failed");
+    expect(payload.terminationReason).toBe("iteration-failed");
+    expect(payload.retryContext.nextIteration).toBe(1);
+    expect(payload.retryContext.completedIterations).toBe(0);
+    expect(payload.retryContext.runIds).toHaveLength(1);
+    expect(payload.iterations[0]?.status).toBe("failed");
+
+    const task = await app.request("http://localhost/api/assistant/tasks/asst_t_optimize_003");
+    expect(task.status).toBe(200);
+    await expect(task.json()).resolves.toMatchObject({
+      status: "failed",
+      retryContext: {
+        nextIteration: 1,
+        completedIterations: 0,
+      },
+    });
+  });
+
   it("daemon session and events expose pause/resume transitions", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
