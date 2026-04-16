@@ -15,9 +15,9 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
@@ -325,6 +325,117 @@ interface AssistantTaskSnapshot {
   readonly retryContext?: Record<string, unknown>;
 }
 
+interface AssistantTaskSnapshotStore {
+  readonly version: 1;
+  readonly updatedAt: string;
+  readonly tasks: ReadonlyArray<AssistantTaskSnapshot>;
+}
+
+const ASSISTANT_TASK_SNAPSHOT_STORE_FILE = ".inkos/assistant-task-snapshots.json";
+const ASSISTANT_TASK_SNAPSHOT_PERSIST_DEBOUNCE_MS = 150;
+
+function parseAssistantTaskStepStatus(input: unknown): AssistantTaskStepSnapshot["status"] | null {
+  if (input === "running" || input === "succeeded" || input === "failed") {
+    return input;
+  }
+  return null;
+}
+
+function normalizeAssistantTaskStepSnapshot(input: unknown, fallbackStepId?: string): AssistantTaskStepSnapshot | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const stepId = typeof payload.stepId === "string" ? payload.stepId : fallbackStepId;
+  const status = parseAssistantTaskStepStatus(payload.status);
+  if (!stepId || !status) {
+    return null;
+  }
+  return {
+    stepId,
+    status,
+    ...(typeof payload.action === "string" ? { action: payload.action } : {}),
+    ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
+    ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
+    ...(typeof payload.finishedAt === "string" ? { finishedAt: payload.finishedAt } : {}),
+    ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+  };
+}
+
+function parseAssistantTaskStatus(input: unknown): AssistantTaskSnapshot["status"] | null {
+  if (input === "running" || input === "succeeded" || input === "failed") {
+    return input;
+  }
+  return null;
+}
+
+function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string): AssistantTaskSnapshot | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const taskId = typeof payload.taskId === "string" ? payload.taskId : fallbackTaskId;
+  const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
+  const status = parseAssistantTaskStatus(payload.status);
+  const lastUpdatedAt = typeof payload.lastUpdatedAt === "string" ? payload.lastUpdatedAt : "";
+  if (!taskId || !sessionId || !status || !lastUpdatedAt) {
+    return null;
+  }
+  const rawSteps = typeof payload.steps === "object" && payload.steps !== null && !Array.isArray(payload.steps) ? payload.steps : {};
+  const steps = Object.entries(rawSteps).reduce<Record<string, AssistantTaskStepSnapshot>>((acc, [stepId, value]) => {
+    const normalized = normalizeAssistantTaskStepSnapshot(value, stepId);
+    if (normalized) {
+      acc[normalized.stepId] = normalized;
+    }
+    return acc;
+  }, {});
+  const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
+    ? payload.retryContext as Record<string, unknown>
+    : undefined;
+  return {
+    taskId,
+    sessionId,
+    status,
+    ...(typeof payload.currentStepId === "string" ? { currentStepId: payload.currentStepId } : {}),
+    steps,
+    lastUpdatedAt,
+    ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+    ...(retryContext ? { retryContext } : {}),
+  };
+}
+
+function parseAssistantTaskSnapshotStore(input: unknown): AssistantTaskSnapshotStore {
+  const tasks = new Map<string, AssistantTaskSnapshot>();
+  const collect = (snapshot: AssistantTaskSnapshot) => {
+    const previous = tasks.get(snapshot.taskId);
+    if (!previous || previous.lastUpdatedAt < snapshot.lastUpdatedAt) {
+      tasks.set(snapshot.taskId, snapshot);
+    }
+  };
+  if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+    const payload = input as Record<string, unknown>;
+    if (Array.isArray(payload.tasks)) {
+      payload.tasks.forEach((entry) => {
+        const normalized = normalizeAssistantTaskSnapshot(entry);
+        if (normalized) collect(normalized);
+      });
+    }
+    Object.entries(payload).forEach(([taskId, value]) => {
+      if (taskId === "version" || taskId === "updatedAt" || taskId === "tasks") {
+        return;
+      }
+      const normalized = normalizeAssistantTaskSnapshot(value, taskId);
+      if (normalized) collect(normalized);
+    });
+  }
+  const ordered = [...tasks.values()].sort((left, right) => right.lastUpdatedAt.localeCompare(left.lastUpdatedAt));
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    tasks: ordered,
+  };
+}
+
 interface AssistantEvaluateScopeChapter {
   readonly type: "chapter";
   readonly bookId: string;
@@ -613,6 +724,54 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   let runtimeEventIdCounter = 0;
   let sseClientCount = 0;
   const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
+  const assistantTaskSnapshotStorePath = join(root, ASSISTANT_TASK_SNAPSHOT_STORE_FILE);
+  let assistantTaskSnapshotPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let assistantTaskSnapshotPersistInFlight: Promise<void> | null = null;
+  let assistantTaskSnapshotPersistQueued = false;
+
+  async function persistAssistantTaskSnapshotsNow(): Promise<void> {
+    const store = parseAssistantTaskSnapshotStore({ tasks: [...assistantTaskSnapshots.values()] });
+    await mkdir(dirname(assistantTaskSnapshotStorePath), { recursive: true });
+    await writeFile(assistantTaskSnapshotStorePath, JSON.stringify(store, null, 2), "utf-8");
+  }
+
+  function flushAssistantTaskSnapshotPersistence(): void {
+    if (assistantTaskSnapshotPersistInFlight) {
+      assistantTaskSnapshotPersistQueued = true;
+      return;
+    }
+    assistantTaskSnapshotPersistInFlight = persistAssistantTaskSnapshotsNow()
+      .catch(() => undefined)
+      .finally(() => {
+        assistantTaskSnapshotPersistInFlight = null;
+        if (assistantTaskSnapshotPersistQueued) {
+          assistantTaskSnapshotPersistQueued = false;
+          flushAssistantTaskSnapshotPersistence();
+        }
+      });
+  }
+
+  function scheduleAssistantTaskSnapshotPersistence(): void {
+    if (assistantTaskSnapshotPersistTimer !== null) {
+      clearTimeout(assistantTaskSnapshotPersistTimer);
+    }
+    assistantTaskSnapshotPersistTimer = setTimeout(() => {
+      assistantTaskSnapshotPersistTimer = null;
+      flushAssistantTaskSnapshotPersistence();
+    }, ASSISTANT_TASK_SNAPSHOT_PERSIST_DEBOUNCE_MS);
+  }
+
+  const assistantTaskSnapshotHydration = (async () => {
+    try {
+      const raw = await readFile(assistantTaskSnapshotStorePath, "utf-8");
+      const parsed = parseAssistantTaskSnapshotStore(JSON.parse(raw));
+      parsed.tasks.forEach((snapshot) => {
+        assistantTaskSnapshots.set(snapshot.taskId, snapshot);
+      });
+    } catch {
+      // ignore hydration errors and fallback to in-memory snapshots
+    }
+  })();
 
   function deriveEventSource(event: string): RuntimeEventSource {
     if (event.startsWith("daemon:")) return "daemon";
@@ -677,6 +836,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...(typeof payload.error === "string" ? { error: payload.error } : {}),
         ...(retryContext ? { retryContext } : {}),
       });
+      scheduleAssistantTaskSnapshotPersistence();
       broadcast(event, data);
       return;
     }
@@ -712,6 +872,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
       ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
     });
+    scheduleAssistantTaskSnapshotPersistence();
 
     broadcast(event, data);
   }
@@ -2933,7 +3094,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   });
 
-  app.get("/api/assistant/tasks/:taskId", (c) => {
+  app.get("/api/assistant/tasks", async (c) => {
+    await assistantTaskSnapshotHydration;
+    const rawLimit = Number.parseInt(c.req.query("limit") ?? "20", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 20;
+    const tasks = [...assistantTaskSnapshots.values()]
+      .sort((left, right) => right.lastUpdatedAt.localeCompare(left.lastUpdatedAt))
+      .slice(0, limit)
+      .map((snapshot) => ({
+        taskId: snapshot.taskId,
+        sessionId: snapshot.sessionId,
+        status: snapshot.status,
+        ...(snapshot.currentStepId ? { currentStepId: snapshot.currentStepId } : {}),
+        lastUpdatedAt: snapshot.lastUpdatedAt,
+        ...(snapshot.error ? { error: snapshot.error } : {}),
+      }));
+    return c.json({ tasks });
+  });
+
+  app.get("/api/assistant/tasks/:taskId", async (c) => {
+    await assistantTaskSnapshotHydration;
     const taskId = c.req.param("taskId");
     const snapshot = assistantTaskSnapshots.get(taskId);
     if (!snapshot) {
