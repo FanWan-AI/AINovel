@@ -29,6 +29,11 @@ import { validateNextPlanInput } from "./schemas/next-plan-schema.js";
 import { previewNextPlan, PlanLowConfidenceError } from "./services/next-plan-service.js";
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
+import {
+  evaluateAssistantPolicy,
+  type AssistantPolicyBudgetInput,
+  type AssistantPolicyPlanStep,
+} from "./services/assistant-policy-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
 import { runtimeEventStore, deriveRuntimeEvent } from "./lib/runtime-event-store.js";
 import {
@@ -370,6 +375,86 @@ function parseAssistantPlanScope(rawScope: unknown): { ok: true; scope: Assistan
     };
   }
   return { ok: true, scope: validation.value.plan.bookScope };
+}
+
+function parseAssistantPolicyBudget(
+  rawBudget: unknown,
+): { ok: true; value?: AssistantPolicyBudgetInput } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (rawBudget === undefined) return { ok: true };
+  if (typeof rawBudget !== "object" || rawBudget === null || Array.isArray(rawBudget)) {
+    return { ok: false, errors: [{ field: "budget", message: "budget must be an object" }] };
+  }
+  const budget = rawBudget as Record<string, unknown>;
+  const spent = typeof budget.spent === "number" ? budget.spent : Number.NaN;
+  const limit = typeof budget.limit === "number" ? budget.limit : Number.NaN;
+  const errors: Array<{ field: string; message: string }> = [];
+  if (!Number.isFinite(spent) || spent < 0) {
+    errors.push({ field: "budget.spent", message: "budget.spent must be a non-negative number" });
+  }
+  if (!Number.isFinite(limit) || limit < 0) {
+    errors.push({ field: "budget.limit", message: "budget.limit must be a non-negative number" });
+  }
+  const currency = typeof budget.currency === "string" ? budget.currency.trim() : "";
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      spent,
+      limit,
+      ...(currency ? { currency } : {}),
+    },
+  };
+}
+
+function parseAssistantPolicyPermissions(
+  rawPermissions: unknown,
+): { ok: true; value?: string[] } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (rawPermissions === undefined) return { ok: true };
+  if (!Array.isArray(rawPermissions)) {
+    return { ok: false, errors: [{ field: "permissions", message: "permissions must be an array of strings" }] };
+  }
+  const permissions = rawPermissions
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .filter((value) => value.length > 0);
+  if (permissions.length !== rawPermissions.length) {
+    return { ok: false, errors: [{ field: "permissions", message: "permissions must contain non-empty strings" }] };
+  }
+  return { ok: true, value: permissions };
+}
+
+function parseAssistantPolicyPlan(
+  rawPlan: unknown,
+): { ok: true; value: AssistantPolicyPlanStep[] } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (!Array.isArray(rawPlan) || rawPlan.length === 0) {
+    return { ok: false, errors: [{ field: "plan", message: "plan must be a non-empty array" }] };
+  }
+  const normalized: AssistantPolicyPlanStep[] = [];
+  const errors: Array<{ field: string; message: string }> = [];
+  rawPlan.forEach((rawStep, index) => {
+    if (typeof rawStep !== "object" || rawStep === null || Array.isArray(rawStep)) {
+      errors.push({ field: `plan[${index}]`, message: "plan item must be an object" });
+      return;
+    }
+    const step = rawStep as Record<string, unknown>;
+    const action = typeof step.action === "string" ? step.action.trim() : "";
+    if (!action) {
+      errors.push({ field: `plan[${index}].action`, message: "action must be a non-empty string" });
+      return;
+    }
+    const mode = typeof step.mode === "string" && step.mode.trim().length > 0 ? step.mode.trim() : undefined;
+    const bookId = typeof step.bookId === "string" && step.bookId.trim().length > 0 ? step.bookId.trim() : undefined;
+    const bookIds = Array.isArray(step.bookIds) && step.bookIds.every((book) => typeof book === "string" && book.trim().length > 0)
+      ? step.bookIds.map((book) => (book as string).trim())
+      : undefined;
+    normalized.push({
+      action,
+      ...(mode ? { mode } : {}),
+      ...(bookId ? { bookId } : {}),
+      ...(bookIds ? { bookIds } : {}),
+    });
+  });
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, value: normalized };
 }
 
 function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
@@ -2021,6 +2106,46 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   });
 
+  app.post("/api/assistant/policy/check", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return c.json({
+        code: "ASSISTANT_POLICY_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const body = rawBody as Record<string, unknown>;
+    const errors: Array<{ field: string; message: string }> = [];
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (!sessionId) errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
+    const planParsed = parseAssistantPolicyPlan(body.plan);
+    if (!planParsed.ok) {
+      errors.push(...planParsed.errors);
+    }
+    const budgetParsed = parseAssistantPolicyBudget(body.budget);
+    if (!budgetParsed.ok) {
+      errors.push(...budgetParsed.errors);
+    }
+    const permissionsParsed = parseAssistantPolicyPermissions(body.permissions);
+    if (!permissionsParsed.ok) {
+      errors.push(...permissionsParsed.errors);
+    }
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_POLICY_VALIDATION_FAILED", errors }, 422);
+    }
+    const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
+    const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
+    const planInput = (planParsed as { ok: true; value: AssistantPolicyPlanStep[] }).value;
+
+    const policy = evaluateAssistantPolicy({
+      plan: planInput,
+      approved: body.approved === true,
+      ...(permissionsInput ? { permissions: permissionsInput } : {}),
+      ...(budgetInput ? { budget: budgetInput } : {}),
+    });
+    return c.json(policy);
+  });
+
   app.post("/api/assistant/execute", async (c) => {
     const rawBody = await c.req.json<unknown>().catch(() => null);
     if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
@@ -2039,16 +2164,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (!Array.isArray(body.plan)) {
       errors.push({ field: "plan", message: "plan must be a non-empty array" });
     }
+    const budgetParsed = parseAssistantPolicyBudget(body.budget);
+    if (!budgetParsed.ok) {
+      errors.push(...budgetParsed.errors);
+    }
+    const permissionsParsed = parseAssistantPolicyPermissions(body.permissions);
+    if (!permissionsParsed.ok) {
+      errors.push(...permissionsParsed.errors);
+    }
     if (errors.length > 0) {
       return c.json({ code: "ASSISTANT_EXECUTE_VALIDATION_FAILED", errors }, 422);
-    }
-    if (!approved) {
-      return c.json({
-        error: {
-          code: "ASSISTANT_EXECUTE_NOT_APPROVED",
-          message: "Assistant task must be approved before execution.",
-        },
-      }, 409);
     }
 
     const plan = (body.plan as AssistantPlanStep[])
@@ -2065,6 +2190,56 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           message: "plan must include audit, revise and re-audit steps with single book and chapter targets",
         }],
       }, 422);
+    }
+    const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
+    const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
+
+    const policy = evaluateAssistantPolicy({
+      plan,
+      approved,
+      ...(permissionsInput ? { permissions: permissionsInput } : {}),
+      ...(budgetInput ? { budget: budgetInput } : {}),
+    });
+    const blockedMessage = policy.reasons.join("; ");
+    const finalBlockedMessage = blockedMessage.length > 0
+      ? blockedMessage
+      : "Assistant execution blocked by policy guard.";
+    if (policy.budgetWarning) {
+      broadcast("assistant:budget:warning", {
+        taskId,
+        sessionId,
+        level: "warn",
+        severity: "warn",
+        timestamp: new Date().toISOString(),
+        ...policy.budgetWarning,
+      });
+    }
+    if (!policy.allow) {
+      broadcast("assistant:policy:blocked", {
+        taskId,
+        sessionId,
+        level: "warn",
+        severity: "warn",
+        timestamp: new Date().toISOString(),
+        riskLevel: policy.riskLevel,
+        reasons: policy.reasons,
+        requiredApprovals: policy.requiredApprovals,
+        message: finalBlockedMessage,
+      });
+      emitAssistantTaskEvent("assistant:done", {
+        taskId,
+        sessionId,
+        status: "failed",
+        error: finalBlockedMessage,
+      });
+      return c.json({
+        error: {
+          code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
+          message: finalBlockedMessage,
+          taskId,
+          policy,
+        },
+      }, 409);
     }
 
     const auditRunId = generateAssistantRunId();

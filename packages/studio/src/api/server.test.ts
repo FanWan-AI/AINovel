@@ -482,6 +482,33 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("returns assistant policy check result with required approvals for high-risk actions", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/policy/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_policy_001",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      allow: false,
+      riskLevel: "high",
+      requiredApprovals: ["high-risk-manual-approval"],
+      reasons: expect.arrayContaining(["High-risk actions require manual approval before execution."]),
+    });
+  });
+
   it("executes assistant audit->revise->re-audit chain and returns running with step runIds", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -537,7 +564,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(assistantEventBody.entries[0]?.data.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("blocks unapproved assistant execute requests", async () => {
+  it("blocks unapproved high-risk assistant execute requests", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -550,20 +577,87 @@ describe("createStudioServer daemon lifecycle", () => {
         approved: false,
         plan: [
           { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
-          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
           { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
         ],
       }),
     });
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
+    await expect(response.json()).resolves.toMatchObject({
       error: {
-        code: "ASSISTANT_EXECUTE_NOT_APPROVED",
-        message: "Assistant task must be approved before execution.",
+        code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
+        taskId: "asst_t_execute_002",
+        policy: {
+          allow: false,
+          riskLevel: "high",
+          requiredApprovals: ["high-risk-manual-approval"],
+        },
       },
     });
     expect(auditChapterMock).not.toHaveBeenCalled();
     expect(reviseDraftMock).not.toHaveBeenCalled();
+
+    const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002");
+    expect(task.status).toBe(200);
+    await expect(task.json()).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("emits budget warning and blocks assistant execute when budget is exceeded", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_budget_001",
+        sessionId: "asst_s_budget_001",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+        budget: {
+          spent: 1200,
+          limit: 1000,
+          currency: "tokens",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
+        taskId: "asst_t_execute_budget_001",
+        policy: {
+          allow: false,
+          riskLevel: "medium",
+          budgetWarning: {
+            spent: 1200,
+            limit: 1000,
+            overBy: 200,
+            currency: "tokens",
+          },
+        },
+      },
+    });
+    expect(auditChapterMock).not.toHaveBeenCalled();
+    expect(reviseDraftMock).not.toHaveBeenCalled();
+
+    const budgetEvents = await app.request("http://localhost/api/runtime/events?event=assistant:budget:warning&limit=5");
+    expect(budgetEvents.status).toBe(200);
+    const budgetEventsBody = await budgetEvents.json() as { entries: Array<{ data: { taskId: string; severity: string } }> };
+    expect(budgetEventsBody.entries[0]).toBeDefined();
+    expect(budgetEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
+    expect(budgetEventsBody.entries[0]!.data.severity).toBe("warn");
+
+    const blockedEvents = await app.request("http://localhost/api/runtime/events?event=assistant:policy:blocked&limit=5");
+    expect(blockedEvents.status).toBe(200);
+    const blockedEventsBody = await blockedEvents.json() as { entries: Array<{ data: { taskId: string } }> };
+    expect(blockedEventsBody.entries[0]).toBeDefined();
+    expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
   });
 
   it("interrupts assistant execute chain when a step fails and propagates the error", async () => {
