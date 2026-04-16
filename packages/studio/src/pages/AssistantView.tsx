@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BotMessageSquare, Loader2, Send, Sparkles } from "lucide-react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { useApi } from "../hooks/use-api";
+import { fetchJson, postApi, useApi } from "../hooks/use-api";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
 import { cn } from "../lib/utils";
+import { useSSE, type SSEMessage } from "../hooks/use-sse";
 
 interface Nav {
   toDashboard: () => void;
@@ -23,6 +24,7 @@ export interface AssistantComposerState {
   readonly loading: boolean;
   readonly nextMessageId: number;
   readonly taskPlan: AssistantTaskPlan | null;
+  readonly taskExecution: AssistantTaskExecution | null;
 }
 
 export interface AssistantQuickAction {
@@ -57,6 +59,41 @@ export interface AssistantTaskPlan extends AssistantConfirmationDraft {
   readonly updatedAt: number;
 }
 
+export interface AssistantTaskTimelineEntry {
+  readonly id: string;
+  readonly event: "assistant:step:start" | "assistant:step:success" | "assistant:step:fail" | "assistant:done";
+  readonly taskId: string;
+  readonly stepId?: string;
+  readonly action?: string;
+  readonly message: string;
+  readonly timestamp: number;
+}
+
+export interface AssistantTaskExecution {
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
+  readonly lastSyncedAt: number;
+}
+
+interface AssistantTaskSnapshot {
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly currentStepId?: string;
+  readonly steps: Record<string, {
+    readonly stepId: string;
+    readonly action?: string;
+    readonly status: "running" | "succeeded" | "failed";
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly error?: string;
+  }>;
+  readonly lastUpdatedAt: string;
+  readonly error?: string;
+}
+
 const MOCK_ASSISTANT_RESPONSE_DELAY_MS = 450;
 const BOOK_STATUS_ACTIVE = "active";
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|write[-\s]?next/u;
@@ -67,6 +104,12 @@ const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actio
   "write-next": "assistant.actionWriteNext",
   audit: "assistant.actionAudit",
 };
+const ASSISTANT_EVENT_SET = new Set([
+  "assistant:step:start",
+  "assistant:step:success",
+  "assistant:step:fail",
+  "assistant:done",
+]);
 const VALID_ASSISTANT_TASK_PLAN_TRANSITIONS: Record<AssistantTaskPlanStatus, ReadonlyArray<AssistantTaskPlanStatus>> = {
   draft: ["awaiting-confirm", "cancelled"],
   "awaiting-confirm": ["running", "cancelled"],
@@ -89,7 +132,165 @@ export function createAssistantInitialState(): AssistantComposerState {
     loading: false,
     nextMessageId: 1,
     taskPlan: null,
+    taskExecution: null,
   };
+}
+
+export function parseAssistantEventTimestamp(input: unknown, fallback = Date.now()): number {
+  if (typeof input === "number" && Number.isFinite(input)) return input;
+  if (typeof input === "string") {
+    const parsed = Date.parse(input);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+export function formatAssistantTimelineMessage(
+  event: AssistantTaskTimelineEntry["event"],
+  payload: { readonly stepId?: string; readonly action?: string; readonly error?: string; readonly status?: string },
+): string {
+  if (event === "assistant:done") {
+    return payload.status === "succeeded" ? "任务完成" : `任务失败${payload.error ? `：${payload.error}` : ""}`;
+  }
+  const stepText = payload.stepId ? `步骤 ${payload.stepId}` : "步骤";
+  const actionText = payload.action ? `（${payload.action}）` : "";
+  if (event === "assistant:step:start") return `${stepText}${actionText} 开始`;
+  if (event === "assistant:step:success") return `${stepText}${actionText} 成功`;
+  return `${stepText}${actionText} 失败${payload.error ? `：${payload.error}` : ""}`;
+}
+
+export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, message: SSEMessage): AssistantComposerState {
+  if (!ASSISTANT_EVENT_SET.has(message.event)) {
+    return state;
+  }
+  const payload = typeof message.data === "object" && message.data !== null ? message.data as Record<string, unknown> : null;
+  const taskId = typeof payload?.taskId === "string" ? payload.taskId : "";
+  if (!taskId || (state.taskExecution && state.taskExecution.taskId !== taskId)) {
+    return state;
+  }
+  const timestamp = parseAssistantEventTimestamp(payload?.timestamp, message.timestamp);
+  const nextEntry: AssistantTaskTimelineEntry = {
+    id: `${taskId}-${message.event}-${timestamp}-${state.taskExecution?.timeline.length ?? 0}`,
+    event: message.event as AssistantTaskTimelineEntry["event"],
+    taskId,
+    ...(typeof payload?.stepId === "string" ? { stepId: payload.stepId } : {}),
+    ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
+    message: formatAssistantTimelineMessage(
+      message.event as AssistantTaskTimelineEntry["event"],
+      {
+        ...(typeof payload?.stepId === "string" ? { stepId: payload.stepId } : {}),
+        ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
+        ...(typeof payload?.error === "string" ? { error: payload.error } : {}),
+        ...(typeof payload?.status === "string" ? { status: payload.status } : {}),
+      },
+    ),
+    timestamp,
+  };
+  const currentExecution = state.taskExecution ?? {
+    taskId,
+    sessionId: typeof payload?.sessionId === "string" ? payload.sessionId : "",
+    status: "running" as const,
+    timeline: [],
+    lastSyncedAt: timestamp,
+  };
+  const terminal = message.event === "assistant:done" || message.event === "assistant:step:fail";
+  const taskStatus = message.event === "assistant:done"
+    ? (payload?.status === "succeeded" ? "succeeded" : "failed")
+    : (message.event === "assistant:step:fail" ? "failed" : "running");
+  return {
+    ...state,
+    loading: terminal ? false : state.loading,
+    taskPlan: terminal
+      ? (state.taskPlan ? transitionAssistantTaskPlan(state.taskPlan, taskStatus, timestamp) : state.taskPlan)
+      : state.taskPlan,
+    taskExecution: {
+      ...currentExecution,
+      status: taskStatus,
+      timeline: [...currentExecution.timeline.slice(-49), nextEntry],
+      lastSyncedAt: timestamp,
+    },
+  };
+}
+
+export function reconcileAssistantTaskFromSnapshot(
+  state: AssistantComposerState,
+  snapshot: AssistantTaskSnapshot,
+): AssistantComposerState {
+  if (!state.taskExecution || state.taskExecution.taskId !== snapshot.taskId) {
+    return state;
+  }
+  const timeline = Object.values(snapshot.steps)
+    .flatMap((step) => {
+      const entries: AssistantTaskTimelineEntry[] = [];
+      if (step.startedAt) {
+        const startedAt = parseAssistantEventTimestamp(step.startedAt);
+        entries.push({
+          id: `${snapshot.taskId}-${step.stepId}-start-${startedAt}`,
+          event: "assistant:step:start",
+          taskId: snapshot.taskId,
+          stepId: step.stepId,
+          ...(step.action ? { action: step.action } : {}),
+          message: formatAssistantTimelineMessage("assistant:step:start", { stepId: step.stepId, action: step.action }),
+          timestamp: startedAt,
+        });
+      }
+      if (step.status !== "running" && step.finishedAt) {
+        const event = step.status === "succeeded" ? "assistant:step:success" : "assistant:step:fail";
+        const finishedAt = parseAssistantEventTimestamp(step.finishedAt);
+        entries.push({
+          id: `${snapshot.taskId}-${step.stepId}-${event}-${finishedAt}`,
+          event,
+          taskId: snapshot.taskId,
+          stepId: step.stepId,
+          ...(step.action ? { action: step.action } : {}),
+          message: formatAssistantTimelineMessage(event, { stepId: step.stepId, action: step.action, error: step.error }),
+          timestamp: finishedAt,
+        });
+      }
+      return entries;
+    })
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (snapshot.status !== "running") {
+    const doneAt = parseAssistantEventTimestamp(snapshot.lastUpdatedAt);
+    timeline.push({
+      id: `${snapshot.taskId}-done-${doneAt}`,
+      event: "assistant:done",
+      taskId: snapshot.taskId,
+      message: formatAssistantTimelineMessage("assistant:done", { status: snapshot.status, error: snapshot.error }),
+      timestamp: doneAt,
+    });
+  }
+  const done = snapshot.status !== "running";
+  return {
+    ...state,
+    loading: done ? false : state.loading,
+    taskPlan: done ? (state.taskPlan ? transitionAssistantTaskPlan(state.taskPlan, snapshot.status, Date.now()) : state.taskPlan) : state.taskPlan,
+    taskExecution: {
+      taskId: snapshot.taskId,
+      sessionId: snapshot.sessionId,
+      status: snapshot.status,
+      timeline,
+      lastSyncedAt: Date.now(),
+    },
+  };
+}
+
+export function AssistantTimeline({ entries }: { readonly entries: ReadonlyArray<AssistantTaskTimelineEntry> }) {
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mt-3 rounded-md border border-border/70 bg-card/40 p-3" data-testid="assistant-task-timeline">
+      <div className="text-xs text-muted-foreground mb-2">任务进度</div>
+      <ul className="space-y-1 text-xs">
+        {entries.map((entry) => (
+          <li key={entry.id} data-testid="assistant-task-timeline-item">
+            {new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false })} · {entry.message}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function createAssistantTaskPlanDraft(draft: AssistantConfirmationDraft, now = Date.now()): AssistantTaskPlan {
@@ -143,6 +344,7 @@ export function submitAssistantInput(
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalized, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
     taskPlan: state.taskPlan,
+    taskExecution: state.taskExecution,
   };
 }
 
@@ -155,6 +357,7 @@ export function completeAssistantResponse(
     ...state,
     loading: false,
     taskPlan: state.taskPlan,
+    taskExecution: state.taskExecution,
     messages: [...state.messages, {
       id: `msg-${state.nextMessageId}`,
       role: "assistant",
@@ -254,6 +457,7 @@ export function requestAssistantConfirmation(
     input: "",
     loading: false,
     taskPlan: transitionAssistantTaskPlan(taskPlanDraft, "awaiting-confirm", now),
+    taskExecution: null,
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalizedPrompt, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
   };
@@ -278,6 +482,7 @@ export function cancelAssistantPendingAction(state: AssistantComposerState, now 
     ...state,
     loading: false,
     taskPlan: transitionAssistantTaskPlan(state.taskPlan, "cancelled", now),
+    taskExecution: null,
   };
 }
 
@@ -343,6 +548,8 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
 export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const [state, setState] = useState<AssistantComposerState>(() => createAssistantInitialState());
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
+  const { messages: sseMessages } = useSSE();
+  const sseCursorRef = useRef(0);
   const activeBooks = useMemo(
     () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
     [booksData?.books],
@@ -370,6 +577,34 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     [state.taskPlan, activeBookTitleById, t],
   );
 
+  useEffect(() => {
+    if (sseCursorRef.current >= sseMessages.length) {
+      return;
+    }
+    const pending = sseMessages.slice(sseCursorRef.current);
+    sseCursorRef.current = sseMessages.length;
+    setState((prev) => pending.reduce((next, message) => applyAssistantTaskEventFromSSE(next, message), prev));
+  }, [sseMessages]);
+
+  useEffect(() => {
+    if (!state.taskExecution || state.taskExecution.status !== "running") {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${state.taskExecution?.taskId}`);
+          setState((prev) => reconcileAssistantTaskFromSnapshot(prev, snapshot));
+        } catch {
+          // ignore polling errors and continue relying on SSE
+        }
+      })();
+    }, 2000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [state.taskExecution]);
+
   const sendPrompt = (rawPrompt: string) => {
     const normalizedPrompt = rawPrompt.trim();
     if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
@@ -395,14 +630,45 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     }, MOCK_ASSISTANT_RESPONSE_DELAY_MS);
   };
 
-  const handleConfirmAction = () => {
+  const handleConfirmAction = async () => {
     if (!state.taskPlan || state.taskPlan.status !== "awaiting-confirm") {
       return;
     }
     setState((prev) => confirmAssistantPendingAction(prev));
-    setTimeout(() => {
-      setState((prev) => completeAssistantTaskPlanExecution(prev, "succeeded"));
-    }, MOCK_ASSISTANT_RESPONSE_DELAY_MS);
+    try {
+      const sessionId = `asst_s_${Date.now().toString(36)}`;
+      const scope = state.taskPlan.targetBookIds.length === activeBookIds.length
+        ? { type: "all-active" as const }
+        : { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] };
+      const planned = await postApi<{
+        readonly taskId: string;
+        readonly plan: ReadonlyArray<Record<string, unknown>>;
+      }>("/assistant/plan", {
+        sessionId,
+        input: state.taskPlan.prompt,
+        scope,
+      });
+      await postApi("/assistant/execute", {
+        taskId: planned.taskId,
+        sessionId,
+        approved: true,
+        plan: planned.plan,
+      });
+      setState((prev) => ({
+        ...prev,
+        taskExecution: {
+          taskId: planned.taskId,
+          sessionId,
+          status: "running",
+          timeline: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.timeline : [],
+          lastSyncedAt: Date.now(),
+        },
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setScopeBlockHint(message);
+      setState((prev) => completeAssistantTaskPlanExecution(prev, "failed"));
+    }
   };
 
   const showLoading = state.loading && state.messages.length === 0;
@@ -522,6 +788,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
               onCancel={() => setState((prev) => cancelAssistantPendingAction(prev))}
             />
           )}
+          <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
       </section>
 
       <section className="shrink-0 rounded-xl border border-border/70 bg-card/40 p-4 space-y-3" data-testid="assistant-input-panel">

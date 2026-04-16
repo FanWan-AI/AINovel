@@ -6,6 +6,11 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
+interface EventSourceLike {
+  addEventListener: (type: string, listener: (e: MessageEvent) => void) => void;
+  removeEventListener: (type: string, listener: (e: MessageEvent) => void) => void;
+}
+
 const LEGACY_EVENT_ALIASES: Record<string, string> = {
   "revise:complete": "revise:success",
   "revise:error": "revise:fail",
@@ -70,6 +75,10 @@ export const STUDIO_SSE_EVENTS = [
   "agent:start",
   "agent:complete",
   "agent:error",
+  "assistant:step:start",
+  "assistant:step:success",
+  "assistant:step:fail",
+  "assistant:done",
   "audit:start",
   "audit:complete",
   "audit:error",
@@ -102,6 +111,17 @@ export const STUDIO_SSE_EVENTS = [
   "ping",
 ] as const;
 
+export function subscribeStudioSSEEvents(es: EventSourceLike, listener: (e: MessageEvent) => void): () => void {
+  for (const event of STUDIO_SSE_EVENTS) {
+    es.addEventListener(event, listener);
+  }
+  return () => {
+    for (const event of STUDIO_SSE_EVENTS) {
+      es.removeEventListener(event, listener);
+    }
+  };
+}
+
 export function useSSE(url = "/api/events") {
   const [messages, setMessages] = useState<ReadonlyArray<SSEMessage>>([]);
   const [connected, setConnected] = useState(false);
@@ -120,17 +140,23 @@ export function useSSE(url = "/api/events") {
       }
       try {
         const data = e.data ? JSON.parse(e.data) : null;
-        setMessages((prev) => [...prev.slice(-99), { event: e.type, data, timestamp: Date.now() }]);
+        const normalizedEvent = normalizeStudioEventName(e.type);
+        const payloadTimestamp = typeof data === "object" && data !== null
+          ? (data as { timestamp?: unknown }).timestamp
+          : undefined;
+        const timestamp = typeof payloadTimestamp === "string"
+          ? (Date.parse(payloadTimestamp) || Date.now())
+          : Date.now();
+        setMessages((prev) => [...prev.slice(-99), { event: normalizedEvent, data, timestamp }]);
       } catch {
         // ignore parse errors
       }
     };
 
-    for (const event of STUDIO_SSE_EVENTS) {
-      es.addEventListener(event, handleEvent);
-    }
+    const unsubscribe = subscribeStudioSSEEvents(es, handleEvent);
 
     return () => {
+      unsubscribe();
       es.close();
       esRef.current = null;
     };

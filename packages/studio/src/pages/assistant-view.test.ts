@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { TFunction } from "../hooks/use-i18n";
 import {
   ASSISTANT_QUICK_ACTIONS,
+  AssistantTimeline,
   AssistantView,
   applyAssistantInput,
   applyAssistantQuickAction,
+  applyAssistantTaskEventFromSSE,
   buildAssistantConfirmationDraft,
   cancelAssistantPendingAction,
   confirmAssistantPendingAction,
@@ -15,6 +17,7 @@ import {
   createAssistantTaskPlanDraft,
   createAssistantInitialState,
   requestAssistantConfirmation,
+  reconcileAssistantTaskFromSnapshot,
   resolveAssistantScopeBookIds,
   transitionAssistantTaskPlan,
   submitAssistantInput,
@@ -139,5 +142,70 @@ describe("AssistantView", () => {
   it("does not mutate state when completion is requested outside running status", () => {
     const state = createAssistantInitialState();
     expect(completeAssistantTaskPlanExecution(state, "succeeded", 7000)).toBe(state);
+  });
+
+  it("applies assistant step/done events into timeline and closes loading on completion", () => {
+    const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 8000);
+    const running = confirmAssistantPendingAction(pending, 8001);
+    const withTask = { ...running, taskExecution: { taskId: "asst_t_01", sessionId: "asst_s_01", status: "running" as const, timeline: [], lastSyncedAt: 8001 } };
+
+    const started = applyAssistantTaskEventFromSSE(withTask, {
+      event: "assistant:step:start",
+      data: { taskId: "asst_t_01", sessionId: "asst_s_01", stepId: "s1", action: "audit", timestamp: "2026-01-01T00:00:01.000Z" },
+      timestamp: 8002,
+    });
+    const done = applyAssistantTaskEventFromSSE(started, {
+      event: "assistant:done",
+      data: { taskId: "asst_t_01", sessionId: "asst_s_01", status: "succeeded", timestamp: "2026-01-01T00:00:02.000Z" },
+      timestamp: 8003,
+    });
+
+    expect(started.taskExecution?.timeline).toHaveLength(1);
+    expect(done.taskExecution?.status).toBe("succeeded");
+    expect(done.taskExecution?.timeline.at(-1)?.event).toBe("assistant:done");
+    expect(done.loading).toBe(false);
+    expect(done.taskPlan?.status).toBe("succeeded");
+  });
+
+  it("reconciles timeline from task snapshot when sse events are missing", () => {
+    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9000);
+    const running = confirmAssistantPendingAction(pending, 9001);
+    const withTask = { ...running, taskExecution: { taskId: "asst_t_02", sessionId: "asst_s_02", status: "running" as const, timeline: [], lastSyncedAt: 9001 } };
+
+    const reconciled = reconcileAssistantTaskFromSnapshot(withTask, {
+      taskId: "asst_t_02",
+      sessionId: "asst_s_02",
+      status: "failed",
+      steps: {
+        s1: { stepId: "s1", action: "audit", status: "failed", startedAt: "2026-01-01T00:00:01.000Z", finishedAt: "2026-01-01T00:00:02.000Z", error: "boom" },
+      },
+      lastUpdatedAt: "2026-01-01T00:00:03.000Z",
+      error: "boom",
+    });
+
+    expect(reconciled.taskExecution?.timeline.map((entry) => entry.event)).toEqual(["assistant:step:start", "assistant:step:fail", "assistant:done"]);
+    expect(reconciled.loading).toBe(false);
+    expect(reconciled.taskPlan?.status).toBe("failed");
+  });
+
+  it("renders timeline items", () => {
+    const html = renderToStaticMarkup(createElement(AssistantTimeline, {
+      entries: [
+        {
+          id: "t1",
+          event: "assistant:step:start",
+          taskId: "asst_t_01",
+          stepId: "s1",
+          action: "audit",
+          message: "步骤 s1（audit） 开始",
+          timestamp: Date.parse("2026-01-01T00:00:01.000Z"),
+        },
+      ],
+    }));
+
+    expect(html).toContain("assistant-task-timeline");
+    expect(html).toContain("步骤 s1");
   });
 });
