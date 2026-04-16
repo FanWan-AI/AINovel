@@ -648,9 +648,16 @@ describe("createStudioServer daemon lifecycle", () => {
 
     const budgetEvents = await app.request("http://localhost/api/runtime/events?event=assistant:budget:warning&limit=5");
     expect(budgetEvents.status).toBe(200);
-    const budgetEventsBody = await budgetEvents.json() as { entries: Array<{ data: { taskId?: string; severity?: string } }> };
-    expect(budgetEventsBody.entries[0]?.data.taskId).toBe("asst_t_execute_budget_001");
-    expect(budgetEventsBody.entries[0]?.data.severity).toBe("warn");
+    const budgetEventsBody = await budgetEvents.json() as { entries: Array<{ data: { taskId: string; severity: string } }> };
+    expect(budgetEventsBody.entries[0]).toBeDefined();
+    expect(budgetEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
+    expect(budgetEventsBody.entries[0]!.data.severity).toBe("warn");
+
+    const blockedEvents = await app.request("http://localhost/api/runtime/events?event=assistant:policy:blocked&limit=5");
+    expect(blockedEvents.status).toBe(200);
+    const blockedEventsBody = await blockedEvents.json() as { entries: Array<{ data: { taskId: string } }> };
+    expect(blockedEventsBody.entries[0]).toBeDefined();
+    expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
   });
 
   it("interrupts assistant execute chain when a step fails and propagates the error", async () => {

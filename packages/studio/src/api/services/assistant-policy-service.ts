@@ -62,7 +62,6 @@ function collectMissingPermissions(
   for (const step of plan) {
     if (step.action === "rewrite" || (step.action === "revise" && step.mode === "rewrite")) {
       required.add("assistant.execute.rewrite");
-      continue;
     }
     if (step.action === "anti-detect" || (step.action === "revise" && step.mode === "anti-detect")) {
       required.add("assistant.execute.anti-detect");

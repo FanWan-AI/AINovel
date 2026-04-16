@@ -422,6 +422,41 @@ function parseAssistantPolicyPermissions(
   return { ok: true, value: permissions };
 }
 
+function parseAssistantPolicyPlan(
+  rawPlan: unknown,
+): { ok: true; value: AssistantPolicyPlanStep[] } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (!Array.isArray(rawPlan) || rawPlan.length === 0) {
+    return { ok: false, errors: [{ field: "plan", message: "plan must be a non-empty array" }] };
+  }
+  const normalized: AssistantPolicyPlanStep[] = [];
+  const errors: Array<{ field: string; message: string }> = [];
+  rawPlan.forEach((rawStep, index) => {
+    if (typeof rawStep !== "object" || rawStep === null || Array.isArray(rawStep)) {
+      errors.push({ field: `plan[${index}]`, message: "plan item must be an object" });
+      return;
+    }
+    const step = rawStep as Record<string, unknown>;
+    const action = typeof step.action === "string" ? step.action.trim() : "";
+    if (!action) {
+      errors.push({ field: `plan[${index}].action`, message: "action must be a non-empty string" });
+      return;
+    }
+    const mode = typeof step.mode === "string" && step.mode.trim().length > 0 ? step.mode.trim() : undefined;
+    const bookId = typeof step.bookId === "string" && step.bookId.trim().length > 0 ? step.bookId.trim() : undefined;
+    const bookIds = Array.isArray(step.bookIds) && step.bookIds.every((book) => typeof book === "string" && book.trim().length > 0)
+      ? step.bookIds.map((book) => (book as string).trim())
+      : undefined;
+    normalized.push({
+      action,
+      ...(mode ? { mode } : {}),
+      ...(bookId ? { bookId } : {}),
+      ...(bookIds ? { bookIds } : {}),
+    });
+  });
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, value: normalized };
+}
+
 function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
   if (scope.type !== "book-list") return {};
   if (scope.bookIds.length === 1) {
@@ -2083,8 +2118,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const errors: Array<{ field: string; message: string }> = [];
     const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
     if (!sessionId) errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
-    if (!Array.isArray(body.plan) || body.plan.length === 0) {
-      errors.push({ field: "plan", message: "plan must be a non-empty array" });
+    const planParsed = parseAssistantPolicyPlan(body.plan);
+    if (!planParsed.ok) {
+      errors.push(...planParsed.errors);
     }
     const budgetParsed = parseAssistantPolicyBudget(body.budget);
     if (!budgetParsed.ok) {
@@ -2099,9 +2135,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
+    const planInput = (planParsed as { ok: true; value: AssistantPolicyPlanStep[] }).value;
 
     const policy = evaluateAssistantPolicy({
-      plan: body.plan as AssistantPolicyPlanStep[],
+      plan: planInput,
       approved: body.approved === true,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
@@ -2163,7 +2200,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
-    const blockedMessage = policy.reasons.join(" ");
+    const blockedMessage = policy.reasons.join("; ");
+    const finalBlockedMessage = blockedMessage.length > 0
+      ? blockedMessage
+      : "Assistant execution blocked by policy guard.";
     if (policy.budgetWarning) {
       broadcast("assistant:budget:warning", {
         taskId,
@@ -2184,18 +2224,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         riskLevel: policy.riskLevel,
         reasons: policy.reasons,
         requiredApprovals: policy.requiredApprovals,
-        message: blockedMessage || "Assistant execution blocked by policy guard.",
+        message: finalBlockedMessage,
       });
       emitAssistantTaskEvent("assistant:done", {
         taskId,
         sessionId,
         status: "failed",
-        error: blockedMessage || "Assistant execution blocked by policy guard.",
+        error: finalBlockedMessage,
       });
       return c.json({
         error: {
           code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
-          message: blockedMessage || "Assistant execution blocked by policy guard.",
+          message: finalBlockedMessage,
           taskId,
           policy,
         },
