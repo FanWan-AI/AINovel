@@ -509,6 +509,75 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("aggregates assistant evaluate report with serializable scores and traceable evidence", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const revise = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "spot-fix" }),
+    });
+    expect(revise.status).toBe(200);
+    const reviseBody = await revise.json() as { runId: string };
+
+    await vi.waitFor(async () => {
+      const run = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseBody.runId}`);
+      const payload = await run.json() as { status: string };
+      expect(payload.status).toBe("succeeded");
+    });
+
+    const response = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_001",
+        scope: { type: "chapter", bookId: "demo-book", chapter: 3 },
+        runIds: [reviseBody.runId],
+      }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      taskId: "asst_t_eval_001",
+      report: {
+        overallScore: expect.any(Number),
+        dimensions: {
+          continuity: expect.any(Number),
+          readability: expect.any(Number),
+          styleConsistency: expect.any(Number),
+          aiTraceRisk: expect.any(Number),
+        },
+        evidence: [{
+          source: expect.stringContaining(`chapter-run:${reviseBody.runId}`),
+          excerpt: expect.any(String),
+          reason: expect.any(String),
+        }],
+      },
+      suggestedNextActions: expect.any(Array),
+    });
+
+    const emptyResponse = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_002",
+        scope: { type: "chapter", bookId: "demo-book", chapter: 99 },
+      }),
+    });
+    expect(emptyResponse.status).toBe(200);
+    const emptyPayload = await emptyResponse.json() as {
+      report: {
+        evidence: Array<{ source: string }>;
+      };
+    };
+    expect(emptyPayload.report.evidence).toHaveLength(1);
+    expect(emptyPayload.report.evidence[0]?.source).toContain("chapter:demo-book:99");
+  });
+
   it("executes assistant audit->revise->re-audit chain and returns running with step runIds", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });

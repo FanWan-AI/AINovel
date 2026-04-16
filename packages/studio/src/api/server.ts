@@ -80,6 +80,8 @@ type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | 
 type RuntimeActionStage = "start" | "progress" | "success" | "fail" | "unchanged";
 const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
+const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
+const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
 const BRIEF_TRACE_MAX_ITEMS = 8;
 const WRITING_GOVERNANCE_SCHEMA_VERSION = 1;
 const WRITING_STYLE_TEMPLATE_VALUES = ["narrative-balance", "dialogue-driven", "cinematic"] as const;
@@ -318,6 +320,39 @@ interface AssistantTaskSnapshot {
   readonly error?: string;
 }
 
+interface AssistantEvaluateScopeChapter {
+  readonly type: "chapter";
+  readonly bookId: string;
+  readonly chapter: number;
+}
+
+interface AssistantEvaluateScopeBook {
+  readonly type: "book";
+  readonly bookId: string;
+}
+
+type AssistantEvaluateScope = AssistantEvaluateScopeChapter | AssistantEvaluateScopeBook;
+
+interface AssistantEvaluateEvidence {
+  readonly source: string;
+  readonly excerpt: string;
+  readonly reason: string;
+}
+
+interface AssistantEvaluateDimensions {
+  readonly continuity: number;
+  readonly readability: number;
+  readonly styleConsistency: number;
+  readonly aiTraceRisk: number;
+}
+
+interface AssistantEvaluateReport {
+  readonly overallScore: number;
+  readonly dimensions: AssistantEvaluateDimensions;
+  readonly blockingIssues: ReadonlyArray<string>;
+  readonly evidence: ReadonlyArray<AssistantEvaluateEvidence>;
+}
+
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
@@ -455,6 +490,40 @@ function parseAssistantPolicyPlan(
   });
   if (errors.length > 0) return { ok: false, errors };
   return { ok: true, value: normalized };
+}
+
+function parseAssistantEvaluateScope(
+  rawScope: unknown,
+): { ok: true; value: AssistantEvaluateScope } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (typeof rawScope !== "object" || rawScope === null || Array.isArray(rawScope)) {
+    return { ok: false, errors: [{ field: "scope", message: "scope must be an object" }] };
+  }
+  const scope = rawScope as Record<string, unknown>;
+  const type = typeof scope.type === "string" ? scope.type : "";
+  const bookId = typeof scope.bookId === "string" ? scope.bookId.trim() : "";
+  const errors: Array<{ field: string; message: string }> = [];
+  if (!bookId) {
+    errors.push({ field: "scope.bookId", message: "scope.bookId must be a non-empty string" });
+  }
+  if (type === "chapter") {
+    const chapter = typeof scope.chapter === "number" ? scope.chapter : Number.NaN;
+    if (!Number.isInteger(chapter) || chapter < 1) {
+      errors.push({ field: "scope.chapter", message: "scope.chapter must be a positive integer" });
+    }
+    if (errors.length > 0) return { ok: false, errors };
+    return {
+      ok: true,
+      value: { type: "chapter", bookId, chapter },
+    };
+  }
+  if (type === "book") {
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, value: { type: "book", bookId } };
+  }
+  return {
+    ok: false,
+    errors: [{ field: "scope.type", message: "scope.type must be either 'chapter' or 'book'" }],
+  };
 }
 
 function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
@@ -900,6 +969,72 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   function generateAssistantRunId(): string {
     return `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  }
+
+  function clampSerializableScore(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  function deriveAssistantEvaluateReport(
+    runs: ReadonlyArray<ChapterRunRecord>,
+    scope: AssistantEvaluateScope,
+  ): AssistantEvaluateReport {
+    const failedRuns = runs.filter((run) => run.status === "failed");
+    const unchangedRuns = runs.filter((run) => run.decision === "unchanged");
+    const appliedRuns = runs.filter((run) => run.decision === "applied");
+    const dimensions: AssistantEvaluateDimensions = {
+      continuity: clampSerializableScore(85 - failedRuns.length * 25 - unchangedRuns.length * 8 + appliedRuns.length * 2),
+      readability: clampSerializableScore(82 - failedRuns.length * 18 - unchangedRuns.length * 5 + appliedRuns.length * 2),
+      styleConsistency: clampSerializableScore(80 - failedRuns.length * 15 - unchangedRuns.length * 6 + appliedRuns.length * 2),
+      aiTraceRisk: clampSerializableScore(78 - failedRuns.length * 20 - unchangedRuns.length * 7 + appliedRuns.length),
+    };
+    const overallScore = clampSerializableScore(
+      (dimensions.continuity + dimensions.readability + dimensions.styleConsistency + dimensions.aiTraceRisk) / 4,
+    );
+
+    const blockingIssues = [
+      ...failedRuns
+        .map((run) => run.error?.trim() || `章节 ${run.chapter} 的 ${run.actionType}${ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE}`)
+        .filter((issue) => issue.length > 0),
+      ...unchangedRuns
+        .map((run) => run.unchangedReason?.trim() || `章节 ${run.chapter}${ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE}`)
+        .filter((issue) => issue.length > 0),
+    ];
+
+    const evidenceFromRuns = runs.map((run) => {
+      const terminalEvent = [...run.events].reverse().find((event) => event.type === "success" || event.type === "fail");
+      const excerpt = run.error?.trim()
+        || run.unchangedReason?.trim()
+        || terminalEvent?.message?.trim()
+        || `${run.actionType} ${run.status}`;
+      const reason = run.status === "failed"
+        ? "运行失败，存在阻断风险"
+        : run.decision === "unchanged"
+          ? "运行完成但未应用修订"
+          : "运行成功并应用修订";
+      return {
+        source: `chapter-run:${run.runId}:book:${run.bookId}:chapter:${run.chapter}`,
+        excerpt,
+        reason,
+      };
+    });
+    const fallbackSource = scope.type === "chapter"
+      ? `chapter:${scope.bookId}:${scope.chapter}`
+      : `book:${scope.bookId}`;
+    const fallbackEvidence: AssistantEvaluateEvidence = {
+      source: fallbackSource,
+      excerpt: "暂无运行证据，使用范围级摘要作为最小可追溯证据。",
+      reason: "当前评估未检索到可用 run 数据",
+    };
+
+    const evidence = evidenceFromRuns.length > 0 ? evidenceFromRuns : [fallbackEvidence];
+    return {
+      overallScore,
+      dimensions,
+      blockingIssues,
+      evidence,
+    };
   }
 
   function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
@@ -2414,6 +2549,55 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         [reAuditStep.stepId]: reAuditRunId,
       },
       currentStepId: reviseStep.stepId,
+    });
+  });
+
+  app.post("/api/assistant/evaluate", async (c) => {
+    const rawBody = await c.req.json<unknown>().catch(() => null);
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return c.json({
+        code: "ASSISTANT_EVALUATE_VALIDATION_FAILED",
+        errors: [{ field: "body", message: "Request body must be a JSON object" }],
+      }, 422);
+    }
+    const body = rawBody as Record<string, unknown>;
+    const errors: Array<{ field: string; message: string }> = [];
+    const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+    if (!taskId) {
+      errors.push({ field: "taskId", message: "taskId must be a non-empty string" });
+    }
+    const parsedScope = parseAssistantEvaluateScope(body.scope);
+    if (!parsedScope.ok) {
+      errors.push(...parsedScope.errors);
+    }
+    const runIds = Array.isArray(body.runIds)
+      ? body.runIds
+        .map((runId) => typeof runId === "string" ? runId.trim() : "")
+        .filter((runId) => runId.length > 0)
+      : [];
+    if (body.runIds !== undefined && (!Array.isArray(body.runIds) || runIds.length === 0)) {
+      errors.push({ field: "runIds", message: "runIds must be an array with at least one non-empty string when provided" });
+    }
+    if (errors.length > 0) {
+      return c.json({ code: "ASSISTANT_EVALUATE_VALIDATION_FAILED", errors }, 422);
+    }
+
+    const scope = (parsedScope as { ok: true; value: AssistantEvaluateScope }).value;
+    const listedRuns = await chapterRunStore.listRuns(
+      scope.bookId,
+      scope.type === "chapter" ? { chapter: scope.chapter, limit: 100 } : { limit: 100 },
+    );
+    const scopedRuns = runIds.length > 0
+      ? listedRuns.filter((run) => runIds.includes(run.runId))
+      : listedRuns;
+    const report = deriveAssistantEvaluateReport(scopedRuns, scope);
+    const suggestedNextActions = report.blockingIssues.length > 0 || report.overallScore < 75
+      ? ["spot-fix", "re-audit"]
+      : ["write-next"];
+    return c.json({
+      taskId,
+      report,
+      suggestedNextActions,
     });
   });
 

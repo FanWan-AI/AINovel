@@ -4,6 +4,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { fetchJson, postApi, useApi } from "../hooks/use-api";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
+import { QualityReportCard, type QualityReportPayload } from "../components/assistant/QualityReportCard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 
@@ -25,6 +26,8 @@ export interface AssistantComposerState {
   readonly nextMessageId: number;
   readonly taskPlan: AssistantTaskPlan | null;
   readonly taskExecution: AssistantTaskExecution | null;
+  readonly qualityReport: QualityReportPayload | null;
+  readonly suggestedNextActions: ReadonlyArray<string>;
 }
 
 export interface AssistantQuickAction {
@@ -73,9 +76,16 @@ export interface AssistantTaskExecution {
   readonly taskId: string;
   readonly sessionId: string;
   readonly status: "running" | "succeeded" | "failed";
+  readonly stepRunIds?: Record<string, string>;
   readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
   readonly lastSyncedAt: number;
   readonly nextSequence: number;
+}
+
+export interface AssistantEvaluateResponse {
+  readonly taskId: string;
+  readonly report: QualityReportPayload;
+  readonly suggestedNextActions: ReadonlyArray<string>;
 }
 
 interface AssistantTaskSnapshot {
@@ -136,6 +146,8 @@ export function createAssistantInitialState(): AssistantComposerState {
     nextMessageId: 1,
     taskPlan: null,
     taskExecution: null,
+    qualityReport: null,
+    suggestedNextActions: [],
   };
 }
 
@@ -274,6 +286,7 @@ export function reconcileAssistantTaskFromSnapshot(
       taskId: snapshot.taskId,
       sessionId: snapshot.sessionId,
       status: snapshot.status,
+      stepRunIds: state.taskExecution.stepRunIds,
       timeline,
       lastSyncedAt: Date.now(),
       nextSequence: timeline.length,
@@ -355,6 +368,8 @@ export function submitAssistantInput(
     nextMessageId: state.nextMessageId + 1,
     taskPlan: state.taskPlan,
     taskExecution: state.taskExecution,
+    qualityReport: state.qualityReport,
+    suggestedNextActions: state.suggestedNextActions,
   };
 }
 
@@ -368,6 +383,8 @@ export function completeAssistantResponse(
     loading: false,
     taskPlan: state.taskPlan,
     taskExecution: state.taskExecution,
+    qualityReport: state.qualityReport,
+    suggestedNextActions: state.suggestedNextActions,
     messages: [...state.messages, {
       id: `msg-${state.nextMessageId}`,
       role: "assistant",
@@ -468,6 +485,8 @@ export function requestAssistantConfirmation(
     loading: false,
     taskPlan: transitionAssistantTaskPlan(taskPlanDraft, "awaiting-confirm", now),
     taskExecution: null,
+    qualityReport: null,
+    suggestedNextActions: [],
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalizedPrompt, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
   };
@@ -481,6 +500,8 @@ export function confirmAssistantPendingAction(state: AssistantComposerState, now
     ...state,
     loading: true,
     taskPlan: transitionAssistantTaskPlan(state.taskPlan, "running", now),
+    qualityReport: null,
+    suggestedNextActions: [],
   };
 }
 
@@ -493,6 +514,8 @@ export function cancelAssistantPendingAction(state: AssistantComposerState, now 
     loading: false,
     taskPlan: transitionAssistantTaskPlan(state.taskPlan, "cancelled", now),
     taskExecution: null,
+    qualityReport: null,
+    suggestedNextActions: [],
   };
 }
 
@@ -513,6 +536,31 @@ export function completeAssistantTaskPlanExecution(
 
 export function generateAssistantSkeletonReply(prompt: string): string {
   return `收到：${prompt}\n\n这是主页面骨架阶段的模拟响应，后续将接入编排与工具调用。`;
+}
+
+export function buildAssistantNextActionPrompt(action: string, taskPlan: AssistantTaskPlan | null): string {
+  const normalized = action.trim().toLowerCase();
+  const chapterLabel = taskPlan?.chapterNumber ? `第${taskPlan.chapterNumber}章` : "当前章节";
+  if (normalized === "spot-fix") {
+    return `请对${chapterLabel}执行 spot-fix 修复，并聚焦阻断问题。`;
+  }
+  if (normalized === "re-audit") {
+    return `请重新审计${chapterLabel}并给出质量结论。`;
+  }
+  if (normalized === "write-next") {
+    return "请写下一章。";
+  }
+  return `请执行下一步动作：${action}`;
+}
+
+export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | undefined): string[] {
+  if (!stepRunIds) return [];
+  return Object.entries(stepRunIds).reduce<string[]>((acc, [, runId]) => {
+    if (runId.length > 0) {
+      acc.push(runId);
+    }
+    return acc;
+  }, []);
 }
 
 function EmptyConversation() {
@@ -560,6 +608,7 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { messages: sseMessages } = useSSE();
   const sseCursorRef = useRef(0);
+  const evaluatedTaskIdRef = useRef<string | null>(null);
   const activeBooks = useMemo(
     () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
     [booksData?.books],
@@ -615,6 +664,47 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
     };
   }, [state.taskExecution?.taskId, state.taskExecution?.status]);
 
+  useEffect(() => {
+    if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {
+      return;
+    }
+    if (evaluatedTaskIdRef.current === state.taskExecution.taskId) {
+      return;
+    }
+    evaluatedTaskIdRef.current = state.taskExecution.taskId;
+
+    const scope = state.taskPlan.chapterNumber !== undefined
+      ? {
+          type: "chapter" as const,
+          bookId: state.taskPlan.targetBookIds[0] ?? "",
+          chapter: state.taskPlan.chapterNumber,
+        }
+      : {
+          type: "book" as const,
+          bookId: state.taskPlan.targetBookIds[0] ?? "",
+        };
+    if (!scope.bookId) {
+      return;
+    }
+    const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
+    void (async () => {
+      try {
+        const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+          taskId: state.taskExecution.taskId,
+          scope,
+          ...(runIds.length > 0 ? { runIds } : {}),
+        });
+        setState((prev) => ({
+          ...prev,
+          qualityReport: result.report,
+          suggestedNextActions: result.suggestedNextActions,
+        }));
+      } catch {
+        // ignore evaluate errors, task timeline remains available
+      }
+    })();
+  }, [state.taskExecution, state.taskPlan]);
+
   const sendPrompt = (rawPrompt: string) => {
     const normalizedPrompt = rawPrompt.trim();
     if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
@@ -658,7 +748,9 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
         input: state.taskPlan.prompt,
         scope,
       });
-      await postApi("/assistant/execute", {
+      const executeResult = await postApi<{
+        readonly stepRunIds?: Record<string, string>;
+      }>("/assistant/execute", {
         taskId: planned.taskId,
         sessionId,
         approved: true,
@@ -670,16 +762,23 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
           taskId: planned.taskId,
           sessionId,
           status: "running",
+          stepRunIds: executeResult.stepRunIds,
           timeline: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.timeline : [],
           lastSyncedAt: Date.now(),
           nextSequence: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.nextSequence : 0,
         },
+        qualityReport: null,
+        suggestedNextActions: [],
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setScopeBlockHint(`任务执行失败：${message}`);
       setState((prev) => completeAssistantTaskPlanExecution(prev, "failed"));
     }
+  };
+
+  const handleRunNextAction = (action: string) => {
+    sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
   };
 
   const showLoading = state.loading && state.messages.length === 0;
@@ -797,6 +896,13 @@ export function AssistantView({ nav, theme: _theme, t }: { nav: Nav; theme: Them
               targetBookTitles={taskPlanTargetBookTitles}
               onConfirm={handleConfirmAction}
               onCancel={() => setState((prev) => cancelAssistantPendingAction(prev))}
+            />
+          )}
+          {state.qualityReport && (
+            <QualityReportCard
+              report={state.qualityReport}
+              suggestedNextActions={state.suggestedNextActions}
+              onRunNextAction={handleRunNextAction}
             />
           )}
           <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
