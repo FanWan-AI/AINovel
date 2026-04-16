@@ -415,7 +415,7 @@ describe("createStudioServer daemon lifecycle", () => {
       body: JSON.stringify({
         sessionId: "asst_s_001",
         input: "审计第14章并自动修复主要问题",
-        scope: { type: "book-list", bookIds: ["demo-book", "demo-book"] },
+        scope: { type: "book-list", bookIds: ["demo-book", "book-b"] },
       }),
     });
     expect(successResponse.status).toBe(200);
@@ -424,9 +424,9 @@ describe("createStudioServer daemon lifecycle", () => {
       intent: "audit_and_optimize",
       requiresConfirmation: true,
       plan: [
-        { stepId: "s1", action: "audit", chapter: 14, bookId: "demo-book" },
-        { stepId: "s2", action: "revise", mode: "spot-fix", chapter: 14, bookId: "demo-book" },
-        { stepId: "s3", action: "re-audit", chapter: 14, bookId: "demo-book" },
+        { stepId: "s1", action: "audit", chapter: 14, bookIds: ["demo-book", "book-b"] },
+        { stepId: "s2", action: "revise", mode: "spot-fix", chapter: 14, bookIds: ["demo-book", "book-b"] },
+        { stepId: "s3", action: "re-audit", chapter: 14, bookIds: ["demo-book", "book-b"] },
       ],
       risk: {
         level: "medium",

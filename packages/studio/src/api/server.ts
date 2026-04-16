@@ -16,6 +16,7 @@ import {
   type LogEntry,
 } from "@actalk/inkos-core";
 import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
@@ -271,7 +272,7 @@ function buildBriefTrace(
 // --- V2 confirm run-state store ---
 const bookCreateRunStore = new BookCreateRunStore();
 
-type AssistantPlanIntent = "audit_and_optimize" | "write_next";
+type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next";
 type AssistantPlanRiskLevel = "low" | "medium" | "high";
 type AssistantPlanScope = DaemonPlanBookScope;
 
@@ -279,12 +280,13 @@ interface AssistantPlanStep {
   readonly stepId: string;
   readonly action: string;
   readonly bookId?: string;
+  readonly bookIds?: ReadonlyArray<string>;
   readonly chapter?: number;
   readonly mode?: string;
 }
 
 const ASSISTANT_AUDIT_PATTERN = /审计|audit/iu;
-const ASSISTANT_FIX_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
+const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|write[-\s]?next/iu;
 const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
@@ -300,8 +302,14 @@ function parseAssistantChapterFromInput(input: string): number | undefined {
 function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   const normalized = input.trim();
   if (!normalized) return null;
-  if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_FIX_PATTERN.test(normalized)) {
+  if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
     return "audit_and_optimize";
+  }
+  if (ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
+    return "audit_and_optimize";
+  }
+  if (ASSISTANT_AUDIT_PATTERN.test(normalized)) {
+    return "audit";
   }
   if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
     return "write_next";
@@ -323,9 +331,25 @@ function parseAssistantPlanScope(rawScope: unknown): { ok: true; scope: Assistan
         field: error.field.replace(/^plan\.bookScope/, "scope"),
         message: error.message,
       }));
-    return { ok: false, errors: scopeErrors.length > 0 ? scopeErrors : [{ field: "scope", message: "scope is invalid" }] };
+    return {
+      ok: false,
+      errors: scopeErrors.length > 0
+        ? scopeErrors
+        : [{
+            field: "scope",
+            message: "scope must be { type: 'all-active' } or { type: 'book-list', bookIds: string[] }",
+          }],
+    };
   }
   return { ok: true, scope: validation.value.plan.bookScope };
+}
+
+function buildAssistantPlanBookTarget(scope: AssistantPlanScope): Pick<AssistantPlanStep, "bookId" | "bookIds"> {
+  if (scope.type !== "book-list") return {};
+  if (scope.bookIds.length === 1) {
+    return { bookId: scope.bookIds[0] };
+  }
+  return { bookIds: scope.bookIds };
 }
 
 function buildAssistantPlanDraft(
@@ -333,20 +357,33 @@ function buildAssistantPlanDraft(
   scope: AssistantPlanScope,
   input: string,
 ): { plan: AssistantPlanStep[]; risk: { level: AssistantPlanRiskLevel; reasons: string[] } } {
-  const bookId = scope.type === "book-list" ? scope.bookIds[0] : undefined;
+  const bookTarget = buildAssistantPlanBookTarget(scope);
   const chapter = parseAssistantChapterFromInput(input);
+
+  if (intent === "audit") {
+    return {
+      plan: [
+        { stepId: "s1", action: "audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
+      ],
+      risk: {
+        level: "low",
+        reasons: ["仅执行章节审计，不直接修改内容"],
+      },
+    };
+  }
+
   if (intent === "audit_and_optimize") {
     return {
       plan: [
-        { stepId: "s1", action: "audit", ...(bookId !== undefined ? { bookId } : {}), ...(chapter !== undefined ? { chapter } : {}) },
+        { stepId: "s1", action: "audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
         {
           stepId: "s2",
           action: "revise",
           mode: "spot-fix",
-          ...(bookId !== undefined ? { bookId } : {}),
+          ...bookTarget,
           ...(chapter !== undefined ? { chapter } : {}),
         },
-        { stepId: "s3", action: "re-audit", ...(bookId !== undefined ? { bookId } : {}), ...(chapter !== undefined ? { chapter } : {}) },
+        { stepId: "s3", action: "re-audit", ...bookTarget, ...(chapter !== undefined ? { chapter } : {}) },
       ],
       risk: {
         level: "medium",
@@ -357,8 +394,8 @@ function buildAssistantPlanDraft(
 
   return {
     plan: [
-      { stepId: "s1", action: "plan-next", ...(bookId !== undefined ? { bookId } : {}) },
-      { stepId: "s2", action: "write-next", ...(bookId !== undefined ? { bookId } : {}) },
+      { stepId: "s1", action: "plan-next", ...bookTarget },
+      { stepId: "s2", action: "write-next", ...bookTarget },
     ],
     risk: {
       level: "low",
@@ -1829,7 +1866,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 422);
     }
 
-    const taskId = `asst_t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
     return c.json({
       taskId,
