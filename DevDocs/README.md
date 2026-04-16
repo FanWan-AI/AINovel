@@ -56,7 +56,16 @@ VS Code 中使用 Copilot Agent 连续开发的配置、节奏与故障恢复。
 AI助手从右侧面板升级为中间主页面智能体工作台，并完成设置中心重构方案。
 
 16. [16-AI助手中枢化升级-并行Issue包.md](./16-AI%E5%8A%A9%E6%89%8B%E4%B8%AD%E6%9E%A2%E5%8C%96%E5%8D%87%E7%BA%A7-%E5%B9%B6%E8%A1%8CIssue%E5%8C%85.md)  
-可并行派发给 Copilot Agents 的 8 个标准化 Issue，包含派发评论模板。
+可并行派发给 Copilot Agents 的 11 个标准化 Issue，包含 GitHub 可直接创建的模板块。
+
+17. [17-顶级小说创作智能体设计与实现方案.md](./17-%E9%A1%B6%E7%BA%A7%E5%B0%8F%E8%AF%B4%E5%88%9B%E4%BD%9C%E6%99%BA%E8%83%BD%E4%BD%93%E8%AE%BE%E8%AE%A1%E4%B8%8E%E5%AE%9E%E7%8E%B0%E6%96%B9%E6%A1%88.md)  
+基于现有代码与主流 Agent 方法论的终极设计：现状能力审计、优劣分析、目标架构、实现路线与治理体系。
+
+18. [18-AI助手NovelOS实施级详细设计与Agent执行蓝图.md](./18-AI%E5%8A%A9%E6%89%8BNovelOS%E5%AE%9E%E6%96%BD%E7%BA%A7%E8%AF%A6%E7%BB%86%E8%AE%BE%E8%AE%A1%E4%B8%8EAgent%E6%89%A7%E8%A1%8C%E8%93%9D%E5%9B%BE.md)  
+面向多 Agent 并行实施的落地蓝图：接口契约、文件级改动、工作包依赖、测试脚本与验收门槛。
+
+19. [19-NovelOS全流程派发Issue包-面向Copilot-Agents.md](./19-NovelOS%E5%85%A8%E6%B5%81%E7%A8%8B%E6%B4%BE%E5%8F%91Issue%E5%8C%85-%E9%9D%A2%E5%90%91Copilot-Agents.md)  
+基于 17/18 的全流程 Issue 派发清单（23 个标准化 Issues）：覆盖设计、实施、CRUD、Goal-to-Book、策略中心、模型路由降级、安全防注入、测试、发布门禁、灰度与运行治理，可直接用于 GitHub Copilot Agents。
 
 ## 当前代码基线（用于对照）
 
