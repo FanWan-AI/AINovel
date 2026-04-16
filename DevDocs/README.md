@@ -67,6 +67,9 @@ AI助手从右侧面板升级为中间主页面智能体工作台，并完成设
 19. [19-NovelOS全流程派发Issue包-面向Copilot-Agents.md](./19-NovelOS%E5%85%A8%E6%B5%81%E7%A8%8B%E6%B4%BE%E5%8F%91Issue%E5%8C%85-%E9%9D%A2%E5%90%91Copilot-Agents.md)  
 基于 17/18 的全流程 Issue 派发清单（23 个标准化 Issues）：覆盖设计、实施、CRUD、Goal-to-Book、策略中心、模型路由降级、安全防注入、测试、发布门禁、灰度与运行治理，可直接用于 GitHub Copilot Agents。
 
+20. [20-NovelOS-23个Issue派发评论模板.md](./20-NovelOS-23%E4%B8%AAIssue%E6%B4%BE%E5%8F%91%E8%AF%84%E8%AE%BA%E6%A8%A1%E6%9D%BF.md)  
+23 个 Issue 的逐条派发评论模板：可直接复制到 GitHub Issue 评论区，统一回执格式，便于 Agent 实施与结果追踪。
+
 ## 当前代码基线（用于对照）
 
 - Studio 前端：`packages/studio/src`
