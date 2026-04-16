@@ -34,6 +34,10 @@ import {
   type AssistantPolicyBudgetInput,
   type AssistantPolicyPlanStep,
 } from "./services/assistant-policy-service.js";
+import {
+  authorizeAssistantSkillPlan,
+  listAssistantSkills,
+} from "./services/assistant-skill-registry-service.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
 import { runtimeEventStore, deriveRuntimeEvent } from "./lib/runtime-event-store.js";
 import {
@@ -753,6 +757,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("log", { level: entry.level, tag: entry.tag, message: entry.message });
     },
   };
+  const apiLogger = createLogger({ tag: "studio-api", sinks: [sseSink] });
 
   async function loadCurrentProjectConfig(
     options?: { readonly requireApiKey?: boolean },
@@ -2296,6 +2301,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json(policy);
   });
 
+  app.get("/api/assistant/skills", (c) => {
+    const rawPermissions = c.req.query("permissions");
+    const permissions = typeof rawPermissions === "string" && rawPermissions.trim().length > 0
+      ? rawPermissions.split(",").map((value) => value.trim()).filter((value) => value.length > 0)
+      : undefined;
+    return c.json({
+      permissions: permissions ?? [],
+      skills: listAssistantSkills(permissions),
+    });
+  });
+
   app.post("/api/assistant/execute", async (c) => {
     const rawBody = await c.req.json<unknown>().catch(() => null);
     if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
@@ -2343,6 +2359,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
+
+    const skillAuthorization = authorizeAssistantSkillPlan(plan, permissionsInput);
+    if (!skillAuthorization.allow) {
+      const reasons = skillAuthorization.denied.map((item) => item.reason);
+      const finalBlockedMessage = reasons.join("; ");
+      apiLogger.warn("assistant skill authorization blocked", {
+        taskId,
+        sessionId,
+        denied: skillAuthorization.denied,
+      });
+      broadcast("assistant:policy:blocked", {
+        taskId,
+        sessionId,
+        level: "warn",
+        severity: "warn",
+        timestamp: new Date().toISOString(),
+        reasons,
+        deniedSkills: skillAuthorization.denied,
+        message: finalBlockedMessage,
+      });
+      emitAssistantTaskEvent("assistant:done", {
+        taskId,
+        sessionId,
+        status: "failed",
+        error: finalBlockedMessage,
+      });
+      return c.json({
+        error: {
+          code: "ASSISTANT_SKILL_UNAUTHORIZED",
+          message: finalBlockedMessage,
+          taskId,
+          denied: skillAuthorization.denied,
+        },
+      }, 403);
+    }
 
     const policy = evaluateAssistantPolicy({
       plan,
