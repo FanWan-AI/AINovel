@@ -224,7 +224,7 @@ function buildBookMemoryData(
     updatedAt,
     ...input.details,
     ...(input.chapterSnippet ? { chapterSnippet: normalizeChapterSnippet(input.chapterSnippet) } : {}),
-  } satisfies Record<string, unknown>;
+  };
 
   const recentActivity = [activityEntry, ...previousActivity].slice(0, BOOK_MEMORY_ACTIVITY_LIMIT);
   const latestChapter = {

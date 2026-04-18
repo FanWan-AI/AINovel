@@ -218,6 +218,7 @@ const ASSISTANT_CHAT_PENDING_KEY = "inkos.assistant.chat-pending";
 const ASSISTANT_CHAT_PENDING_TTL_MS = 300_000;
 const ASSISTANT_CHAT_PENDING_POLL_MS = 500;
 const ASSISTANT_SESSION_MEMORY_STORAGE_KEY = "inkos.assistant.session-memory";
+let assistantSessionFallbackCounter = 0;
 const GENERATION_INTENT_PATTERN = /生成|创建|创作|大纲|计划|规划|建议|优化|改进|总结|分析|generate|create|plan|outline|suggest|summarize|analyze/iu;
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -641,7 +642,8 @@ function createAssistantSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return `assistant-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  assistantSessionFallbackCounter += 1;
+  return `assistant-session-${Date.now().toString(36)}-${assistantSessionFallbackCounter.toString(36)}`;
 }
 
 function restoreAssistantSessionMemory(): AssistantSessionMemory | null {
