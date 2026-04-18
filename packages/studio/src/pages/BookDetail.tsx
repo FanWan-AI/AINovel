@@ -6,6 +6,7 @@ import { normalizeStudioEventName, type SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { useChapterRuns, type ChapterRunActionType } from "../hooks/use-chapter-runs";
+import { shouldSkipReleaseGateManualConfirmation } from "../api/services/release-gate-service";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WriteNextDialog } from "../components/write-next/WriteNextDialog";
 import type { WriteNextPayload } from "../components/write-next/WriteNextDialog";
@@ -234,7 +235,7 @@ export function ReleaseCandidatePanel({
     evaluation?.isReleaseCandidate ?? fallbackIsReleaseCandidate,
     evaluation?.eligible === true,
   );
-  const skipsManualConfirmation = evaluation?.autopilotLevel === "autopilot" || evaluation?.autopilotLevel === "L3";
+  const skipsManualConfirmation = shouldSkipReleaseGateManualConfirmation(evaluation?.autopilotLevel ?? "");
 
   return (
     <section data-release-candidate-panel className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-4">

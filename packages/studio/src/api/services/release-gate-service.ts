@@ -68,14 +68,15 @@ const RELEASE_GATE_SECURITY_RULES: ReadonlyArray<ReleaseGateSecurityRule> = [
     description: "发现疑似违规敏感内容，需要先通过安全审计复核。",
   },
 ];
+const RELEASE_GATE_EXCERPT_CONTEXT_LENGTH = 24;
 
 function trimExcerpt(content: string, index: number, length: number): string {
-  const start = Math.max(0, index - 24);
-  const end = Math.min(content.length, index + length + 24);
+  const start = Math.max(0, index - RELEASE_GATE_EXCERPT_CONTEXT_LENGTH);
+  const end = Math.min(content.length, index + length + RELEASE_GATE_EXCERPT_CONTEXT_LENGTH);
   return content.slice(start, end).replace(/\s+/gu, " ").trim();
 }
 
-function skipsManualConfirmation(autopilotLevel: string): boolean {
+export function shouldSkipReleaseGateManualConfirmation(autopilotLevel: string): boolean {
   return autopilotLevel === "autopilot" || autopilotLevel === "L3";
 }
 
@@ -106,7 +107,7 @@ export function evaluateReleaseCandidate(
   const qualityPassed = input.overallScore >= input.publishQualityGate;
   const consistencyPassed = input.consistencyBlockingIssues.length === 0;
   const securityPassed = input.securityFindings.length === 0;
-  const manualPassed = input.manualConfirmed || skipsManualConfirmation(input.autopilotLevel);
+  const manualPassed = input.manualConfirmed || shouldSkipReleaseGateManualConfirmation(input.autopilotLevel);
 
   const gates: ReleaseGateCheckResult[] = [
     {
@@ -143,7 +144,7 @@ export function evaluateReleaseCandidate(
       blocking: true,
       reason: manualPassed
         ? (
-          skipsManualConfirmation(input.autopilotLevel)
+          shouldSkipReleaseGateManualConfirmation(input.autopilotLevel)
             ? "当前策略为 autopilot/L3，发布候选阶段允许跳过人工通读确认。"
             : "已确认完成至少一次人工通读。"
         )

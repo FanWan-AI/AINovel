@@ -1946,16 +1946,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   ): Promise<Record<string, unknown> & { is_release_candidate: boolean }> {
     const persisted = await readPersistedBookConfigRecord(bookId);
     const book = await state.loadBookConfig(bookId) as Record<string, unknown>;
+    const persistedExtras = Object.fromEntries(
+      Object.entries(persisted ?? {}).filter(([key]) => !(key in book)),
+    );
     const nextBook = {
-      ...(persisted ?? {}),
       ...book,
+      ...persistedExtras,
       is_release_candidate: isReleaseCandidate,
       updatedAt: new Date().toISOString(),
     };
+    return await persistBookConfigRecord(bookId, nextBook) as Record<string, unknown> & { is_release_candidate: boolean };
+  }
+
+  async function persistBookConfigRecord(bookId: string, bookRecord: Record<string, unknown>): Promise<Record<string, unknown>> {
     const bookPath = join(state.bookDir(bookId), "book.json");
     await mkdir(dirname(bookPath), { recursive: true });
-    await writeFile(bookPath, JSON.stringify(nextBook, null, 2), "utf-8");
-    return nextBook;
+    await writeFile(bookPath, JSON.stringify(bookRecord, null, 2), "utf-8");
+    return bookRecord;
   }
 
   async function collectReleaseGateSecuritySources(bookId: string): Promise<ReadonlyArray<ReleaseGateTextSource>> {
@@ -1973,7 +1980,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       const chapterFiles = (await readdir(chaptersDir))
         .filter((fileName) => /^\d+_.+\.md$/u.test(fileName))
-        .sort((left, right) => left.localeCompare(right, "zh-CN"));
+        .sort((left, right) => left.localeCompare(right));
       for (const fileName of chapterFiles) {
         try {
           const content = await readFile(join(chaptersDir, fileName), "utf-8");
@@ -1992,14 +1999,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     bookId: string,
     manualConfirmed: boolean,
   ): Promise<ReleaseCandidateEvaluation> {
-    const book = await loadBookConfigWithReleaseCandidateState(bookId);
-    const strategy = await readAssistantStrategySettings();
+    const [book, strategy, runs, securitySources] = await Promise.all([
+      loadBookConfigWithReleaseCandidateState(bookId),
+      readAssistantStrategySettings(),
+      chapterRunStore.listRuns(bookId, { limit: 100 }),
+      collectReleaseGateSecuritySources(bookId),
+    ]);
     const report = await deriveAssistantEvaluateReport(
-      await chapterRunStore.listRuns(bookId, { limit: 100 }),
+      runs,
       { type: "book", bookId },
       [],
     );
-    const securityFindings = scanReleaseGateSecuritySources(await collectReleaseGateSecuritySources(bookId));
+    const securityFindings = scanReleaseGateSecuritySources(securitySources);
     return evaluateReleaseCandidate({
       bookId,
       isReleaseCandidate: book.is_release_candidate,
@@ -6633,7 +6644,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         updatedAt: new Date().toISOString(),
       };
       await state.saveBookConfig(id, updated);
-      await writeBookReleaseCandidateState(id, updated.is_release_candidate === true);
+      await persistBookConfigRecord(id, updated);
       return c.json({ ok: true, book: updated });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
