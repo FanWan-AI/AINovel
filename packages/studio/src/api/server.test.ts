@@ -763,13 +763,23 @@ describe("createStudioServer daemon lifecycle", () => {
     });
 
     expect(executeResponse.status).toBe(200);
-    await expect(executeResponse.json()).resolves.toMatchObject({
+    const executePayload = await executeResponse.json() as {
+      status: string;
+      stepRunIds: Record<string, string>;
+    };
+    expect(executePayload).toMatchObject({
       status: "running",
       stepRunIds: {
         s1: expect.any(String),
         [firstTask!.stepId]: expect.any(String),
         s3: expect.any(String),
       },
+    });
+    await vi.waitFor(async () => {
+      const stored = JSON.parse(await readFile(join(root, ".inkos", "books", "demo-book", "memory.json"), "utf-8")) as {
+        data: { lastAction?: string };
+      };
+      expect(stored.data.lastAction).toBe("revise");
     });
   });
 
@@ -819,6 +829,77 @@ describe("createStudioServer daemon lifecycle", () => {
     }
   });
 
+  it("supports assistant memory read/write across session, book, and user layers without leaking sensitive fields", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const sessionResponse = await app.request("http://localhost/api/assistant/memory/session", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "session-1",
+        data: {
+          goal: "续写下一章",
+          tempPreference: "高张力",
+        },
+      }),
+    });
+    expect(sessionResponse.status).toBe(200);
+
+    const bookResponse = await app.request("http://localhost/api/assistant/memory/book", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookId: "demo-book",
+        summary: "关键设定：林舟不能暴露身份",
+        data: {
+          canon: "王城阴谋",
+          latestChapter: 3,
+        },
+      }),
+    });
+    expect(bookResponse.status).toBe(200);
+
+    const userResponse = await app.request("http://localhost/api/assistant/memory/user", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: {
+          style: "冷峻克制",
+          apiKey: "sk-should-not-leak",
+          nested: {
+            token: "secret-token",
+            safe: "保留字段",
+          },
+        },
+      }),
+    });
+    expect(userResponse.status).toBe(200);
+
+    await access(join(root, ".inkos", "assistant-sessions", "session-1.json"));
+    await access(join(root, ".inkos", "books", "demo-book", "memory.json"));
+    await access(join(root, ".inkos", "user-prefs.json"));
+
+    const userGet = await app.request("http://localhost/api/assistant/memory/user");
+    expect(userGet.status).toBe(200);
+    const userBody = await userGet.json() as {
+      memory: {
+        summary: string;
+        data: { style?: string; nested?: { safe?: string; token?: string }; apiKey?: string };
+      } | null;
+    };
+    expect(userBody.memory?.summary).toContain("偏好风格：冷峻克制");
+    expect(userBody.memory?.data.style).toBe("冷峻克制");
+    expect(userBody.memory?.data.apiKey).toBeUndefined();
+    expect(userBody.memory?.data.nested?.safe).toBe("保留字段");
+    expect(userBody.memory?.data.nested?.token).toBeUndefined();
+
+    const bookGet = await app.request("http://localhost/api/assistant/memory/book?bookId=demo-book");
+    expect(bookGet.status).toBe(200);
+    const bookBody = await bookGet.json() as { memory: { summary: string } | null };
+    expect(bookBody.memory?.summary).toContain("关键设定：林舟不能暴露身份");
+  });
+
   it("routes assistant general chat through agent loop with scoped prompt suffix", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -849,6 +930,77 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(callArgs[2]).toHaveProperty("onToolCall");
     expect(callArgs[2]).toHaveProperty("onToolResult");
     expect(callArgs[2]).toHaveProperty("onMessage");
+  });
+
+  it("injects book and user memory summaries into assistant chat prompts", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/assistant/memory/book", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookId: "demo-book",
+        summary: "关键设定：林舟不能暴露身份",
+        data: { fact: "主角身份必须保密" },
+      }),
+    });
+    await app.request("http://localhost/api/assistant/memory/user", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary: "偏好风格：冷峻克制",
+        data: { style: "冷峻克制" },
+      }),
+    });
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "帮我查看书籍状态",
+        scopeBookTitles: ["测试书"],
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    const callArgs = runAgentLoopMock.mock.calls.at(-1);
+    expect(callArgs?.[1]).toContain("【记忆上下文】");
+    expect(callArgs?.[1]).toContain("关键设定：林舟不能暴露身份");
+    expect(callArgs?.[1]).toContain("偏好风格：冷峻克制");
+  });
+
+  it("degrades assistant chat when memory reads fail instead of interrupting the main flow", async () => {
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(join(root, ".inkos", "user-prefs.json"), "{not-json", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "继续分析这本书",
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    expect(runAgentLoopMock).toHaveBeenCalled();
+    expect(runAgentLoopMock.mock.calls.at(-1)?.[1]).toContain("继续分析这本书");
   });
 
   it("streams assistant progress events before completion for long-running chat", async () => {
@@ -1805,6 +1957,39 @@ describe("createStudioServer daemon lifecycle", () => {
         baseUrl: "https://fresh.example.com/v1",
       }),
     });
+  });
+
+  it("refreshes market memory automatically when the cached memory expires", async () => {
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(join(root, ".inkos", "market-cache.json"), JSON.stringify({
+      layer: "market",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+      expiresAt: "2026-04-15T01:00:00.000Z",
+      summary: "旧缓存",
+      data: { marketSummary: "old market summary" },
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/memory/market");
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      refreshed: boolean;
+      stale: boolean;
+      memory: { summary: string; expiresAt?: string } | null;
+    };
+    expect(body.refreshed).toBe(true);
+    expect(body.stale).toBe(false);
+    expect(body.memory?.summary).toContain("Fresh market summary");
+    expect(runRadarMock).toHaveBeenCalledTimes(1);
+
+    const stored = JSON.parse(await readFile(join(root, ".inkos", "market-cache.json"), "utf-8")) as {
+      summary: string;
+      expiresAt: string;
+    };
+    expect(stored.summary).toContain("Fresh market summary");
+    expect(Date.parse(stored.expiresAt)).toBeGreaterThan(Date.now());
   });
 
   it("updates the first-run language immediately after the language selector saves", async () => {
@@ -2824,6 +3009,75 @@ describe("createStudioServer daemon lifecycle", () => {
     const config = pipelineConfigs.at(-1) as Record<string, unknown>;
     expect(config["externalContext"]).toBeUndefined();
     expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2000);
+  });
+
+  it("updates book memory after write-next and revise complete", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n林舟守住了身份秘密。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const writeResponse = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 2000 }),
+    });
+    expect(writeResponse.status).toBe(200);
+
+    const bookMemoryPath = join(root, ".inkos", "books", "demo-book", "memory.json");
+    await vi.waitFor(async () => {
+      const stored = JSON.parse(await readFile(bookMemoryPath, "utf-8")) as {
+        data: { lastAction?: string; recentActivity?: Array<{ action?: string }> };
+      };
+      expect(stored.data.lastAction).toBe("write-next");
+      expect(stored.data.recentActivity?.[0]?.action).toBe("write-next");
+    });
+
+    const reviseResponse = await app.request("http://localhost/api/books/demo-book/revise/3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "spot-fix" }),
+    });
+    expect(reviseResponse.status).toBe(200);
+    const reviseBody = await reviseResponse.json() as { runId: string };
+    await vi.waitFor(async () => {
+      const run = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${reviseBody.runId}`);
+      const runBody = await run.json() as { status: string };
+      expect(runBody.status).toBe("succeeded");
+    });
+
+    await vi.waitFor(async () => {
+      const stored = JSON.parse(await readFile(bookMemoryPath, "utf-8")) as {
+        data: {
+          lastAction?: string;
+          recentActivity?: Array<{ action?: string }>;
+          latestChapter?: { snippet?: string };
+        };
+      };
+      expect(stored.data.lastAction).toBe("revise");
+      expect(stored.data.recentActivity?.some((entry) => entry.action === "write-next")).toBe(true);
+      expect(stored.data.recentActivity?.some((entry) => entry.action === "revise")).toBe(true);
+      expect(stored.data.latestChapter?.snippet).toContain("林舟守住了身份秘密");
+    });
+  });
+
+  it("does not interrupt write-next when book memory writes fail", async () => {
+    await writeFile(join(root, ".inkos"), "blocked", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 1800 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", bookId: "demo-book" });
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 1800));
   });
 
   it("write-next with no body also succeeds (backward compat)", async () => {

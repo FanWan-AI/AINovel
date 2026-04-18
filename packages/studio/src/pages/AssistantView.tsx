@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Theme } from "../hooks/use-theme";
 import type { StringKey, TFunction } from "../hooks/use-i18n";
-import { fetchJson, postApi, useApi, buildApiUrl, invalidateApiPaths } from "../hooks/use-api";
+import { fetchJson, postApi, putApi, useApi, buildApiUrl, invalidateApiPaths } from "../hooks/use-api";
 import {
   parseAssistantOperatorCommand,
   type AssistantOperatorParseResult,
@@ -171,6 +171,19 @@ interface AssistantChatResponse {
   readonly response: string;
 }
 
+interface AssistantSessionMemory {
+  readonly sessionId: string;
+  readonly goal: string | null;
+  readonly currentBookId: string | null;
+  readonly currentBookTitle: string | null;
+  readonly messageCount: number;
+  readonly recentMessages: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly content: string;
+  }>;
+  readonly updatedAt: string;
+}
+
 export interface AssistantPromptTemplate {
   readonly id: string;
   readonly labelKey: StringKey;
@@ -204,6 +217,7 @@ const ASSISTANT_CHAT_HISTORY_MAX_MESSAGES = 200;
 const ASSISTANT_CHAT_PENDING_KEY = "inkos.assistant.chat-pending";
 const ASSISTANT_CHAT_PENDING_TTL_MS = 300_000;
 const ASSISTANT_CHAT_PENDING_POLL_MS = 500;
+const ASSISTANT_SESSION_MEMORY_STORAGE_KEY = "inkos.assistant.session-memory";
 const GENERATION_INTENT_PATTERN = /生成|创建|创作|大纲|计划|规划|建议|优化|改进|总结|分析|generate|create|plan|outline|suggest|summarize|analyze/iu;
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -248,6 +262,8 @@ function normalizeAssistantStreamError(error: unknown): string {
 async function streamAssistantChat(
   prompt: string,
   scopeBookTitles: ReadonlyArray<string>,
+  scopeBookIds: ReadonlyArray<string>,
+  sessionId: string,
   callbacks: AssistantStreamCallbacks,
 ): Promise<void> {
   const url = buildApiUrl("/assistant/chat");
@@ -260,7 +276,7 @@ async function streamAssistantChat(
     response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, scopeBookTitles }),
+      body: JSON.stringify({ prompt, scopeBookTitles, scopeBookIds, sessionId }),
       signal: callbacks.abortSignal,
     });
   } catch (e) {
@@ -619,6 +635,77 @@ function restoreChatPendingState(): AssistantChatPendingState | null {
 function clearChatPendingState(): void {
   if (typeof window === "undefined") return;
   try { window.sessionStorage.removeItem(ASSISTANT_CHAT_PENDING_KEY); } catch { /* ignore */ }
+}
+
+function createAssistantSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `assistant-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function restoreAssistantSessionMemory(): AssistantSessionMemory | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AssistantSessionMemory>;
+    return {
+      sessionId: typeof parsed.sessionId === "string" && parsed.sessionId.trim().length > 0
+        ? parsed.sessionId
+        : createAssistantSessionId(),
+      goal: typeof parsed.goal === "string" ? parsed.goal : null,
+      currentBookId: typeof parsed.currentBookId === "string" ? parsed.currentBookId : null,
+      currentBookTitle: typeof parsed.currentBookTitle === "string" ? parsed.currentBookTitle : null,
+      messageCount: typeof parsed.messageCount === "number" ? parsed.messageCount : 0,
+      recentMessages: Array.isArray(parsed.recentMessages)
+        ? parsed.recentMessages
+          .filter((item): item is { role: "user" | "assistant"; content: string } =>
+            Boolean(item)
+            && typeof item === "object"
+            && typeof (item as { content?: unknown }).content === "string")
+          .map((item) => ({
+            role: item.role === "assistant" ? "assistant" : "user",
+            content: item.content,
+          }))
+        : [],
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveAssistantSessionMemory(memory: AssistantSessionMemory): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY, JSON.stringify(memory));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function buildAssistantSessionMemory(
+  sessionId: string,
+  messages: ReadonlyArray<AssistantMessage>,
+  currentBook: ChatBookContext | null,
+): AssistantSessionMemory {
+  const recentMessages = messages
+    .slice(-8)
+    .map((message) => ({
+      role: message.role,
+      content: message.content.slice(0, 280),
+    }));
+  const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+  return {
+    sessionId,
+    goal: lastUserMessage?.content.slice(0, 200) ?? null,
+    currentBookId: currentBook?.id ?? null,
+    currentBookTitle: currentBook?.title ?? null,
+    messageCount: messages.length,
+    recentMessages,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function appendStreamingProgressLine(
@@ -1838,6 +1925,9 @@ export function AssistantView({
   const taskRecoveryAppliedRef = useRef<string | null>(null);
   const chatInFlightRef = useRef(false);
   const chatAbortRef = useRef<AbortController | null>(null);
+  const assistantSessionIdRef = useRef<string>(
+    restoreAssistantSessionMemory()?.sessionId ?? createAssistantSessionId(),
+  );
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
   const promptTemplates = useMemo(() => ASSISTANT_PROMPT_TEMPLATES, []);
@@ -2116,6 +2206,19 @@ export function AssistantView({
   }, [state.messages]);
 
   useEffect(() => {
+    const memory = buildAssistantSessionMemory(
+      assistantSessionIdRef.current,
+      state.messages,
+      chatBookContext,
+    );
+    saveAssistantSessionMemory(memory);
+    void putApi("/assistant/memory/session", {
+      sessionId: memory.sessionId,
+      data: memory,
+    }).catch(() => undefined);
+  }, [chatBookContext, state.messages]);
+
+  useEffect(() => {
     if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {
       return;
     }
@@ -2248,6 +2351,11 @@ export function AssistantView({
     }
 
     const contextTitles = resolvedContext ? [resolvedContext.title] : activeBooks.map((b) => b.title);
+    const contextBookIds = resolvedContext
+      ? [resolvedContext.id]
+      : activeBooks.length === 1
+        ? [activeBooks[0].id]
+        : [];
 
     if (resolvedContext && isBookSelectionOnlyPrompt(normalizedPrompt, resolvedContext)) {
       setScopeBlockHint("");
@@ -2280,7 +2388,7 @@ export function AssistantView({
       const abortController = new AbortController();
       chatAbortRef.current = abortController;
       const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
-      void streamAssistantChat(agentPrompt, contextTitles, {
+      void streamAssistantChat(agentPrompt, contextTitles, contextBookIds, assistantSessionIdRef.current, {
         abortSignal: abortController.signal,
         onProgress: (status) => {
           setState((prev) => {
@@ -2489,7 +2597,7 @@ export function AssistantView({
 
     const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
 
-    void streamAssistantChat(agentPrompt, contextTitles, {
+    void streamAssistantChat(agentPrompt, contextTitles, contextBookIds, assistantSessionIdRef.current, {
       abortSignal: abortController.signal,
       onProgress: (status) => {
         setState((prev) => {
