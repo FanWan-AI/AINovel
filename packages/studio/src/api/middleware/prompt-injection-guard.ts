@@ -316,7 +316,7 @@ async function buildRequestDecision(
         candidates.push({ target: "$reserved-keys", content: reservedKeys.join(",") });
       }
     } catch {
-      // Keep raw-body candidate only when JSON parsing fails.
+      // Keep raw body candidate only when JSON parsing fails.
     }
   }
   if (matchesWhitelist(config.whitelistRules, input.route, candidates)) {
