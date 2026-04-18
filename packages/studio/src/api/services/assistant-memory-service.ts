@@ -47,6 +47,7 @@ export const ASSISTANT_MARKET_MEMORY_TTL_MS = 24 * 60 * 60 * 1000;
 const SENSITIVE_MEMORY_FIELD_PATTERN = /(api[-_]?key|token|secret|password|authorization|cookie|credential)/iu;
 const MEMORY_SUMMARY_MAX_LENGTH = 360;
 const BOOK_MEMORY_ACTIVITY_LIMIT = 8;
+const CHAPTER_SNIPPET_MAX_LENGTH = 220;
 
 function normalizeMemoryText(value: unknown): string {
   if (typeof value !== "string") {
@@ -203,7 +204,7 @@ function isExpired(memory: AssistantMemoryRecord | null, now: number): boolean {
 }
 
 function normalizeChapterSnippet(value: string | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, 220);
+  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, CHAPTER_SNIPPET_MAX_LENGTH);
 }
 
 function buildBookMemoryData(

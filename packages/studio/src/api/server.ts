@@ -2048,6 +2048,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         details: { status: result.status, title: result.title, wordCount: result.wordCount },
       });
+      // Returning the async chain here lets Promise.then adopt it, so memory sync stays ordered with the write result.
       const chapterSnippet = await readLatestChapterSnippet(id, result.chapterNumber);
       if (!chapterSnippet) {
         return;

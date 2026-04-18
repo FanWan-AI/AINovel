@@ -775,6 +775,7 @@ describe("createStudioServer daemon lifecycle", () => {
         s3: expect.any(String),
       },
     });
+    // The execute plan includes the report-generated revise step, so book memory should settle on the revise action.
     await vi.waitFor(async () => {
       const stored = JSON.parse(await readFile(join(root, ".inkos", "books", "demo-book", "memory.json"), "utf-8")) as {
         data: { lastAction?: string };
