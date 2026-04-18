@@ -1210,9 +1210,10 @@ function adaptAssistantTaskGraphForAutopilot(
     return strippedGraph;
   }
   if (decision.checkpointStrategy === "before-first-step") {
+    const edgeTargets = new Set(strippedGraph.edges.map((edge) => edge.to));
     const rootNodeIds = strippedGraph.nodes
       .filter((node) => node.type === "task")
-      .filter((node) => !strippedGraph.edges.some((edge) => edge.to === node.nodeId))
+      .filter((node) => !edgeTargets.has(node.nodeId))
       .map((node) => node.nodeId);
     return insertAssistantCheckpointBeforeTargets(strippedGraph, rootNodeIds);
   }

@@ -160,6 +160,10 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function resolvePauseAfterConsecutiveFailures(input: number | undefined): number | undefined {
+  return typeof input === "number" && Number.isFinite(input) && input > 0 ? input : undefined;
+}
+
 function cloneCheckpoint(checkpoint: CheckpointState | undefined): CheckpointState | undefined {
   return checkpoint ? { ...checkpoint } : undefined;
 }
@@ -449,11 +453,9 @@ export class AssistantConductor {
         state.finishedAt = finishedAt;
         run.consecutiveFailures += 1;
         const hasRetryRemaining = state.attempts <= state.maxRetries;
-        const pauseAfterConsecutiveFailures = typeof options.pauseAfterConsecutiveFailures === "number"
-          && Number.isFinite(options.pauseAfterConsecutiveFailures)
-          && options.pauseAfterConsecutiveFailures > 0
-          ? options.pauseAfterConsecutiveFailures
-          : undefined;
+        const pauseAfterConsecutiveFailures = resolvePauseAfterConsecutiveFailures(
+          options.pauseAfterConsecutiveFailures,
+        );
         const autopilotPauseTriggered = pauseAfterConsecutiveFailures !== undefined
           && run.consecutiveFailures >= pauseAfterConsecutiveFailures;
         state.status = hasRetryRemaining ? "pending" : "failed";
