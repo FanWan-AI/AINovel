@@ -6,6 +6,14 @@
 
 - `DevDocs/08-测试策略与验收标准.md`（验收流程与测试映射）
 - `DevDocs/10-运维部署与可观测性.md`（运维排障与字段对齐）
+- `DevDocs/18-运行手册与故障演练.md`（U12 runbook + chaos 演练）
+
+运行手册 / chaos 快速入口：
+
+```bash
+pnpm --filter @actalk/inkos-core build
+pnpm --filter @actalk/inkos-studio test -- src/api/server.test.ts -t chaos
+```
 
 一键验收命令（提交建议 → runId → 事件流 → 最终状态 → diff）：
 
