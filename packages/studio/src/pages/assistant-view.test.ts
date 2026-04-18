@@ -297,6 +297,41 @@ describe("AssistantView", () => {
     expect(reconciled.taskPlan?.status).toBe("failed");
   });
 
+  it("reconciles checkpoint waiting state from node snapshots", () => {
+    const draft = buildAssistantConfirmationDraft("审计第3章", ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9050);
+    const running = confirmAssistantPendingAction(pending, 9051);
+    const withTask = { ...running, taskExecution: { taskId: "asst_t_02b", sessionId: "asst_s_02b", status: "running" as const, timeline: [], lastSyncedAt: 9051, nextSequence: 0 } };
+
+    const reconciled = reconcileAssistantTaskFromSnapshot(withTask, {
+      taskId: "asst_t_02b",
+      sessionId: "asst_s_02b",
+      status: "running",
+      currentStepId: "cp1",
+      nodes: {
+        cp1: {
+          nodeId: "cp1",
+          type: "checkpoint",
+          action: "checkpoint",
+          status: "waiting_approval",
+          attempts: 1,
+          maxRetries: 0,
+          startedAt: "2026-01-01T00:00:01.000Z",
+          checkpoint: {
+            nodeId: "cp1",
+            requiredApproval: true,
+          },
+        },
+      },
+      steps: {},
+      lastUpdatedAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    expect(reconciled.taskExecution?.status).toBe("waiting_approval");
+    expect(reconciled.taskExecution?.timeline[0]?.message).toContain("等待批准");
+    expect(reconciled.loading).toBe(false);
+  });
+
   it("renders timeline items", () => {
     const html = renderToStaticMarkup(createElement(AssistantTimeline, {
       entries: [

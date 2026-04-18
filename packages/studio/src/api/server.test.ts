@@ -514,6 +514,20 @@ describe("createStudioServer daemon lifecycle", () => {
         { stepId: "s2", action: "revise", mode: "spot-fix", chapter: 14, bookIds: ["demo-book", "book-b"] },
         { stepId: "s3", action: "re-audit", chapter: 14, bookIds: ["demo-book", "book-b"] },
       ],
+      graph: {
+        taskId: expect.stringMatching(/^asst_t_/),
+        nodes: expect.arrayContaining([
+          expect.objectContaining({ nodeId: "s1", type: "task", action: "audit" }),
+          expect.objectContaining({ nodeId: "cp1", type: "checkpoint", action: "checkpoint" }),
+          expect.objectContaining({ nodeId: "s2", type: "task", action: "revise" }),
+          expect.objectContaining({ nodeId: "s3", type: "task", action: "re-audit" }),
+        ]),
+        edges: expect.arrayContaining([
+          expect.objectContaining({ from: "s1", to: "cp1" }),
+          expect.objectContaining({ from: "cp1", to: "s2" }),
+          expect.objectContaining({ from: "s2", to: "s3" }),
+        ]),
+      },
       risk: {
         level: "medium",
         reasons: expect.arrayContaining(["涉及章节内容改写"]),
@@ -767,9 +781,13 @@ describe("createStudioServer daemon lifecycle", () => {
       status: "running",
       stepRunIds: {
         s1: expect.any(String),
-        [firstTask!.stepId]: expect.any(String),
-        s3: expect.any(String),
       },
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_world_fix_001");
+      const payload = await task.json() as { status: string };
+      expect(payload.status).toBe("succeeded");
     });
   });
 
@@ -1142,7 +1160,7 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(readFile(join(chapterDir, "0003_demo.md"), "utf-8")).resolves.toContain("对话触发删除恢复");
   });
 
-  it("executes assistant audit->revise->re-audit chain and returns running with step runIds", async () => {
+  it("executes assistant task graph in dependency order and completes the audit->revise->re-audit chain", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
     await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
@@ -1169,11 +1187,9 @@ describe("createStudioServer daemon lifecycle", () => {
       taskId: "asst_t_execute_001",
       sessionId: "asst_s_001",
       status: "running",
-      currentStepId: "s2",
+      currentStepId: "s1",
       stepRunIds: {
         s1: expect.stringMatching(/^asst_run_/),
-        s2: expect.any(String),
-        s3: expect.stringMatching(/^asst_run_/),
       },
     });
 
@@ -1185,9 +1201,16 @@ describe("createStudioServer daemon lifecycle", () => {
     await vi.waitFor(async () => {
       const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_001");
       expect(task.status).toBe(200);
-      const payload = await task.json() as { status: string; lastUpdatedAt: string };
+      const payload = await task.json() as {
+        status: string;
+        lastUpdatedAt: string;
+        graph?: { nodes: Array<{ nodeId: string }> };
+        nodes?: Record<string, { status: string }>;
+      };
       expect(payload.status).toBe("succeeded");
       expect(payload.lastUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "cp1", "s2", "s3"]);
+      expect(payload.nodes?.s2?.status).toBe("succeeded");
     });
 
     const assistantEvents = await app.request("http://localhost/api/runtime/events?event=assistant:step:start&limit=5");
@@ -1197,7 +1220,11 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(assistantEventBody.entries[0]?.data.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("blocks unapproved high-risk assistant execute requests", async () => {
+  it("pauses checkpoint nodes until approval and then resumes execution", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -1215,27 +1242,53 @@ describe("createStudioServer daemon lifecycle", () => {
         ],
       }),
     });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      error: {
-        code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
-        taskId: "asst_t_execute_002",
-        policy: {
-          allow: false,
-          riskLevel: "high",
-          requiredApprovals: ["high-risk-manual-approval"],
-        },
+      taskId: "asst_t_execute_002",
+      status: "running",
+      stepRunIds: {
+        s1: expect.any(String),
       },
     });
-    expect(auditChapterMock).not.toHaveBeenCalled();
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002");
+      const payload = await task.json() as {
+        status: string;
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("running");
+      expect(payload.nodes?.cp1?.status).toBe("waiting_approval");
+    });
     expect(reviseDraftMock).not.toHaveBeenCalled();
 
-    const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002");
-    expect(task.status).toBe(200);
-    await expect(task.json()).resolves.toMatchObject({ status: "failed" });
+    const approveResponse = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002/approve/cp1", {
+      method: "POST",
+    });
+    expect(approveResponse.status).toBe(200);
+    await expect(approveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      taskId: "asst_t_execute_002",
+      nodeId: "cp1",
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_002");
+      const payload = await task.json() as {
+        status: string;
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.nodes?.cp1?.status).toBe("succeeded");
+    });
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
   });
 
-  it("persists assistant task snapshots to disk with backward-compatible store shape", async () => {
+  it("persists assistant task snapshots to disk with backward-compatible store shape and graph metadata", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -1253,16 +1306,29 @@ describe("createStudioServer daemon lifecycle", () => {
         ],
       }),
     });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
 
     const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
     await vi.waitFor(async () => {
       const raw = JSON.parse(await readFile(storePath, "utf-8")) as {
         version: number;
-        tasks: Array<{ taskId: string; status: string }>;
+        tasks: Array<{ taskId: string; status: string; graph?: { nodes: Array<{ nodeId: string }> }; nodes?: Record<string, { status: string }> }>;
       };
       expect(raw.version).toBe(1);
-      expect(raw.tasks.some((task) => task.taskId === "asst_t_persist_001" && task.status === "failed")).toBe(true);
+      expect(raw.tasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          taskId: "asst_t_persist_001",
+          status: "running",
+          graph: expect.objectContaining({
+            nodes: expect.arrayContaining([
+              expect.objectContaining({ nodeId: "cp1" }),
+            ]),
+          }),
+          nodes: expect.objectContaining({
+            cp1: expect.objectContaining({ status: expect.stringMatching(/pending|waiting_approval/) }),
+          }),
+        }),
+      ]));
     });
   });
 
@@ -1426,11 +1492,11 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
   });
 
-  it("interrupts assistant execute chain when a step fails and propagates the error", async () => {
+  it("marks task failed after retry budget is exhausted", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
     await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
-    auditChapterMock.mockRejectedValueOnce(new Error("audit exploded"));
+    auditChapterMock.mockRejectedValue(new Error("audit exploded"));
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1443,20 +1509,37 @@ describe("createStudioServer daemon lifecycle", () => {
         sessionId: "asst_s_003",
         approved: true,
         plan: [
-          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3, maxRetries: 1 },
           { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
           { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
         ],
       }),
     });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      error: {
-        code: "ASSISTANT_EXECUTE_STEP_FAILED",
-        taskId: "asst_t_execute_003",
-        stepId: "s1",
+      taskId: "asst_t_execute_003",
+      status: "running",
+      stepRunIds: {
+        s1: expect.any(String),
       },
     });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_003");
+      const payload = await task.json() as {
+        status: string;
+        error?: string;
+        nodes?: Record<string, { attempts: number; status: string; error?: string }>;
+      };
+      expect(payload.status).toBe("failed");
+      expect(payload.error).toContain("audit exploded");
+      expect(payload.nodes?.s1).toMatchObject({
+        attempts: 2,
+        status: "failed",
+        error: "Error: audit exploded",
+      });
+    });
+    expect(auditChapterMock).toHaveBeenCalledTimes(2);
     expect(reviseDraftMock).not.toHaveBeenCalled();
   });
 

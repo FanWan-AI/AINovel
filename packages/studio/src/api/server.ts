@@ -1040,7 +1040,7 @@ function buildAssistantPlanDraft(
 function buildAssistantTaskGraphFromPlan(
   taskId: string,
   plan: ReadonlyArray<AssistantPlanStep>,
-  riskLevel: AssistantPlanRiskLevel | AssistantPolicyRiskLevel,
+  riskLevel: "low" | "medium" | "high",
 ): TaskGraph {
   const nodes: TaskNode[] = [];
   const edges: TaskEdge[] = [];
@@ -1106,14 +1106,27 @@ function flattenAssistantPolicyPlanFromGraph(graph: TaskGraph): AssistantPolicyP
 function collectAssistantExecutableNodes(graph: TaskGraph): AssistantExecuteStepRef[] {
   return graph.nodes
     .filter((node) => node.type === "task")
-    .map((node) => normalizeAssistantExecuteStep({
-      stepId: node.nodeId,
-      action: node.action,
-      ...(node.bookId ? { bookId: node.bookId } : {}),
-      ...(node.bookIds ? { bookIds: node.bookIds } : {}),
-      ...(node.chapter !== undefined ? { chapter: node.chapter } : {}),
-      ...(node.mode ? { mode: node.mode } : {}),
-    }))
+    .map((node) => {
+      if (node.action !== "audit" && node.action !== "revise" && node.action !== "re-audit") {
+        return null;
+      }
+      const stepBookId = typeof node.bookId === "string"
+        ? node.bookId
+        : (Array.isArray(node.bookIds) && node.bookIds.length === 1 && typeof node.bookIds[0] === "string"
+          ? node.bookIds[0]
+          : null);
+      const stepChapter = typeof node.chapter === "number" ? node.chapter : null;
+      if (!stepBookId || stepChapter === null || !Number.isInteger(stepChapter) || stepChapter < 1) {
+        return null;
+      }
+      return {
+        stepId: node.nodeId,
+        action: node.action,
+        bookId: stepBookId,
+        chapter: stepChapter,
+        ...(node.mode !== undefined ? { mode: node.mode } : {}),
+      } satisfies AssistantExecuteStepRef;
+    })
     .filter((node): node is AssistantExecuteStepRef => node !== null);
 }
 

@@ -924,12 +924,15 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     : payload?.nodeStatus === "waiting_approval"
       ? "waiting_approval"
       : "running";
+  const nextTaskPlan = terminal
+    ? (state.taskPlan
+      ? transitionAssistantTaskPlan(state.taskPlan, taskStatus === "succeeded" ? "succeeded" : "failed", timestamp)
+      : state.taskPlan)
+    : state.taskPlan;
   return {
     ...state,
     loading: terminal || taskStatus === "waiting_approval" ? false : state.loading,
-    taskPlan: terminal
-      ? (state.taskPlan ? transitionAssistantTaskPlan(state.taskPlan, taskStatus, timestamp) : state.taskPlan)
-      : state.taskPlan,
+    taskPlan: nextTaskPlan,
     taskExecution: {
       ...currentExecution,
       status: taskStatus,
@@ -1004,7 +1007,7 @@ export function reconcileAssistantTaskFromSnapshot(
     : snapshot.status;
   return {
     ...state,
-    loading: done ? false : state.loading,
+    loading: done || executionStatus === "waiting_approval" ? false : state.loading,
     taskPlan: done ? (state.taskPlan ? transitionAssistantTaskPlan(state.taskPlan, snapshot.status, Date.now()) : state.taskPlan) : state.taskPlan,
     taskExecution: {
       taskId: snapshot.taskId,
