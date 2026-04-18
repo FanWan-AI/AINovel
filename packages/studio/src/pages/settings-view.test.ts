@@ -3,8 +3,10 @@ import {
   buildSettingsTabItems,
   collectWritingDuplicateKeys,
   normalizeSettingsTab,
+  normalizeAssistantStrategyForm,
   normalizeWritingGovernanceForm,
   resolveSettingsTabContent,
+  saveAssistantStrategy,
   saveWritingGovernance,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
@@ -21,20 +23,21 @@ describe("normalizeSettingsTab", () => {
     expect(normalizeSettingsTab("genre")).toBe("genre");
     expect(normalizeSettingsTab("appearance")).toBe("appearance");
     expect(normalizeSettingsTab("writing")).toBe("writing");
+    expect(normalizeSettingsTab("assistant")).toBe("assistant");
   });
 });
 
 describe("buildSettingsTabItems", () => {
   const t = ((key: string) => key) as TFunction;
 
-  it("builds five tabs and marks the active one", () => {
+  it("builds six tabs and marks the active one", () => {
     const items = buildSettingsTabItems({
       tab: "genre",
       onTabChange: vi.fn(),
       t,
     });
 
-    expect(items).toHaveLength(5);
+    expect(items).toHaveLength(6);
     expect(items.filter((item) => item.active).map((item) => item.key)).toEqual(["genre"]);
   });
 
@@ -94,11 +97,50 @@ describe("writing governance helpers", () => {
   });
 });
 
+describe("assistant strategy helpers", () => {
+  it("normalizes missing assistant strategy settings to defaults", () => {
+    expect(normalizeAssistantStrategyForm()).toEqual({
+      autopilotLevel: "guarded",
+      autoFixThreshold: 85,
+      maxAutoFixIterations: 3,
+      budgetLimit: 0,
+      budgetCurrency: "tokens",
+      approvalSkills: [],
+      publishQualityGate: 80,
+    });
+  });
+
+  it("saves assistant strategy form to project endpoint", async () => {
+    const putApiImpl = vi.fn().mockResolvedValue(undefined);
+    await saveAssistantStrategy({
+      autopilotLevel: "manual",
+      autoFixThreshold: 90,
+      maxAutoFixIterations: 4,
+      budgetLimit: 1200,
+      budgetCurrency: "tokens",
+      approvalSkills: ["trusted.anti-detect"],
+      publishQualityGate: 88,
+    }, { putApiImpl });
+    expect(putApiImpl).toHaveBeenCalledWith("/project/assistant-strategy", {
+      autopilotLevel: "manual",
+      autoFixThreshold: 90,
+      maxAutoFixIterations: 4,
+      budget: {
+        limit: 1200,
+        currency: "tokens",
+      },
+      approvalSkills: ["trusted.anti-detect"],
+      publishQualityGate: 88,
+    });
+  });
+});
+
 describe("resolveSettingsTabContent", () => {
-  it("maps provider, genre and writing tabs to content panels", () => {
+  it("maps provider, genre, writing and assistant tabs to content panels", () => {
     expect(resolveSettingsTabContent("provider")).toBe("provider");
     expect(resolveSettingsTabContent("genre")).toBe("genre");
     expect(resolveSettingsTabContent("writing")).toBe("writing");
+    expect(resolveSettingsTabContent("assistant")).toBe("assistant");
   });
 
   it("keeps non-migrated tabs on placeholder content", () => {

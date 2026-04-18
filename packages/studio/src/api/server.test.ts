@@ -639,6 +639,70 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("reads persisted assistant strategy during policy check", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveStrategy = await app.request("http://localhost/api/project/assistant-strategy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        autopilotLevel: "manual",
+        autoFixThreshold: 90,
+        maxAutoFixIterations: 4,
+        budget: {
+          limit: 100,
+          currency: "tokens",
+        },
+        approvalSkills: ["builtin.revise"],
+        publishQualityGate: 88,
+      }),
+    });
+    expect(saveStrategy.status).toBe(200);
+
+    const response = await app.request("http://localhost/api/assistant/policy/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_policy_002",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+        ],
+        budget: {
+          spent: 120,
+          limit: 1000,
+          currency: "tokens",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      allow: false,
+      riskLevel: "medium",
+      requiredApprovals: expect.arrayContaining([
+        "manual-autopilot-approval",
+        "skill:builtin.revise",
+      ]),
+      budgetWarning: {
+        spent: 120,
+        limit: 100,
+        overBy: 20,
+        currency: "tokens",
+      },
+      reasons: expect.arrayContaining([
+        "Manual autopilot level requires approval before mutating actions can execute.",
+        "Configured approval skill requires manual approval: builtin.revise.",
+      ]),
+      autopilot: expect.objectContaining({
+        level: "manual",
+        shouldAutoExecute: false,
+      }),
+    });
+  });
+
   it("returns autopilot matrix details for L0/L1/L2/L3 policy checks", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1757,6 +1821,66 @@ describe("createStudioServer daemon lifecycle", () => {
       expect(payload.status).toBe("succeeded");
     });
     expect(auditChapterMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads persisted autopilot strategy during assistant execute", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveStrategy = await app.request("http://localhost/api/project/assistant-strategy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        autopilotLevel: "autopilot",
+        autoFixThreshold: 85,
+        maxAutoFixIterations: 3,
+        budget: {
+          limit: 0,
+          currency: "tokens",
+        },
+        approvalSkills: [],
+        publishQualityGate: 80,
+      }),
+    });
+    expect(saveStrategy.status).toBe(200);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_autopilot_001",
+        sessionId: "asst_s_execute_autopilot_001",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      taskId: "asst_t_execute_autopilot_001",
+      status: "running",
+    });
+
+    await vi.waitFor(() => {
+      expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_autopilot_001");
+      const payload = await task.json() as {
+        status: string;
+        graph?: { nodes: Array<{ nodeId: string }> };
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "s2", "s3"]);
+    });
   });
 
   it("skips checkpoints for L2 countdown automation and emits auto-execute reasons", async () => {
@@ -4424,6 +4548,99 @@ describe("runtimeEventStore integration via server broadcast", () => {
         styleTemplate: "cinematic",
         reviewStrictnessBaseline: "strict-plus",
         antiAiTraceStrength: "max",
+      },
+    });
+  });
+
+  it("writes, validates and echoes project-level assistant strategy settings", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const initialResponse = await app.request("http://localhost/api/project/assistant-strategy");
+    expect(initialResponse.status).toBe(200);
+    await expect(initialResponse.json()).resolves.toMatchObject({
+      settings: {
+        autopilotLevel: "guarded",
+        autoFixThreshold: 85,
+        maxAutoFixIterations: 3,
+        budget: {
+          limit: 0,
+          currency: "tokens",
+        },
+        approvalSkills: [],
+        publishQualityGate: 80,
+      },
+    });
+
+    const invalidResponse = await app.request("http://localhost/api/project/assistant-strategy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        autopilotLevel: "full-auto",
+        budget: {
+          limit: -1,
+          currency: "",
+        },
+        approvalSkills: ["unknown.skill"],
+        publishQualityGate: 101,
+      }),
+    });
+    expect(invalidResponse.status).toBe(422);
+    await expect(invalidResponse.json()).resolves.toMatchObject({
+      code: "ASSISTANT_STRATEGY_VALIDATION_FAILED",
+      errors: expect.arrayContaining([
+        expect.objectContaining({ field: "autopilotLevel" }),
+        expect.objectContaining({ field: "budget.limit" }),
+        expect.objectContaining({ field: "budget.currency" }),
+        expect.objectContaining({ field: "approvalSkills[0]" }),
+        expect.objectContaining({ field: "publishQualityGate" }),
+      ]),
+    });
+
+    const saveResponse = await app.request("http://localhost/api/project/assistant-strategy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        autopilotLevel: "manual",
+        autoFixThreshold: 92,
+        maxAutoFixIterations: 5,
+        budget: {
+          limit: 1500,
+          currency: "tokens",
+        },
+        approvalSkills: ["trusted.anti-detect", "builtin.rewrite"],
+        publishQualityGate: 90,
+      }),
+    });
+    expect(saveResponse.status).toBe(200);
+    await expect(saveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      settings: {
+        autopilotLevel: "manual",
+        autoFixThreshold: 92,
+        maxAutoFixIterations: 5,
+        budget: {
+          limit: 1500,
+          currency: "tokens",
+        },
+        approvalSkills: ["trusted.anti-detect", "builtin.rewrite"],
+        publishQualityGate: 90,
+      },
+    });
+
+    const echoResponse = await app.request("http://localhost/api/project/assistant-strategy");
+    expect(echoResponse.status).toBe(200);
+    await expect(echoResponse.json()).resolves.toMatchObject({
+      settings: {
+        autopilotLevel: "manual",
+        autoFixThreshold: 92,
+        maxAutoFixIterations: 5,
+        budget: {
+          limit: 1500,
+          currency: "tokens",
+        },
+        approvalSkills: ["trusted.anti-detect", "builtin.rewrite"],
+        publishQualityGate: 90,
       },
     });
   });
