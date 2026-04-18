@@ -98,6 +98,7 @@ const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
+const ASSISTANT_HIGH_RISK_APPROVAL_REASON = "High-risk actions require manual approval before execution.";
 const ASSISTANT_DELETE_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
 const ASSISTANT_DELETE_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TRACE_MAX_ITEMS = 8;
@@ -1301,6 +1302,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
       ? payload.retryContext as Record<string, unknown>
       : undefined;
+    const mergedRetryContext = retryContext ?? previous?.retryContext;
     const graph = normalizeAssistantTaskGraph(payload.graph, taskId) ?? previous?.graph;
     if (graph) {
       assistantTaskGraphs.set(taskId, graph);
@@ -1317,7 +1319,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...(graph ? { graph } : {}),
         lastUpdatedAt: timestamp,
         ...(typeof payload.error === "string" ? { error: payload.error } : {}),
-        ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
+        ...(mergedRetryContext ? { retryContext: mergedRetryContext } : {}),
       });
       scheduleAssistantTaskSnapshotPersistence();
       broadcast(event, data);
@@ -1404,7 +1406,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(graph ? { graph } : {}),
       lastUpdatedAt: timestamp,
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
-      ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
+      ...(mergedRetryContext ? { retryContext: mergedRetryContext } : {}),
     });
     scheduleAssistantTaskSnapshotPersistence();
 
@@ -3837,14 +3839,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
     const graphHasCheckpoint = graph.nodes.some((node) => node.type === "checkpoint");
     const filteredPolicyReasons = graphHasCheckpoint && !approved
-      ? policy.reasons.filter((reason) => reason !== "High-risk actions require manual approval before execution.")
+      ? policy.reasons.filter((reason) => reason !== ASSISTANT_HIGH_RISK_APPROVAL_REASON)
       : policy.reasons;
     const blockedMessage = policy.reasons.join("; ");
-    const finalBlockedMessage = filteredPolicyReasons.join("; ").length > 0
-      ? filteredPolicyReasons.join("; ")
+    const filteredBlockedMessage = filteredPolicyReasons.join("; ");
+    const finalBlockedMessage = filteredBlockedMessage.length > 0
+      ? filteredBlockedMessage
       : blockedMessage.length > 0
-      ? blockedMessage
-      : "Assistant execution blocked by policy guard.";
+        ? blockedMessage
+        : "Assistant execution blocked by policy guard.";
     if (policy.budgetWarning) {
       broadcast("assistant:budget:warning", {
         taskId,

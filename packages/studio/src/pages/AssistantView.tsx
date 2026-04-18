@@ -872,7 +872,7 @@ export function formatAssistantTimelineMessage(
     if (event === "assistant:step:fail") {
       return `审批节点 ${payload.stepId ?? ""} 失败${payload.error ? `：${payload.error}` : ""}`;
     }
-    return `审批节点 ${payload.stepId ?? ""} 失败${payload.error ? `：${payload.error}` : ""}`;
+    return `审批节点 ${payload.stepId ?? ""} 状态更新`;
   }
   const stepText = payload.stepId ? `步骤 ${payload.stepId}` : "步骤";
   const actionText = payload.action ? `（${payload.action}）` : "";
@@ -2644,6 +2644,8 @@ export function AssistantView({
         taskId: planned.taskId,
         sessionId,
         approved: true,
+        ...(planned.graph ? { graph: planned.graph } : {}),
+        ...(planned.plan.length > 0 ? { plan: planned.plan } : {}),
       });
       setState((prev) => ({
         ...prev,
