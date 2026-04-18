@@ -1633,9 +1633,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       const configPath = join(root, "inkos.json");
       const raw = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
-      return normalizeAssistantStrategySettings(raw.assistantStrategy, "");
+      return normalizeAssistantStrategySettings(raw.assistantStrategy);
     } catch {
-      return normalizeAssistantStrategySettings(undefined, "");
+      return normalizeAssistantStrategySettings(undefined);
     }
   }
 
@@ -2919,7 +2919,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       const configPath = join(root, "inkos.json");
       const existing = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
-      const baseSettings = normalizeAssistantStrategySettings(existing.assistantStrategy, "");
+      const baseSettings = normalizeAssistantStrategySettings(existing.assistantStrategy);
       const nextSettings = {
         ...baseSettings,
         ...validation.value,

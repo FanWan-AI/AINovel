@@ -15,13 +15,7 @@ export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writ
 
 interface SettingsTabDefinition {
   readonly key: SettingsTab;
-  readonly labelKey?:
-    | "settings.tab.locale"
-    | "settings.tab.provider"
-    | "settings.tab.genre"
-    | "settings.tab.appearance"
-    | "settings.tab.writing";
-  readonly label?: string;
+  readonly label: string | ((t: TFunction) => string);
   readonly placeholderTitleKey:
     | "settings.placeholder.locale.title"
     | "settings.placeholder.provider.title"
@@ -39,31 +33,31 @@ interface SettingsTabDefinition {
 export const SETTINGS_TAB_DEFINITIONS: ReadonlyArray<SettingsTabDefinition> = [
   {
     key: "locale",
-    labelKey: "settings.tab.locale",
+    label: (t) => t("settings.tab.locale"),
     placeholderTitleKey: "settings.placeholder.locale.title",
     placeholderDescKey: "settings.placeholder.locale.desc",
   },
   {
     key: "provider",
-    labelKey: "settings.tab.provider",
+    label: (t) => t("settings.tab.provider"),
     placeholderTitleKey: "settings.placeholder.provider.title",
     placeholderDescKey: "settings.placeholder.provider.desc",
   },
   {
     key: "genre",
-    labelKey: "settings.tab.genre",
+    label: (t) => t("settings.tab.genre"),
     placeholderTitleKey: "settings.placeholder.genre.title",
     placeholderDescKey: "settings.placeholder.genre.desc",
   },
   {
     key: "appearance",
-    labelKey: "settings.tab.appearance",
+    label: (t) => t("settings.tab.appearance"),
     placeholderTitleKey: "settings.placeholder.appearance.title",
     placeholderDescKey: "settings.placeholder.appearance.desc",
   },
   {
     key: "writing",
-    labelKey: "settings.tab.writing",
+    label: (t) => t("settings.tab.writing"),
     placeholderTitleKey: "settings.placeholder.writing.title",
     placeholderDescKey: "settings.placeholder.writing.desc",
   },
@@ -94,7 +88,7 @@ export function buildSettingsTabItems({
   const activeTab = normalizeSettingsTab(tab);
   return SETTINGS_TAB_DEFINITIONS.map((item) => ({
     key: item.key,
-    label: item.label ?? t(item.labelKey!),
+    label: typeof item.label === "function" ? item.label(t) : item.label,
     active: item.key === activeTab,
     onClick: () => onTabChange(item.key),
   }));
