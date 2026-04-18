@@ -639,6 +639,104 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("returns autopilot matrix details for L0/L1/L2/L3 policy checks", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const scenarios = [
+      {
+        level: "L0",
+        plan: [{ stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 }],
+        expected: {
+          allow: true,
+          riskLevel: "low",
+          requiredApprovals: [],
+          autopilot: {
+            level: "L0",
+            action: "manual-checkpoint",
+            checkpointStrategy: "before-first-step",
+            shouldAutoExecute: false,
+            reasonCode: "l0-manual-checkpoint",
+          },
+        },
+      },
+      {
+        level: "L1",
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+        ],
+        expected: {
+          allow: true,
+          riskLevel: "medium",
+          requiredApprovals: [],
+          autopilot: {
+            level: "L1",
+            action: "manual-checkpoint",
+            checkpointStrategy: "before-risky-step",
+            shouldAutoExecute: false,
+            reasonCode: "l1-compatible-risk-checkpoint",
+          },
+        },
+      },
+      {
+        level: "L2",
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+        ],
+        expected: {
+          allow: true,
+          riskLevel: "medium",
+          requiredApprovals: [],
+          autopilot: {
+            level: "L2",
+            action: "countdown-auto",
+            checkpointStrategy: "none",
+            shouldAutoExecute: true,
+            countdownSeconds: 30,
+            reasonCode: "l2-medium-countdown-auto",
+          },
+        },
+      },
+      {
+        level: "L3",
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+        ],
+        expected: {
+          allow: true,
+          riskLevel: "high",
+          requiredApprovals: [],
+          autopilot: {
+            level: "L3",
+            action: "auto-execute",
+            checkpointStrategy: "none",
+            shouldAutoExecute: true,
+            reasonCode: "l3-full-auto",
+          },
+        },
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const response = await app.request("http://localhost/api/assistant/policy/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: `asst_s_policy_${scenario.level}`,
+          autopilotLevel: scenario.level,
+          approved: false,
+          plan: scenario.plan,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject(scenario.expected);
+    }
+  });
+
   it("returns assistant skills list with layered metadata and permission view", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1612,6 +1710,140 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
   });
 
+  it("inserts a manual checkpoint before low-risk execution in L0 mode", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_l0_001",
+        sessionId: "asst_s_l0_001",
+        autopilotLevel: "L0",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l0_001");
+      const payload = await task.json() as {
+        status: string;
+        graph?: { nodes: Array<{ nodeId: string }> };
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("running");
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["cp1", "s1"]);
+      expect(payload.nodes?.cp1?.status).toBe("waiting_approval");
+    });
+    expect(auditChapterMock).not.toHaveBeenCalled();
+
+    const approveResponse = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l0_001/approve/cp1", {
+      method: "POST",
+    });
+    expect(approveResponse.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l0_001");
+      const payload = await task.json() as { status: string };
+      expect(payload.status).toBe("succeeded");
+    });
+    expect(auditChapterMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips checkpoints for L2 countdown automation and emits auto-execute reasons", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_l2_001",
+        sessionId: "asst_s_l2_001",
+        autopilotLevel: "L2",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l2_001");
+      const payload = await task.json() as {
+        status: string;
+        graph?: { nodes: Array<{ nodeId: string }> };
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "s2", "s3"]);
+    });
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "spot-fix");
+
+    const autoEvents = await app.request("http://localhost/api/runtime/events?limit=20");
+    expect(autoEvents.status).toBe(200);
+    const autoEventsBody = await autoEvents.json() as {
+      entries: Array<{ event: string; data?: { taskId?: string; reasonCode?: string; countdownSeconds?: number } }>;
+    };
+    const autoEvent = autoEventsBody.entries.find((entry) =>
+      entry.event === "assistant:policy:auto-execute" && entry.data?.taskId === "asst_t_execute_l2_001");
+    expect(autoEvent).toBeDefined();
+    expect(autoEvent?.data?.reasonCode).toBe("l2-medium-countdown-auto");
+    expect(autoEvent?.data?.countdownSeconds).toBe(30);
+  });
+
+  it("skips high-risk checkpoints in L3 mode and runs automatically", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_l3_001",
+        sessionId: "asst_s_l3_001",
+        autopilotLevel: "L3",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l3_001");
+      const payload = await task.json() as {
+        status: string;
+        graph?: { nodes: Array<{ nodeId: string }> };
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "s2", "s3"]);
+    });
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
+  });
+
   it("persists assistant task snapshots to disk with backward-compatible store shape and graph metadata", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -1863,6 +2095,50 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
   });
 
+  it("pauses L3 autopilot with an explicit budget error code when budget guard is hit", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_l3_budget_001",
+        sessionId: "asst_s_l3_budget_001",
+        autopilotLevel: "L3",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+        ],
+        budget: {
+          spent: 1200,
+          limit: 1000,
+          currency: "tokens",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "ASSISTANT_AUTOPILOT_BUDGET_PAUSED",
+        taskId: "asst_t_execute_l3_budget_001",
+      },
+    });
+
+    const blockedEvents = await app.request("http://localhost/api/runtime/events?limit=20");
+    expect(blockedEvents.status).toBe(200);
+    const blockedEventsBody = await blockedEvents.json() as {
+      entries: Array<{ event: string; data?: { taskId?: string; errorCode?: string; reasonCode?: string } }>;
+    };
+    const blockedEvent = blockedEventsBody.entries.find((entry) =>
+      entry.event === "assistant:policy:blocked" && entry.data?.taskId === "asst_t_execute_l3_budget_001");
+    expect(blockedEvent).toBeDefined();
+    expect(blockedEvent?.data?.errorCode).toBe("ASSISTANT_AUTOPILOT_BUDGET_PAUSED");
+    expect(blockedEvent?.data?.reasonCode).toBe("autopilot-budget-exhausted");
+  });
+
   it("[chaos] interrupts assistant execute on exhausted budget before mutating chapter data", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -1919,6 +2195,61 @@ describe("createStudioServer daemon lifecycle", () => {
       taskId: "asst_t_chaos_budget_001",
       status: "failed",
     });
+  });
+
+  it("pauses L3 autopilot after two consecutive failures with an explicit error code", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    reviseDraftMock.mockRejectedValue(new Error("revise exploded twice"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_execute_l3_fail_001",
+        sessionId: "asst_s_l3_fail_001",
+        autopilotLevel: "L3",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3, maxRetries: 1 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_execute_l3_fail_001");
+      const payload = await task.json() as { status: string; error?: string };
+      expect(payload.status).toBe("failed");
+      expect(payload.error).toContain("Autopilot paused after 2 consecutive failures.");
+    });
+    expect(reviseDraftMock).toHaveBeenCalledTimes(2);
+
+    const doneEvents = await app.request("http://localhost/api/runtime/events?limit=20");
+    expect(doneEvents.status).toBe(200);
+    const doneEventsBody = await doneEvents.json() as {
+      entries: Array<{ event: string; data?: { taskId?: string; errorCode?: string; reasonCode?: string } }>;
+    };
+    const doneEvent = doneEventsBody.entries.find((entry) =>
+      entry.event === "assistant:done" && entry.data?.taskId === "asst_t_execute_l3_fail_001");
+    expect(doneEvent).toBeDefined();
+    expect(doneEvent?.data?.errorCode).toBe("ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED");
+    expect(doneEvent?.data?.reasonCode).toBe("autopilot-consecutive-failures");
+
+    const blockedEvents = await app.request("http://localhost/api/runtime/events?limit=20");
+    expect(blockedEvents.status).toBe(200);
+    const blockedEventsBody = await blockedEvents.json() as {
+      entries: Array<{ event: string; data?: { taskId?: string; errorCode?: string } }>;
+    };
+    const blockedEvent = blockedEventsBody.entries.find((entry) =>
+      entry.event === "assistant:policy:blocked" && entry.data?.taskId === "asst_t_execute_l3_fail_001");
+    expect(blockedEvent).toBeDefined();
+    expect(blockedEvent?.data?.errorCode).toBe("ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED");
   });
 
   it("[chaos] marks assistant execute failed when the revise model times out without mutating chapter data", async () => {

@@ -1,4 +1,7 @@
 export type AssistantPolicyRiskLevel = "low" | "medium" | "high";
+export type AssistantAutopilotLevel = "L0" | "L1" | "L2" | "L3";
+export type AssistantAutopilotAction = "manual-checkpoint" | "auto-execute" | "countdown-auto";
+export type AssistantAutopilotCheckpointStrategy = "none" | "before-first-step" | "before-risky-step";
 
 export interface AssistantPolicyPlanStep {
   readonly action: string;
@@ -18,6 +21,7 @@ export interface AssistantPolicyCheckInput {
   readonly approved: boolean;
   readonly permissions?: ReadonlyArray<string>;
   readonly budget?: AssistantPolicyBudgetInput;
+  readonly autopilotLevel?: AssistantAutopilotLevel;
 }
 
 export interface AssistantPolicyBudgetWarning {
@@ -28,15 +32,29 @@ export interface AssistantPolicyBudgetWarning {
   readonly message: string;
 }
 
+export interface AssistantAutopilotDecision {
+  readonly level: AssistantAutopilotLevel;
+  readonly action: AssistantAutopilotAction;
+  readonly checkpointStrategy: AssistantAutopilotCheckpointStrategy;
+  readonly shouldAutoExecute: boolean;
+  readonly autoApproveCheckpoint: boolean;
+  readonly countdownSeconds?: number;
+  readonly reasonCode: string;
+  readonly reason: string;
+}
+
 export interface AssistantPolicyCheckResult {
   readonly allow: boolean;
   readonly riskLevel: AssistantPolicyRiskLevel;
   readonly reasons: ReadonlyArray<string>;
   readonly requiredApprovals: ReadonlyArray<string>;
   readonly budgetWarning?: AssistantPolicyBudgetWarning;
+  readonly autopilot: AssistantAutopilotDecision;
 }
 
 const HIGH_RISK_MODES = new Set(["rewrite", "full-rewrite", "anti-detect"]);
+export const DEFAULT_ASSISTANT_AUTOPILOT_LEVEL: AssistantAutopilotLevel = "L1";
+export const L2_MEDIUM_RISK_COUNTDOWN_SECONDS = 30;
 
 function resolveRiskLevel(plan: ReadonlyArray<AssistantPolicyPlanStep>): AssistantPolicyRiskLevel {
   let hasRevise = false;
@@ -52,8 +70,98 @@ function resolveRiskLevel(plan: ReadonlyArray<AssistantPolicyPlanStep>): Assista
   return hasRevise ? "medium" : "low";
 }
 
-export function requiresAssistantCheckpoint(plan: ReadonlyArray<AssistantPolicyPlanStep>): boolean {
-  return resolveRiskLevel(plan) !== "low";
+export function normalizeAssistantAutopilotLevel(input: unknown): AssistantAutopilotLevel | undefined {
+  return input === "L0" || input === "L1" || input === "L2" || input === "L3" ? input : undefined;
+}
+
+export function resolveAssistantAutopilotDecision(
+  planOrRiskLevel: ReadonlyArray<AssistantPolicyPlanStep> | AssistantPolicyRiskLevel,
+  autopilotLevel: AssistantAutopilotLevel = DEFAULT_ASSISTANT_AUTOPILOT_LEVEL,
+): AssistantAutopilotDecision {
+  const riskLevel = Array.isArray(planOrRiskLevel) ? resolveRiskLevel(planOrRiskLevel) : planOrRiskLevel;
+  if (autopilotLevel === "L0") {
+    return {
+      level: autopilotLevel,
+      action: "manual-checkpoint",
+      checkpointStrategy: "before-first-step",
+      shouldAutoExecute: false,
+      autoApproveCheckpoint: false,
+      reasonCode: "l0-manual-checkpoint",
+      reason: "L0 requires a manual checkpoint before any assistant task executes.",
+    };
+  }
+  if (autopilotLevel === "L1") {
+    if (riskLevel === "low") {
+      return {
+        level: autopilotLevel,
+        action: "auto-execute",
+        checkpointStrategy: "none",
+        shouldAutoExecute: true,
+        autoApproveCheckpoint: true,
+        reasonCode: "l1-compatible-low-risk-auto",
+        reason: "L1-compatible default keeps low-risk actions automatic.",
+      };
+    }
+    return {
+      level: autopilotLevel,
+      action: "manual-checkpoint",
+      checkpointStrategy: "before-risky-step",
+      shouldAutoExecute: false,
+      autoApproveCheckpoint: false,
+      reasonCode: "l1-compatible-risk-checkpoint",
+      reason: "L1-compatible default inserts a checkpoint before risky assistant actions.",
+    };
+  }
+  if (autopilotLevel === "L2") {
+    if (riskLevel === "low") {
+      return {
+        level: autopilotLevel,
+        action: "auto-execute",
+        checkpointStrategy: "none",
+        shouldAutoExecute: true,
+        autoApproveCheckpoint: true,
+        reasonCode: "l2-low-risk-auto",
+        reason: "L2 auto-executes low-risk actions.",
+      };
+    }
+    if (riskLevel === "medium") {
+      return {
+        level: autopilotLevel,
+        action: "countdown-auto",
+        checkpointStrategy: "none",
+        shouldAutoExecute: true,
+        autoApproveCheckpoint: true,
+        countdownSeconds: L2_MEDIUM_RISK_COUNTDOWN_SECONDS,
+        reasonCode: "l2-medium-countdown-auto",
+        reason: "L2 auto-executes medium-risk actions after a countdown window.",
+      };
+    }
+    return {
+      level: autopilotLevel,
+      action: "manual-checkpoint",
+      checkpointStrategy: "before-risky-step",
+      shouldAutoExecute: false,
+      autoApproveCheckpoint: false,
+      reasonCode: "l2-high-risk-manual",
+      reason: "L2 requires manual confirmation for high-risk actions.",
+    };
+  }
+  return {
+    level: autopilotLevel,
+    action: "auto-execute",
+    checkpointStrategy: "none",
+    shouldAutoExecute: true,
+    autoApproveCheckpoint: true,
+    reasonCode: "l3-full-auto",
+    reason: "L3 auto-executes unless budget guard or the failure safety brake stops the run.",
+  };
+}
+
+export function requiresAssistantCheckpoint(
+  plan: ReadonlyArray<AssistantPolicyPlanStep>,
+  autopilotLevel: AssistantAutopilotLevel = DEFAULT_ASSISTANT_AUTOPILOT_LEVEL,
+): boolean {
+  return resolveAssistantAutopilotDecision(plan, autopilotLevel).checkpointStrategy !== "none";
 }
 
 function collectMissingPermissions(
@@ -91,11 +199,15 @@ function toBudgetWarning(budget: AssistantPolicyBudgetInput | undefined): Assist
 
 export function evaluateAssistantPolicy(input: AssistantPolicyCheckInput): AssistantPolicyCheckResult {
   const riskLevel = resolveRiskLevel(input.plan);
+  const autopilot = resolveAssistantAutopilotDecision(
+    riskLevel,
+    input.autopilotLevel ?? DEFAULT_ASSISTANT_AUTOPILOT_LEVEL,
+  );
   const reasons: string[] = [];
   const requiredApprovals = new Set<string>();
   const budgetWarning = toBudgetWarning(input.budget);
 
-  if (riskLevel === "high") {
+  if (riskLevel === "high" && autopilot.level !== "L3") {
     requiredApprovals.add("high-risk-manual-approval");
     if (!input.approved) {
       reasons.push("High-risk actions require manual approval before execution.");
@@ -116,6 +228,7 @@ export function evaluateAssistantPolicy(input: AssistantPolicyCheckInput): Assis
     riskLevel,
     reasons,
     requiredApprovals: [...requiredApprovals],
+    autopilot,
     ...(budgetWarning ? { budgetWarning } : {}),
   };
 }

@@ -79,6 +79,7 @@ export interface PrepareTaskNodeContext {
 export interface AssistantConductorOptions {
   readonly sessionId: string;
   readonly autoApproveCheckpoints?: boolean;
+  readonly pauseAfterConsecutiveFailures?: number;
 }
 
 export interface AssistantConductorDependencies {
@@ -119,6 +120,8 @@ export type AssistantConductorEvent =
       readonly status: Exclude<TaskRunStatus, "pending" | "running" | "waiting_approval">;
       readonly timestamp: string;
       readonly error?: string;
+      readonly errorCode?: string;
+      readonly reasonCode?: string;
     };
 
 interface MutableTaskNodeRuntimeState {
@@ -150,6 +153,7 @@ interface MutableTaskRunState {
   lastUpdatedAt: string;
   error?: string;
   approvalResolvers: Map<string, () => void>;
+  consecutiveFailures: number;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -313,7 +317,7 @@ export class AssistantConductor {
           yield* this.runCheckpointNode(run, node, options.autoApproveCheckpoints === true);
           continue;
         }
-        const terminalEvent = yield* this.runTaskNode(run, node);
+        const terminalEvent = yield* this.runTaskNode(run, node, options);
         if (terminalEvent) {
           yield terminalEvent;
           return;
@@ -348,6 +352,7 @@ export class AssistantConductor {
       stepRunIds: {},
       lastUpdatedAt: timestamp,
       approvalResolvers: new Map<string, () => void>(),
+      consecutiveFailures: 0,
     };
   }
 
@@ -389,12 +394,14 @@ export class AssistantConductor {
     run.status = "running";
     run.currentNodeId = node.nodeId;
     run.lastUpdatedAt = finishedAt;
+    run.consecutiveFailures = 0;
     yield this.buildNodeEvent(run, state, "success", finishedAt);
   }
 
   private async *runTaskNode(
     run: MutableTaskRunState,
     node: TaskNode,
+    options: AssistantConductorOptions,
   ): AsyncGenerator<AssistantConductorEvent, AssistantConductorEvent | null> {
     const state = run.nodes[node.nodeId]!;
 
@@ -427,6 +434,7 @@ export class AssistantConductor {
         run.status = "running";
         run.currentNodeId = node.nodeId;
         run.lastUpdatedAt = finishedAt;
+        run.consecutiveFailures = 0;
         yield this.buildNodeEvent(run, state, "success", finishedAt);
         return null;
       } catch (error) {
@@ -439,19 +447,46 @@ export class AssistantConductor {
         }
         state.error = message;
         state.finishedAt = finishedAt;
+        run.consecutiveFailures += 1;
         const hasRetryRemaining = state.attempts <= state.maxRetries;
+        const pauseAfterConsecutiveFailures = typeof options.pauseAfterConsecutiveFailures === "number"
+          && Number.isFinite(options.pauseAfterConsecutiveFailures)
+          && options.pauseAfterConsecutiveFailures > 0
+          ? options.pauseAfterConsecutiveFailures
+          : undefined;
+        const autopilotPauseTriggered = pauseAfterConsecutiveFailures !== undefined
+          && run.consecutiveFailures >= pauseAfterConsecutiveFailures;
         state.status = hasRetryRemaining ? "pending" : "failed";
         run.lastUpdatedAt = finishedAt;
-        if (!hasRetryRemaining) {
+        if (autopilotPauseTriggered || !hasRetryRemaining) {
+          state.status = "failed";
           run.status = "failed";
           run.currentNodeId = node.nodeId;
-          run.error = message;
+          run.error = autopilotPauseTriggered
+            ? `Autopilot paused after ${run.consecutiveFailures} consecutive failures.`
+            : message;
         }
         yield this.buildNodeEvent(run, state, "fail", finishedAt, {
           currentAttempt: state.attempts,
           maxRetries: state.maxRetries,
-          retryScheduled: hasRetryRemaining,
+          retryScheduled: hasRetryRemaining && !autopilotPauseTriggered,
+          consecutiveFailures: run.consecutiveFailures,
+          ...(pauseAfterConsecutiveFailures !== undefined ? { pauseAfterConsecutiveFailures } : {}),
+          ...(autopilotPauseTriggered ? { autopilotPaused: true } : {}),
         });
+        if (autopilotPauseTriggered) {
+          return {
+            type: "graph",
+            phase: "done",
+            taskId: run.taskId,
+            sessionId: run.sessionId,
+            status: "failed",
+            timestamp: finishedAt,
+            error: run.error,
+            errorCode: "ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED",
+            reasonCode: "autopilot-consecutive-failures",
+          };
+        }
         if (!hasRetryRemaining) {
           return {
             type: "graph",

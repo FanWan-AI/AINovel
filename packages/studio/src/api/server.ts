@@ -30,8 +30,12 @@ import { previewNextPlan, PlanLowConfidenceError } from "./services/next-plan-se
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import {
+  DEFAULT_ASSISTANT_AUTOPILOT_LEVEL,
   evaluateAssistantPolicy,
-  requiresAssistantCheckpoint,
+  normalizeAssistantAutopilotLevel,
+  resolveAssistantAutopilotDecision,
+  type AssistantAutopilotDecision,
+  type AssistantAutopilotLevel,
   type AssistantPolicyBudgetInput,
   type AssistantPolicyPlanStep,
 } from "./services/assistant-policy-service.js";
@@ -105,6 +109,8 @@ const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates."
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
 const ASSISTANT_HIGH_RISK_APPROVAL_REASON = "High-risk actions require manual approval before execution.";
+const ASSISTANT_AUTOPILOT_BUDGET_PAUSED_CODE = "ASSISTANT_AUTOPILOT_BUDGET_PAUSED";
+const ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED_CODE = "ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED";
 const ASSISTANT_DELETE_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
 const ASSISTANT_DELETE_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TRACE_MAX_ITEMS = 8;
@@ -889,6 +895,22 @@ function parseAssistantPolicyPermissions(
   return { ok: true, value: permissions };
 }
 
+function parseAssistantAutopilotLevel(
+  rawAutopilotLevel: unknown,
+): { ok: true; value: AssistantAutopilotLevel } | { ok: false; errors: Array<{ field: string; message: string }> } {
+  if (rawAutopilotLevel === undefined) {
+    return { ok: true, value: DEFAULT_ASSISTANT_AUTOPILOT_LEVEL };
+  }
+  const autopilotLevel = normalizeAssistantAutopilotLevel(rawAutopilotLevel);
+  if (!autopilotLevel) {
+    return {
+      ok: false,
+      errors: [{ field: "autopilotLevel", message: "autopilotLevel must be one of L0, L1, L2, or L3" }],
+    };
+  }
+  return { ok: true, value: autopilotLevel };
+}
+
 function parseAssistantPolicyPlan(
   rawPlan: unknown,
 ): { ok: true; value: AssistantPolicyPlanStep[] } | { ok: false; errors: Array<{ field: string; message: string }> } {
@@ -1048,32 +1070,13 @@ function buildAssistantTaskGraphFromPlan(
   taskId: string,
   plan: ReadonlyArray<AssistantPlanStep>,
   riskLevel: "low" | "medium" | "high",
+  autopilotLevel: AssistantAutopilotLevel = DEFAULT_ASSISTANT_AUTOPILOT_LEVEL,
 ): TaskGraph {
   const nodes: TaskNode[] = [];
   const edges: TaskEdge[] = [];
-  const shouldInsertCheckpoint = requiresAssistantCheckpoint(plan);
   let previousNodeId: string | null = null;
-  let checkpointInserted = false;
 
   plan.forEach((step) => {
-    if (shouldInsertCheckpoint && !checkpointInserted && step.action === "revise") {
-      const checkpointNodeId = "cp1";
-      nodes.push({
-        nodeId: checkpointNodeId,
-        type: "checkpoint",
-        action: "checkpoint",
-        checkpoint: {
-          nodeId: checkpointNodeId,
-          requiredApproval: true,
-        },
-      });
-      if (previousNodeId) {
-        edges.push({ from: previousNodeId, to: checkpointNodeId });
-      }
-      previousNodeId = checkpointNodeId;
-      checkpointInserted = true;
-    }
-
     nodes.push({
       nodeId: step.stepId,
       type: "task",
@@ -1091,12 +1094,132 @@ function buildAssistantTaskGraphFromPlan(
     previousNodeId = step.stepId;
   });
 
-  return {
+  return adaptAssistantTaskGraphForAutopilot({
     taskId,
     nodes,
     edges,
     riskLevel,
+  }, resolveAssistantAutopilotDecision(riskLevel, autopilotLevel));
+}
+
+function isAssistantRiskyNode(node: Pick<TaskNode, "action" | "mode">): boolean {
+  return node.action === "revise" || node.action === "rewrite" || node.action === "anti-detect";
+}
+
+function dedupeAssistantTaskEdges(edges: ReadonlyArray<TaskEdge>): TaskEdge[] {
+  const seen = new Set<string>();
+  const deduped: TaskEdge[] = [];
+  for (const edge of edges) {
+    const key = `${edge.from}->${edge.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(edge);
+  }
+  return deduped;
+}
+
+function nextAssistantCheckpointNodeId(graph: TaskGraph): string {
+  let index = 1;
+  const existingNodeIds = new Set(graph.nodes.map((node) => node.nodeId));
+  while (existingNodeIds.has(`cp${index}`)) {
+    index += 1;
+  }
+  return `cp${index}`;
+}
+
+function stripAssistantCheckpoints(graph: TaskGraph): TaskGraph {
+  const checkpointIds = new Set(
+    graph.nodes.filter((node) => node.type === "checkpoint").map((node) => node.nodeId),
+  );
+  if (checkpointIds.size === 0) {
+    return {
+      ...graph,
+      nodes: [...graph.nodes],
+      edges: [...graph.edges],
+    };
+  }
+  const remainingEdges = graph.edges.filter((edge) => !checkpointIds.has(edge.from) && !checkpointIds.has(edge.to));
+  const rewiredEdges: TaskEdge[] = [...remainingEdges];
+  for (const checkpointId of checkpointIds) {
+    const incoming = graph.edges
+      .filter((edge) => edge.to === checkpointId && !checkpointIds.has(edge.from))
+      .map((edge) => edge.from);
+    const outgoing = graph.edges
+      .filter((edge) => edge.from === checkpointId && !checkpointIds.has(edge.to))
+      .map((edge) => edge.to);
+    for (const from of incoming) {
+      for (const to of outgoing) {
+        rewiredEdges.push({ from, to });
+      }
+    }
+  }
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((node) => node.type !== "checkpoint"),
+    edges: dedupeAssistantTaskEdges(rewiredEdges),
   };
+}
+
+function insertAssistantCheckpointBeforeTargets(graph: TaskGraph, targetNodeIds: ReadonlyArray<string>): TaskGraph {
+  if (targetNodeIds.length === 0) {
+    return graph;
+  }
+  const checkpointNodeId = nextAssistantCheckpointNodeId(graph);
+  const targetSet = new Set(targetNodeIds);
+  const checkpointNode: TaskNode = {
+    nodeId: checkpointNodeId,
+    type: "checkpoint",
+    action: "checkpoint",
+    checkpoint: {
+      nodeId: checkpointNodeId,
+      requiredApproval: true,
+    },
+  };
+  const firstTargetIndex = graph.nodes.findIndex((node) => targetSet.has(node.nodeId));
+  const nextNodes = [...graph.nodes];
+  nextNodes.splice(firstTargetIndex >= 0 ? firstTargetIndex : 0, 0, checkpointNode);
+
+  const nextEdges = graph.edges.filter((edge) => !(targetSet.has(edge.to) && !targetSet.has(edge.from)));
+  for (const targetNodeId of targetSet) {
+    const incoming = graph.edges
+      .filter((edge) => edge.to === targetNodeId && !targetSet.has(edge.from))
+      .map((edge) => edge.from);
+    if (incoming.length === 0) {
+      nextEdges.push({ from: checkpointNodeId, to: targetNodeId });
+      continue;
+    }
+    for (const from of incoming) {
+      nextEdges.push({ from, to: checkpointNodeId });
+    }
+    nextEdges.push({ from: checkpointNodeId, to: targetNodeId });
+  }
+
+  return {
+    ...graph,
+    nodes: nextNodes,
+    edges: dedupeAssistantTaskEdges(nextEdges),
+  };
+}
+
+function adaptAssistantTaskGraphForAutopilot(
+  graph: TaskGraph,
+  decision: AssistantAutopilotDecision,
+): TaskGraph {
+  const strippedGraph = stripAssistantCheckpoints(graph);
+  if (decision.checkpointStrategy === "none") {
+    return strippedGraph;
+  }
+  if (decision.checkpointStrategy === "before-first-step") {
+    const rootNodeIds = strippedGraph.nodes
+      .filter((node) => node.type === "task")
+      .filter((node) => !strippedGraph.edges.some((edge) => edge.to === node.nodeId))
+      .map((node) => node.nodeId);
+    return insertAssistantCheckpointBeforeTargets(strippedGraph, rootNodeIds);
+  }
+  const riskyNode = strippedGraph.nodes.find((node) => node.type === "task" && isAssistantRiskyNode(node));
+  return riskyNode
+    ? insertAssistantCheckpointBeforeTargets(strippedGraph, [riskyNode.nodeId])
+    : strippedGraph;
 }
 
 function flattenAssistantPolicyPlanFromGraph(graph: TaskGraph): AssistantPolicyPlanStep[] {
@@ -1811,11 +1934,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   function applyAssistantConductorEvent(event: AssistantConductorEvent): void {
     if (event.type === "graph") {
+      if (event.reasonCode || event.errorCode) {
+        broadcast("assistant:policy:blocked", {
+          taskId: event.taskId,
+          sessionId: event.sessionId,
+          level: "warn",
+          severity: "warn",
+          timestamp: event.timestamp,
+          reasons: event.error ? [event.error] : [],
+          ...(event.reasonCode ? { reasonCode: event.reasonCode } : {}),
+          ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+          ...(event.error ? { message: event.error } : {}),
+        });
+      }
       emitAssistantTaskEvent("assistant:done", {
         taskId: event.taskId,
         sessionId: event.sessionId,
         status: event.status,
         timestamp: event.timestamp,
+        ...(event.reasonCode ? { reasonCode: event.reasonCode } : {}),
+        ...(event.errorCode ? { errorCode: event.errorCode } : {}),
         ...(event.error ? { error: event.error } : {}),
       });
       return;
@@ -3896,16 +4034,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (!permissionsParsed.ok) {
       errors.push(...permissionsParsed.errors);
     }
+    const autopilotParsed = parseAssistantAutopilotLevel(body.autopilotLevel);
+    if (!autopilotParsed.ok) {
+      errors.push(...autopilotParsed.errors);
+    }
     if (errors.length > 0) {
       return c.json({ code: "ASSISTANT_POLICY_VALIDATION_FAILED", errors }, 422);
     }
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
     const planInput = (planParsed as { ok: true; value: AssistantPolicyPlanStep[] }).value;
+    const autopilotLevel = (autopilotParsed as { ok: true; value: AssistantAutopilotLevel }).value;
 
     const policy = evaluateAssistantPolicy({
       plan: planInput,
       approved: body.approved === true,
+      autopilotLevel,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
@@ -3946,9 +4090,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (!permissionsParsed.ok) {
       errors.push(...permissionsParsed.errors);
     }
+    const autopilotParsed = parseAssistantAutopilotLevel(body.autopilotLevel);
+    if (!autopilotParsed.ok) {
+      errors.push(...autopilotParsed.errors);
+    }
     if (errors.length > 0) {
       return c.json({ code: "ASSISTANT_EXECUTE_VALIDATION_FAILED", errors }, 422);
     }
+    const autopilotLevel = (autopilotParsed as { ok: true; value: AssistantAutopilotLevel }).value;
 
     const storedGraph = assistantTaskGraphs.get(taskId);
     const bodyGraph = normalizeAssistantTaskGraph(body.graph, taskId);
@@ -3957,7 +4106,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       : null;
     const graph = storedGraph
       ?? bodyGraph
-      ?? (legacyPlan ? buildAssistantTaskGraphFromPlan(taskId, legacyPlan, "medium") : null);
+      ?? (legacyPlan ? buildAssistantTaskGraphFromPlan(taskId, legacyPlan, "medium", autopilotLevel) : null);
     if (!graph) {
       return c.json({
         code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
@@ -4021,10 +4170,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const policy = evaluateAssistantPolicy({
       plan: policyPlan,
       approved,
+      autopilotLevel,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
-    const graphHasCheckpoint = graph.nodes.some((node) => node.type === "checkpoint");
+    const runtimeGraph = adaptAssistantTaskGraphForAutopilot(graph, policy.autopilot);
+    assistantTaskGraphs.set(taskId, runtimeGraph);
+    const graphHasCheckpoint = runtimeGraph.nodes.some((node) => node.type === "checkpoint");
     const filteredPolicyReasons = graphHasCheckpoint && !approved
       ? policy.reasons.filter((reason) => reason !== ASSISTANT_HIGH_RISK_APPROVAL_REASON)
       : policy.reasons;
@@ -4042,30 +4194,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         level: "warn",
         severity: "warn",
         timestamp: new Date().toISOString(),
+        autopilotLevel: policy.autopilot.level,
+        reasonCode: policy.autopilot.level === "L3" ? "autopilot-budget-exhausted" : policy.autopilot.reasonCode,
         ...policy.budgetWarning,
       });
     }
     if (filteredPolicyReasons.length > 0) {
+      const autopilotPausedByBudget = policy.autopilot.level === "L3" && policy.budgetWarning !== undefined;
+      const errorCode = autopilotPausedByBudget
+        ? ASSISTANT_AUTOPILOT_BUDGET_PAUSED_CODE
+        : "ASSISTANT_EXECUTE_POLICY_BLOCKED";
       broadcast("assistant:policy:blocked", {
         taskId,
         sessionId,
         level: "warn",
         severity: "warn",
         timestamp: new Date().toISOString(),
+        autopilotLevel: policy.autopilot.level,
         riskLevel: policy.riskLevel,
         reasons: filteredPolicyReasons,
         requiredApprovals: policy.requiredApprovals,
+        reasonCode: autopilotPausedByBudget ? "autopilot-budget-exhausted" : policy.autopilot.reasonCode,
+        errorCode,
         message: finalBlockedMessage,
       });
       emitAssistantTaskEvent("assistant:done", {
         taskId,
         sessionId,
         status: "failed",
+        autopilotLevel: policy.autopilot.level,
+        reasonCode: autopilotPausedByBudget ? "autopilot-budget-exhausted" : policy.autopilot.reasonCode,
+        errorCode,
         error: finalBlockedMessage,
       });
       return c.json({
         error: {
-          code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
+          code: errorCode,
           message: finalBlockedMessage,
           taskId,
           policy: {
@@ -4077,10 +4241,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 409);
     }
 
-    ensureAssistantTaskSnapshot(taskId, sessionId, graph);
-    const runner = assistantConductor.runGraph(graph, {
+    if (policy.autopilot.shouldAutoExecute) {
+      broadcast("assistant:policy:auto-execute", {
+        taskId,
+        sessionId,
+        level: "info",
+        severity: "info",
+        timestamp: new Date().toISOString(),
+        riskLevel: policy.riskLevel,
+        autopilotLevel: policy.autopilot.level,
+        reasonCode: policy.autopilot.reasonCode,
+        reason: policy.autopilot.reason,
+        checkpointStrategy: policy.autopilot.checkpointStrategy,
+        ...(policy.autopilot.countdownSeconds !== undefined ? { countdownSeconds: policy.autopilot.countdownSeconds } : {}),
+      });
+    }
+
+    ensureAssistantTaskSnapshot(taskId, sessionId, runtimeGraph);
+    const runner = assistantConductor.runGraph(runtimeGraph, {
       sessionId,
-      autoApproveCheckpoints: approved,
+      autoApproveCheckpoints: approved || policy.autopilot.autoApproveCheckpoint,
+      ...(policy.autopilot.level === "L3" ? { pauseAfterConsecutiveFailures: 2 } : {}),
     });
     const firstEvent = await runner.next();
     if (!firstEvent.done && firstEvent.value) {
