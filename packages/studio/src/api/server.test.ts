@@ -180,6 +180,30 @@ async function readSseBody(response: Response): Promise<string> {
   return body;
 }
 
+function isoDaysAgo(daysAgo: number, hour = 12): string {
+  const date = new Date();
+  date.setUTCHours(hour, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+  return date.toISOString();
+}
+
+async function writeAssistantTaskSnapshotStore(root: string, tasks: ReadonlyArray<Record<string, unknown>>): Promise<void> {
+  await mkdir(join(root, ".inkos"), { recursive: true });
+  await writeFile(join(root, ".inkos", "assistant-task-snapshots.json"), JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    tasks,
+  }, null, 2), "utf-8");
+}
+
+async function writeChapterRunLedger(root: string, bookId: string, runs: ReadonlyArray<Record<string, unknown>>): Promise<void> {
+  await mkdir(join(root, "books", bookId, ".studio"), { recursive: true });
+  await writeFile(join(root, "books", bookId, ".studio", "chapter-runs.v1.json"), JSON.stringify({
+    schemaVersion: 1,
+    runs,
+  }, null, 2), "utf-8");
+}
+
 function parseAssistantDonePayload(body: string): Record<string, unknown> {
   const events = body
     .split("\n\n")
@@ -2401,6 +2425,224 @@ describe("createStudioServer daemon lifecycle", () => {
           status: "succeeded",
         }),
       ]),
+    });
+  });
+
+  it("aggregates assistant observability metrics for 7/30 day ranges and tolerates missing data", async () => {
+    await writeAssistantTaskSnapshotStore(root, [
+      {
+        taskId: "asst_metrics_recent_success",
+        sessionId: "session_recent_success",
+        status: "succeeded",
+        steps: {},
+        nodes: {
+          s1: {
+            nodeId: "s1",
+            type: "task",
+            status: "succeeded",
+            attempts: 1,
+            maxRetries: 0,
+          },
+        },
+        retryContext: {
+          budget: {
+            spent: 120,
+            currency: "tokens",
+          },
+        },
+        lastUpdatedAt: isoDaysAgo(1),
+      },
+      {
+        taskId: "asst_metrics_recent_manual",
+        sessionId: "session_recent_manual",
+        status: "failed",
+        steps: {},
+        nodes: {
+          cp1: {
+            nodeId: "cp1",
+            type: "checkpoint",
+            status: "waiting_approval",
+            attempts: 1,
+            maxRetries: 0,
+          },
+        },
+        lastUpdatedAt: isoDaysAgo(3),
+      },
+      {
+        taskId: "asst_metrics_older_success",
+        sessionId: "session_older_success",
+        status: "succeeded",
+        steps: {},
+        nodes: {
+          s1: {
+            nodeId: "s1",
+            type: "task",
+            status: "succeeded",
+            attempts: 1,
+            maxRetries: 0,
+          },
+        },
+        retryContext: {
+          tokenUsage: {
+            totalTokens: 40,
+          },
+        },
+        lastUpdatedAt: isoDaysAgo(10),
+      },
+    ]);
+    await writeChapterRunLedger(root, "demo-book", [
+      {
+        schemaVersion: 1,
+        runId: "run_recent_success",
+        bookId: "demo-book",
+        chapter: 3,
+        actionType: "revise",
+        status: "succeeded",
+        decision: "applied",
+        appliedBrief: null,
+        unchangedReason: null,
+        error: null,
+        startedAt: isoDaysAgo(1, 8),
+        finishedAt: isoDaysAgo(1, 9),
+        events: [
+          { index: 0, runId: "run_recent_success", timestamp: isoDaysAgo(1, 8), type: "start", status: "running" },
+          { index: 1, runId: "run_recent_success", timestamp: isoDaysAgo(1, 9), type: "success", status: "succeeded" },
+        ],
+      },
+      {
+        schemaVersion: 1,
+        runId: "run_recent_failed",
+        bookId: "demo-book",
+        chapter: 4,
+        actionType: "revise",
+        status: "failed",
+        decision: "failed",
+        appliedBrief: null,
+        unchangedReason: null,
+        error: "boom",
+        startedAt: isoDaysAgo(3, 8),
+        finishedAt: isoDaysAgo(3, 9),
+        events: [
+          { index: 0, runId: "run_recent_failed", timestamp: isoDaysAgo(3, 8), type: "start", status: "running" },
+          { index: 1, runId: "run_recent_failed", timestamp: isoDaysAgo(3, 9), type: "fail", status: "failed", message: "boom" },
+        ],
+      },
+      {
+        schemaVersion: 1,
+        runId: "run_older_success",
+        bookId: "demo-book",
+        chapter: 5,
+        actionType: "rewrite",
+        status: "succeeded",
+        decision: "applied",
+        appliedBrief: null,
+        unchangedReason: null,
+        error: null,
+        startedAt: isoDaysAgo(10, 8),
+        finishedAt: isoDaysAgo(10, 9),
+        events: [
+          { index: 0, runId: "run_older_success", timestamp: isoDaysAgo(10, 8), type: "start", status: "running" },
+          { index: 1, runId: "run_older_success", timestamp: isoDaysAgo(10, 9), type: "success", status: "succeeded" },
+        ],
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const recentResponse = await app.request("http://localhost/api/assistant/metrics?range=7");
+    expect(recentResponse.status).toBe(200);
+    const recentPayload = await recentResponse.json() as {
+      series: Array<{
+        date: string;
+        firstSuccessRate: number;
+        autoFixSuccessRate: number;
+        manualInterventionRate: number;
+        averageChapterScore: number;
+        tokenConsumption: number;
+        activeTasks: number;
+      }>;
+      summary: { tokenConsumption: number };
+      meta: { rangeDays: number; truncated: boolean };
+    };
+    expect(recentPayload.meta.rangeDays).toBe(7);
+    expect(recentPayload.meta.truncated).toBe(false);
+    expect(recentPayload.series).toHaveLength(2);
+    expect(recentPayload.series).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        date: isoDaysAgo(1).slice(0, 10),
+        firstSuccessRate: 100,
+        autoFixSuccessRate: 100,
+        tokenConsumption: 120,
+        activeTasks: 1,
+      }),
+      expect.objectContaining({
+        date: isoDaysAgo(3).slice(0, 10),
+        manualInterventionRate: 100,
+        autoFixSuccessRate: 0,
+      }),
+    ]));
+    expect(recentPayload.summary.tokenConsumption).toBe(120);
+
+    const widerResponse = await app.request("http://localhost/api/assistant/metrics?range=30");
+    expect(widerResponse.status).toBe(200);
+    const widerPayload = await widerResponse.json() as { series: Array<{ date: string; tokenConsumption: number }> };
+    expect(widerPayload.series).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        date: isoDaysAgo(10).slice(0, 10),
+        tokenConsumption: 40,
+      }),
+    ]));
+
+    const emptyApp = createStudioServer(cloneProjectConfig() as never, join(root, "empty"));
+    const emptyResponse = await emptyApp.request("http://localhost/api/assistant/metrics?range=7");
+    expect(emptyResponse.status).toBe(200);
+    await expect(emptyResponse.json()).resolves.toMatchObject({
+      series: [],
+      summary: {
+        firstSuccessRate: 0,
+        autoFixSuccessRate: 0,
+        manualInterventionRate: 0,
+        averageChapterScore: 0,
+        tokenConsumption: 0,
+        activeTasks: 0,
+      },
+    });
+  });
+
+  it("caps assistant observability aggregation to protect the API", async () => {
+    const startedAt = isoDaysAgo(1, 8);
+    const finishedAt = isoDaysAgo(1, 9);
+    await writeChapterRunLedger(root, "demo-book", Array.from({ length: 130 }, (_, index) => ({
+      schemaVersion: 1,
+      runId: `run_limit_${index}`,
+      bookId: "demo-book",
+      chapter: index + 1,
+      actionType: "revise",
+      status: "succeeded",
+      decision: "applied",
+      appliedBrief: null,
+      unchangedReason: null,
+      error: null,
+      startedAt,
+      finishedAt,
+      events: [
+        { index: 0, runId: `run_limit_${index}`, timestamp: startedAt, type: "start", status: "running" },
+        { index: 1, runId: `run_limit_${index}`, timestamp: finishedAt, type: "success", status: "succeeded" },
+      ],
+    })));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/metrics?range=7");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      meta: {
+        runLimitPerBook: 120,
+        runsConsidered: 120,
+        truncated: true,
+      },
     });
   });
 
