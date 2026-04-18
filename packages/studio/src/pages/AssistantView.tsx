@@ -2412,9 +2412,10 @@ export function AssistantView({
             },
           }),
         ]);
+        const bookReport = bookResult.report;
         const qualityReport: QualityReportBundle = {
           ...(chapterResult?.report ? { chapter: chapterResult.report } : {}),
-          ...(bookResult.report ? { book: bookResult.report } : {}),
+          book: bookReport,
         };
         const suggestedNextActions = mergeAssistantSuggestedNextActions(
           chapterResult?.suggestedNextActions ?? [],

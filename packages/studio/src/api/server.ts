@@ -2503,6 +2503,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     };
   }
 
+  function buildUnknownAssistantEvaluateScope(scopeType: "chapter" | "book"): AssistantEvaluateScope {
+    return scopeType === "chapter"
+      ? { type: "chapter", bookId: "unknown", chapter: 1 }
+      : { type: "book", bookId: "unknown" };
+  }
+
   function deriveChapterAssistantEvaluateReport(
     runs: ReadonlyArray<ChapterRunRecord>,
     scope: AssistantEvaluateScope,
@@ -2593,7 +2599,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       overallScore: clampSerializableScore(typeof source["overallScore"] === "number" ? source["overallScore"] : Number.NaN),
       dimensions,
       blockingIssues,
-      evidence: evidence.length > 0 ? evidence : [buildAssistantEvaluateFallbackEvidence({ type: scopeType, bookId: "unknown", ...(scopeType === "chapter" ? { chapter: 1 } : {}) } as AssistantEvaluateScope)],
+      evidence: evidence.length > 0 ? evidence : [buildAssistantEvaluateFallbackEvidence(buildUnknownAssistantEvaluateScope(scopeType))],
       ...(source["cached"] === true ? { cached: true } : {}),
     };
   }
@@ -2723,8 +2729,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       style: clampSerializableScore(72 + Math.max(0, 10 - Math.abs(variation - 0.22) * 60) - failedRuns * 4),
       pacing: clampSerializableScore(70 + coverage * 12 - Math.max(0, variation - 0.45) * 30 - unchangedRuns * 3),
     };
+    const dimensionValues = Object.values(dimensions).filter((value): value is number => value !== undefined);
     const overallScore = clampSerializableScore(
-      Object.values(dimensions).reduce((sum, value) => sum + (value ?? 0), 0) / 6,
+      dimensionValues.length > 0
+        ? dimensionValues.reduce((sum, value) => sum + value, 0) / dimensionValues.length
+        : 0,
     );
     const seenSnippets = new Set<string>();
     const repeatedChapter = chapters.find((chapter) => {
@@ -2735,6 +2744,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       seenSnippets.add(chapter.normalizedSnippet);
       return false;
     }) ?? null;
+    const lastChapter = chapters.at(-1);
     const evidence: AssistantEvaluateEvidence[] = [
       {
         source: storyBible ? `book-story:${scope.bookId}:story_bible.md` : `book:${scope.bookId}:chapters`,
@@ -2770,8 +2780,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         reason: `风格评分结合章节字数波动系数 ${variation.toFixed(2)} 与 ${appliedRuns} 次已应用修订结果。`,
       },
       {
-        source: chapters.at(-1) ? `book-chapter:${scope.bookId}:${chapters.at(-1)!.chapter}` : `book:${scope.bookId}`,
-        excerpt: chapters.at(-1)?.snippet ?? "暂无节奏样本。",
+        source: lastChapter ? `book-chapter:${scope.bookId}:${lastChapter.chapter}` : `book:${scope.bookId}`,
+        excerpt: lastChapter?.snippet ?? "暂无节奏样本。",
         reason: `节奏评分结合 ${chapters.length} 章样本、${runs.length} 条最新运行记录与章节长度离散度。`,
       },
     ];
