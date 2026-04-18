@@ -181,9 +181,19 @@ async function readSseBody(response: Response): Promise<string> {
 }
 
 function parseAssistantDonePayload(body: string): Record<string, unknown> {
-  const doneDataMatch = body.match(/event:\s*assistant:done\n(?:data:\s*)([^\n]+)/u);
-  expect(doneDataMatch?.[1]).toBeTruthy();
-  return JSON.parse(doneDataMatch![1]!) as Record<string, unknown>;
+  const events = body
+    .split("\n\n")
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+  const doneEvent = events.find((chunk) => chunk.split("\n").some((line) => line.trim() === "event: assistant:done"));
+  expect(doneEvent).toBeTruthy();
+  const dataLines = doneEvent!
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trim());
+  expect(dataLines.length).toBeGreaterThan(0);
+  return JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
 }
 
 describe("createStudioServer daemon lifecycle", () => {

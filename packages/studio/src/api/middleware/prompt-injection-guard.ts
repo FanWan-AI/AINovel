@@ -4,7 +4,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 const REQUEST_ID_CONTEXT_KEY = "assistantSecurityRequestId";
-const DEFAULT_INPUT_TARGETS = new Set(["prompt", "input", "instruction", "content", "message", "keyword", "objective", "$raw"]);
 const AUDIT_SUMMARY_PREVIEW_LENGTH = 96;
 const AUDIT_SUMMARY_DIGEST_LENGTH = 12;
 
@@ -184,7 +183,7 @@ async function loadSecurityRules(root: string): Promise<SecurityRulesConfig> {
 }
 
 function normalizeRequestId(input?: string | null): string {
-  return typeof input === "string" && input.trim().length > 0 ? input.trim() : `req_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  return typeof input === "string" && input.trim().length > 0 ? input.trim() : `req_${randomUUID().replace(/-/g, "")}`;
 }
 
 function summarizeContent(content: string): string {
@@ -204,7 +203,7 @@ function matchesTarget(rule: SecurityRule, target: string): boolean {
 
 function collectStringCandidates(value: unknown, parentKey?: string): ContentCandidate[] {
   if (typeof value === "string") {
-    if (parentKey && DEFAULT_INPUT_TARGETS.has(parentKey)) {
+    if (parentKey && parentKey.trim().length > 0) {
       return [{ target: parentKey, content: value }];
     }
     return [];
@@ -216,6 +215,14 @@ function collectStringCandidates(value: unknown, parentKey?: string): ContentCan
     return [];
   }
   return Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => collectStringCandidates(entry, key));
+}
+
+async function readRequestBody(request: Request): Promise<string> {
+  try {
+    return await request.clone().text();
+  } catch (error) {
+    return `[request-body-unavailable:${error instanceof Error ? error.message : String(error)}]`;
+  }
 }
 
 function collectReservedKeys(value: unknown, found = new Set<string>()): Set<string> {
@@ -293,7 +300,7 @@ async function buildRequestDecision(
   }
   const url = new URL(input.request.url);
   const queryCandidates = Array.from(url.searchParams.entries()).map(([key, value]) => ({ target: key, content: value }));
-  const rawBody = await input.request.clone().text().catch(() => "");
+  const rawBody = await readRequestBody(input.request);
   const candidates: ContentCandidate[] = [...queryCandidates];
   if (rawBody.trim().length > 0) {
     candidates.push({ target: "$raw", content: rawBody });
