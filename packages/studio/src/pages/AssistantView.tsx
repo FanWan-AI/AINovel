@@ -20,6 +20,7 @@ import {
   type AssistantWorldConsistencyMarketReport,
 } from "../components/assistant/WorldConsistencyMarketCard";
 import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
+import { GoalToBookWizard } from "../components/assistant/GoalToBookWizard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 
@@ -76,7 +77,7 @@ export interface AssistantOperatorSession {
 
 export type AssistantBookScopeMode = "single" | "multi" | "all-active";
 
-export type AssistantBookActionType = "write-next" | "audit" | "template";
+export type AssistantBookActionType = "write-next" | "audit" | "template" | "goal-to-book";
 export type AssistantTemplateRiskLevel = "L0" | "L1";
 
 export interface AssistantConfirmationDraft {
@@ -114,9 +115,28 @@ export interface AssistantTaskExecution {
   readonly status: "running" | "waiting_approval" | "succeeded" | "failed";
   readonly stepRunIds?: Record<string, string>;
   readonly candidateSelection?: AssistantCandidateSelection | null;
+  readonly goalToBookProgress?: AssistantGoalToBookProgress | null;
   readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
   readonly lastSyncedAt: number;
   readonly nextSequence: number;
+}
+
+export interface AssistantGoalToBookStage {
+  readonly index: number;
+  readonly label: string;
+  readonly status: "complete" | "current" | "upcoming";
+}
+
+export interface AssistantGoalToBookProgress {
+  readonly currentStageIndex: number;
+  readonly currentStageLabel: string;
+  readonly currentStepLabel: string;
+  readonly completedSteps: number;
+  readonly totalSteps: number;
+  readonly remainingSteps: number;
+  readonly completedChapterLoops: number;
+  readonly chapterLoopTarget: number;
+  readonly stages: ReadonlyArray<AssistantGoalToBookStage>;
 }
 
 export interface AssistantCandidateScoreEvidence {
@@ -229,6 +249,24 @@ export interface AssistantPromptTemplate {
   readonly defaultNextAction: string;
 }
 
+interface AssistantTaskGraphSnapshot {
+  readonly taskId: string;
+  readonly intent?: string;
+  readonly intentType?: string;
+  readonly riskLevel?: string;
+  readonly nodes: ReadonlyArray<{
+    readonly nodeId: string;
+    readonly type: "task" | "checkpoint";
+    readonly action: string;
+    readonly chapter?: number;
+    readonly mode?: string;
+  }>;
+  readonly edges: ReadonlyArray<{
+    readonly from: string;
+    readonly to: string;
+  }>;
+}
+
 interface AssistantTaskSnapshot {
   readonly taskId: string;
   readonly sessionId: string;
@@ -263,6 +301,7 @@ interface AssistantTaskSnapshot {
   }>;
   readonly lastUpdatedAt: string;
   readonly error?: string;
+  readonly graph?: AssistantTaskGraphSnapshot;
   readonly awaitingApproval?: {
     readonly nodeId: string;
     readonly type: "checkpoint" | "candidate-selection";
@@ -524,6 +563,7 @@ const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actio
   "write-next": "assistant.actionWriteNext",
   audit: "assistant.actionAudit",
   template: "assistant.actionTemplate",
+  "goal-to-book": "assistant.actionTemplate",
 };
 const ASSISTANT_EVENT_SET = new Set([
   "assistant:step:start",
@@ -978,6 +1018,7 @@ export function recoverAssistantStateFromSnapshot(
       sessionId: snapshot.sessionId || payload.sessionId,
       status: snapshot.status,
       candidateSelection: state.taskExecution?.taskId === snapshot.taskId ? (state.taskExecution.candidateSelection ?? null) : null,
+      goalToBookProgress: resolveAssistantGoalToBookProgress(snapshot),
       timeline: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.timeline : [],
       lastSyncedAt: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.lastSyncedAt : Date.now(),
       nextSequence: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.nextSequence : 0,
@@ -1067,6 +1108,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     sessionId: typeof payload?.sessionId === "string" ? payload.sessionId : "",
     status: "running" as const,
     candidateSelection: null,
+    goalToBookProgress: null,
     timeline: [],
     lastSyncedAt: timestamp,
     nextSequence: 0,
@@ -1108,6 +1150,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
       ...currentExecution,
       status: taskStatus,
       candidateSelection: currentExecution.candidateSelection ?? null,
+      goalToBookProgress: currentExecution.goalToBookProgress ?? null,
       timeline: [...currentExecution.timeline.slice(-(ASSISTANT_TIMELINE_MAX_ENTRIES - 1)), nextEntry],
       lastSyncedAt: timestamp,
       nextSequence: currentExecution.nextSequence + 1,
@@ -1175,6 +1218,7 @@ export function reconcileAssistantTaskFromSnapshot(
   }
   const done = snapshot.status !== "running";
   const candidateSelection = resolveAssistantCandidateSelection(snapshot);
+  const goalToBookProgress = resolveAssistantGoalToBookProgress(snapshot);
   const executionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
     ? "waiting_approval"
     : snapshot.status;
@@ -1188,6 +1232,7 @@ export function reconcileAssistantTaskFromSnapshot(
       status: executionStatus,
       stepRunIds: state.taskExecution.stepRunIds,
       candidateSelection,
+      goalToBookProgress,
       timeline,
       lastSyncedAt: Date.now(),
       nextSequence: timeline.length,
@@ -1688,6 +1733,116 @@ export function buildAssistantConfirmationDraft(
   };
 }
 
+export function buildGoalToBookConfirmationDraft(
+  goal: string,
+  targetBookIds: ReadonlyArray<string>,
+): AssistantConfirmationDraft | null {
+  const normalized = goal.trim();
+  if (!normalized || targetBookIds.length === 0) {
+    return null;
+  }
+  return {
+    action: "goal-to-book",
+    prompt: normalized,
+    targetBookIds: [...targetBookIds],
+  };
+}
+
+function resolveGoalToBookStageIndex(
+  node: NonNullable<AssistantTaskSnapshot["graph"]>["nodes"][number] | undefined,
+  completed: boolean,
+): number {
+  if (completed) return 7;
+  if (!node) return 2;
+  if (node.type === "checkpoint") {
+    if (node.mode === "publish-candidate-confirm") {
+      return 7;
+    }
+    return 3;
+  }
+  if (node.action === "plan-next") return 2;
+  if (node.action === "write-next") return 4;
+  if (node.action === "audit") return 5;
+  return 6;
+}
+
+function resolveGoalToBookStepLabel(
+  node: NonNullable<AssistantTaskSnapshot["graph"]>["nodes"][number] | undefined,
+  completed: boolean,
+): string {
+  if (completed) return "已完成发布候选确认";
+  if (!node) return "等待蓝图阶段";
+  if (node.type === "checkpoint") {
+    return node.mode === "publish-candidate-confirm" ? "等待发布候选确认" : "等待蓝图确认";
+  }
+  if (node.action === "plan-next") return "正在生成蓝图";
+  const chapterLabel = typeof node.chapter === "number" ? `第${node.chapter}章` : "当前章节";
+  if (node.action === "write-next") return `${chapterLabel} 写作中`;
+  if (node.action === "audit") return `${chapterLabel} 审核中`;
+  if (node.action === "revise") return `${chapterLabel} 修订中`;
+  if (node.action === "re-audit") return `${chapterLabel} 复审中`;
+  return `${node.nodeId} 执行中`;
+}
+
+export function resolveAssistantGoalToBookProgress(
+  snapshot: AssistantTaskSnapshot,
+): AssistantGoalToBookProgress | null {
+  if (snapshot.graph?.intentType !== "goal-to-book") {
+    return null;
+  }
+  const orderedNodes = snapshot.graph.nodes;
+  const nodeStates = snapshot.nodes ?? {};
+  const completed = snapshot.status === "succeeded";
+  const succeededCount = orderedNodes.filter((node) => nodeStates[node.nodeId]?.status === "succeeded").length;
+  const currentNodeId = snapshot.awaitingApproval?.nodeId
+    ?? snapshot.currentStepId
+    ?? orderedNodes.find((node) => {
+      const status = nodeStates[node.nodeId]?.status;
+      return status === "running" || status === "waiting_approval" || status === "failed";
+    })?.nodeId
+    ?? orderedNodes.find((node) => nodeStates[node.nodeId]?.status !== "succeeded")?.nodeId;
+  const currentNode = currentNodeId
+    ? orderedNodes.find((node) => node.nodeId === currentNodeId)
+    : completed
+      ? orderedNodes.at(-1)
+      : orderedNodes[0];
+  const currentStageIndex = resolveGoalToBookStageIndex(currentNode, completed);
+  const stages = [
+    "目标",
+    "蓝图",
+    "蓝图确认",
+    "写",
+    "审",
+    "修 / 复审",
+    "发布候选",
+  ].map((label, index) => ({
+    index: index + 1,
+    label,
+    status: completed || index + 1 < currentStageIndex
+      ? "complete"
+      : index + 1 === currentStageIndex
+        ? "current"
+        : "upcoming",
+  } satisfies AssistantGoalToBookStage));
+  const chapterLoopTarget = orderedNodes.filter((node) => node.action === "write-next").length;
+  const completedChapterLoops = orderedNodes.filter((node) =>
+    node.action === "write-next" && nodeStates[node.nodeId]?.status === "succeeded"
+  ).length;
+  const totalSteps = orderedNodes.length + 1;
+  const completedSteps = Math.min(totalSteps, 1 + succeededCount);
+  return {
+    currentStageIndex,
+    currentStageLabel: stages[currentStageIndex - 1]?.label ?? "蓝图",
+    currentStepLabel: resolveGoalToBookStepLabel(currentNode, completed),
+    completedSteps,
+    totalSteps,
+    remainingSteps: Math.max(totalSteps - completedSteps, 0),
+    completedChapterLoops,
+    chapterLoopTarget,
+    stages,
+  };
+}
+
 export function requestAssistantConfirmation(
   state: AssistantComposerState,
   draft: AssistantConfirmationDraft,
@@ -2066,6 +2221,7 @@ export function AssistantView({
   );
   const [chatBookContext, setChatBookContext] = useState<ChatBookContext | null>(null);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
+  const [goalToBookGoal, setGoalToBookGoal] = useState("");
   const [crudReadResult, setCrudReadResult] = useState<AssistantCrudReadResponse | null>(null);
   const [crudDeletePreview, setCrudDeletePreview] = useState<AssistantCrudDeletePreviewResponse["preview"] | null>(null);
   const [crudDeleteResult, setCrudDeleteResult] = useState<AssistantCrudDeleteExecuteResponse | null>(null);
@@ -2089,6 +2245,7 @@ export function AssistantView({
     () => chatBookContext ? [chatBookContext.title] : [],
     [chatBookContext],
   );
+  const goalToBookProgress = state.taskExecution?.goalToBookProgress ?? null;
 
   const invalidateAssistantBookViews = useCallback((bookId?: string | null) => {
     const paths = ["/api/books"];
@@ -2106,6 +2263,9 @@ export function AssistantView({
       return "";
     }
     const baseLabel = t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action] ?? "assistant.actionTemplate");
+    if (state.taskPlan.action === "goal-to-book") {
+      return "Goal-to-Book 端到端向导";
+    }
     if (state.taskPlan.action !== "template") {
       return baseLabel;
     }
@@ -2847,17 +3007,21 @@ export function AssistantView({
     setState((prev) => confirmAssistantPendingAction(prev));
     try {
       const sessionId = `asst_s_${Date.now().toString(36)}`;
-      const scope = state.taskPlan.targetBookIds.length === activeBookIds.length
+      const scope = state.taskPlan.action === "goal-to-book"
+        ? { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] }
+        : state.taskPlan.targetBookIds.length === activeBookIds.length
         ? { type: "all-active" as const }
         : { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] };
       const planned = await postApi<{
         readonly taskId: string;
+        readonly intentType?: string;
         readonly plan: ReadonlyArray<Record<string, unknown>>;
         readonly graph?: Record<string, unknown>;
       }>("/assistant/plan", {
         sessionId,
         input: state.taskPlan.prompt,
         scope,
+        ...(state.taskPlan.action === "goal-to-book" ? { intentType: "goal-to-book" as const } : {}),
       });
       const executeResult = await postApi<{
         readonly stepRunIds?: Record<string, string>;
@@ -2868,7 +3032,8 @@ export function AssistantView({
         ...(planned.graph ? { graph: planned.graph } : {}),
         ...(planned.plan.length > 0 ? { plan: planned.plan } : {}),
       });
-      setState((prev) => ({
+      const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${planned.taskId}`);
+      setState((prev) => reconcileAssistantTaskFromSnapshot({
         ...prev,
         taskExecution: {
           taskId: planned.taskId,
@@ -2876,6 +3041,7 @@ export function AssistantView({
           status: "running",
           stepRunIds: executeResult.stepRunIds,
           candidateSelection: null,
+          goalToBookProgress: resolveAssistantGoalToBookProgress(snapshot),
           timeline: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.timeline : [],
           lastSyncedAt: Date.now(),
           nextSequence: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.nextSequence : 0,
@@ -2883,7 +3049,7 @@ export function AssistantView({
         qualityReport: null,
         worldConsistencyReport: null,
         suggestedNextActions: [],
-      }));
+      }, snapshot));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setScopeBlockHint(`任务执行失败：${message}`);
@@ -2893,6 +3059,32 @@ export function AssistantView({
 
   const handleRunNextAction = (action: string) => {
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
+  };
+
+  const handleSubmitGoalToBook = () => {
+    const goal = goalToBookGoal.trim();
+    if (!goal || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
+      return;
+    }
+    const targetBookId = chatBookContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null);
+    if (!targetBookId) {
+      const bookList = activeBooks.map((book) => `- 《${book.title}》`).join("\n");
+      setState((prev) => submitAssistantInput(prev, goal));
+      setState((prev) => completeAssistantResponse(
+        prev,
+        activeBooks.length > 0
+          ? `请先告诉我这个目标要落在哪本书上：\n\n${bookList}\n\n选择书籍后我会生成 Goal-to-Book 任务流。`
+          : "当前没有活跃书籍。请先创建一本书，再生成 Goal-to-Book 任务流。",
+      ));
+      return;
+    }
+    const draft = buildGoalToBookConfirmationDraft(goal, [targetBookId]);
+    if (!draft) {
+      return;
+    }
+    setScopeBlockHint("");
+    setGoalToBookGoal("");
+    setState((prev) => requestAssistantConfirmation(prev, draft));
   };
 
   const handleSelectCandidate = async (nodeId: string, candidateId: string) => {
@@ -3049,6 +3241,14 @@ export function AssistantView({
       </section>
 
       <section className="shrink-0 rounded-xl border border-border/70 bg-card/40 p-4 space-y-3" data-testid="assistant-input-panel">
+        <GoalToBookWizard
+          value={goalToBookGoal}
+          onChange={setGoalToBookGoal}
+          onSubmit={handleSubmitGoalToBook}
+          disabled={state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
+          activeBookTitle={chatBookContext?.title ?? (activeBooks.length === 1 ? activeBooks[0]?.title : null)}
+          progress={goalToBookProgress}
+        />
         <div className="space-y-2" data-testid="assistant-template-panel">
           <div className="text-xs text-muted-foreground">{t("assistant.templateTitle")}</div>
           <div className="grid gap-2 sm:grid-cols-2">
