@@ -52,6 +52,10 @@ function resolveRiskLevel(plan: ReadonlyArray<AssistantPolicyPlanStep>): Assista
   return hasRevise ? "medium" : "low";
 }
 
+export function requiresAssistantCheckpoint(plan: ReadonlyArray<AssistantPolicyPlanStep>): boolean {
+  return resolveRiskLevel(plan) !== "low";
+}
+
 function collectMissingPermissions(
   plan: ReadonlyArray<AssistantPolicyPlanStep>,
   permissions: ReadonlyArray<string> | undefined,
