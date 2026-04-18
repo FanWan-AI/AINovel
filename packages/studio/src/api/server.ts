@@ -31,6 +31,7 @@ import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import {
   evaluateAssistantPolicy,
+  requiresAssistantCheckpoint,
   type AssistantPolicyBudgetInput,
   type AssistantPolicyPlanStep,
 } from "./services/assistant-policy-service.js";
@@ -38,6 +39,17 @@ import {
   authorizeAssistantSkillPlan,
   listAssistantSkills,
 } from "./services/assistant-skill-registry-service.js";
+import {
+  AssistantConductor,
+  type AssistantConductorEvent,
+  type CheckpointState,
+  type TaskEdge,
+  type TaskGraph,
+  type TaskNode,
+  type TaskNodeStatus,
+  type TaskNodeType,
+  type TaskRunState,
+} from "./services/assistant-conductor.js";
 import { BookCreateRunStore } from "./lib/run-store.js";
 import { runtimeEventStore, deriveRuntimeEvent } from "./lib/runtime-event-store.js";
 import {
@@ -296,6 +308,8 @@ interface AssistantPlanStep {
   readonly bookIds?: ReadonlyArray<string>;
   readonly chapter?: number;
   readonly mode?: string;
+  readonly dependsOn?: ReadonlyArray<string>;
+  readonly maxRetries?: number;
 }
 
 interface AssistantExecuteStepRef {
@@ -316,12 +330,28 @@ interface AssistantTaskStepSnapshot {
   readonly error?: string;
 }
 
+interface AssistantTaskNodeSnapshot {
+  readonly nodeId: string;
+  readonly type: TaskNodeType;
+  readonly action?: string;
+  readonly runId?: string;
+  readonly status: TaskNodeStatus;
+  readonly attempts: number;
+  readonly maxRetries: number;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly error?: string;
+  readonly checkpoint?: CheckpointState;
+}
+
 interface AssistantTaskSnapshot {
   readonly taskId: string;
   readonly sessionId: string;
   readonly status: "running" | "succeeded" | "failed";
   readonly currentStepId?: string;
   readonly steps: Record<string, AssistantTaskStepSnapshot>;
+  readonly nodes?: Record<string, AssistantTaskNodeSnapshot>;
+  readonly graph?: TaskGraph;
   readonly lastUpdatedAt: string;
   readonly error?: string;
   readonly retryContext?: Record<string, unknown>;
@@ -338,6 +368,20 @@ const ASSISTANT_TASK_SNAPSHOT_PERSIST_DEBOUNCE_MS = 150;
 
 function parseAssistantTaskStepStatus(input: unknown): AssistantTaskStepSnapshot["status"] | null {
   if (input === "running" || input === "succeeded" || input === "failed") {
+    return input;
+  }
+  return null;
+}
+
+function parseAssistantTaskNodeStatus(input: unknown): TaskNodeStatus | null {
+  if (input === "pending" || input === "running" || input === "waiting_approval" || input === "succeeded" || input === "failed") {
+    return input;
+  }
+  return null;
+}
+
+function parseAssistantTaskNodeType(input: unknown): TaskNodeType | null {
+  if (input === "task" || input === "checkpoint") {
     return input;
   }
   return null;
@@ -361,6 +405,114 @@ function normalizeAssistantTaskStepSnapshot(input: unknown, fallbackStepId?: str
     ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
     ...(typeof payload.finishedAt === "string" ? { finishedAt: payload.finishedAt } : {}),
     ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+  };
+}
+
+function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: string): AssistantTaskNodeSnapshot | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : fallbackNodeId;
+  const type = parseAssistantTaskNodeType(payload.type);
+  const status = parseAssistantTaskNodeStatus(payload.status);
+  const attempts = typeof payload.attempts === "number" && Number.isFinite(payload.attempts) ? payload.attempts : Number.NaN;
+  const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries) ? payload.maxRetries : Number.NaN;
+  if (!nodeId || !type || !status || !Number.isFinite(attempts) || !Number.isFinite(maxRetries)) {
+    return null;
+  }
+  const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
+    ? payload.checkpoint as CheckpointState
+    : undefined;
+  return {
+    nodeId,
+    type,
+    status,
+    attempts,
+    maxRetries,
+    ...(typeof payload.action === "string" ? { action: payload.action } : {}),
+    ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
+    ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
+    ...(typeof payload.finishedAt === "string" ? { finishedAt: payload.finishedAt } : {}),
+    ...(typeof payload.error === "string" ? { error: payload.error } : {}),
+    ...(checkpoint ? { checkpoint } : {}),
+  };
+}
+
+function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): TaskNode | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : fallbackNodeId;
+  const type = parseAssistantTaskNodeType(payload.type);
+  const action = typeof payload.action === "string" ? payload.action : "";
+  if (!nodeId || !type || !action) {
+    return null;
+  }
+  const dependsOn = Array.isArray(payload.dependsOn)
+    ? payload.dependsOn.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const bookIds = Array.isArray(payload.bookIds)
+    ? payload.bookIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
+    ? Math.max(payload.maxRetries, 0)
+    : undefined;
+  const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
+    ? payload.checkpoint as CheckpointState
+    : undefined;
+  return {
+    nodeId,
+    type,
+    action,
+    ...(typeof payload.bookId === "string" ? { bookId: payload.bookId } : {}),
+    ...(bookIds.length > 0 ? { bookIds } : {}),
+    ...(typeof payload.chapter === "number" && Number.isInteger(payload.chapter) && payload.chapter > 0 ? { chapter: payload.chapter } : {}),
+    ...(typeof payload.mode === "string" ? { mode: payload.mode } : {}),
+    ...(dependsOn.length > 0 ? { dependsOn } : {}),
+    ...(maxRetries !== undefined ? { maxRetries } : {}),
+    ...(checkpoint ? { checkpoint } : {}),
+  };
+}
+
+function normalizeAssistantTaskEdge(input: unknown): TaskEdge | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const from = typeof payload.from === "string" ? payload.from : "";
+  const to = typeof payload.to === "string" ? payload.to : "";
+  if (!from || !to) {
+    return null;
+  }
+  return { from, to };
+}
+
+function normalizeAssistantTaskGraph(input: unknown, fallbackTaskId?: string): TaskGraph | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const payload = input as Record<string, unknown>;
+  const taskId = typeof payload.taskId === "string" ? payload.taskId : fallbackTaskId;
+  if (!taskId || !Array.isArray(payload.nodes)) {
+    return null;
+  }
+  const nodes = payload.nodes
+    .map((entry) => normalizeAssistantTaskNode(entry))
+    .filter((entry): entry is TaskNode => entry !== null);
+  if (nodes.length === 0) {
+    return null;
+  }
+  const edges = Array.isArray(payload.edges)
+    ? payload.edges.map((edge) => normalizeAssistantTaskEdge(edge)).filter((edge): edge is TaskEdge => edge !== null)
+    : [];
+  return {
+    taskId,
+    nodes,
+    edges,
+    ...(typeof payload.intent === "string" ? { intent: payload.intent } : {}),
+    ...(typeof payload.riskLevel === "string" ? { riskLevel: payload.riskLevel } : {}),
   };
 }
 
@@ -391,15 +543,26 @@ function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string)
     }
     return acc;
   }, {});
+  const rawNodes = typeof payload.nodes === "object" && payload.nodes !== null && !Array.isArray(payload.nodes) ? payload.nodes : {};
+  const nodes = Object.entries(rawNodes).reduce<Record<string, AssistantTaskNodeSnapshot>>((acc, [nodeId, value]) => {
+    const normalized = normalizeAssistantTaskNodeSnapshot(value, nodeId);
+    if (normalized) {
+      acc[normalized.nodeId] = normalized;
+    }
+    return acc;
+  }, {});
   const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
     ? payload.retryContext as Record<string, unknown>
     : undefined;
+  const graph = normalizeAssistantTaskGraph(payload.graph, taskId);
   return {
     taskId,
     sessionId,
     status,
     ...(typeof payload.currentStepId === "string" ? { currentStepId: payload.currentStepId } : {}),
     steps,
+    ...(Object.keys(nodes).length > 0 ? { nodes } : {}),
+    ...(graph ? { graph } : {}),
     lastUpdatedAt,
     ...(typeof payload.error === "string" ? { error: payload.error } : {}),
     ...(retryContext ? { retryContext } : {}),
@@ -874,6 +1037,86 @@ function buildAssistantPlanDraft(
   };
 }
 
+function buildAssistantTaskGraphFromPlan(
+  taskId: string,
+  plan: ReadonlyArray<AssistantPlanStep>,
+  riskLevel: AssistantPlanRiskLevel | AssistantPolicyRiskLevel,
+): TaskGraph {
+  const nodes: TaskNode[] = [];
+  const edges: TaskEdge[] = [];
+  const shouldInsertCheckpoint = requiresAssistantCheckpoint(plan);
+  let previousNodeId: string | null = null;
+  let checkpointInserted = false;
+
+  plan.forEach((step) => {
+    if (shouldInsertCheckpoint && !checkpointInserted && step.action === "revise") {
+      const checkpointNodeId = "cp1";
+      nodes.push({
+        nodeId: checkpointNodeId,
+        type: "checkpoint",
+        action: "checkpoint",
+        checkpoint: {
+          nodeId: checkpointNodeId,
+          requiredApproval: true,
+        },
+      });
+      if (previousNodeId) {
+        edges.push({ from: previousNodeId, to: checkpointNodeId });
+      }
+      previousNodeId = checkpointNodeId;
+      checkpointInserted = true;
+    }
+
+    nodes.push({
+      nodeId: step.stepId,
+      type: "task",
+      action: step.action,
+      ...(typeof step.bookId === "string" ? { bookId: step.bookId } : {}),
+      ...(Array.isArray(step.bookIds) ? { bookIds: [...step.bookIds] } : {}),
+      ...(typeof step.chapter === "number" ? { chapter: step.chapter } : {}),
+      ...(typeof step.mode === "string" ? { mode: step.mode } : {}),
+      ...(Array.isArray(step.dependsOn) && step.dependsOn.length > 0 ? { dependsOn: [...step.dependsOn] } : {}),
+      maxRetries: Math.max(step.maxRetries ?? 0, 0),
+    });
+    if (previousNodeId) {
+      edges.push({ from: previousNodeId, to: step.stepId });
+    }
+    previousNodeId = step.stepId;
+  });
+
+  return {
+    taskId,
+    nodes,
+    edges,
+    riskLevel,
+  };
+}
+
+function flattenAssistantPolicyPlanFromGraph(graph: TaskGraph): AssistantPolicyPlanStep[] {
+  return graph.nodes
+    .filter((node) => node.type === "task")
+    .map((node) => ({
+      action: node.action,
+      ...(node.mode ? { mode: node.mode } : {}),
+      ...(node.bookId ? { bookId: node.bookId } : {}),
+      ...(node.bookIds ? { bookIds: [...node.bookIds] } : {}),
+    }));
+}
+
+function collectAssistantExecutableNodes(graph: TaskGraph): AssistantExecuteStepRef[] {
+  return graph.nodes
+    .filter((node) => node.type === "task")
+    .map((node) => normalizeAssistantExecuteStep({
+      stepId: node.nodeId,
+      action: node.action,
+      ...(node.bookId ? { bookId: node.bookId } : {}),
+      ...(node.bookIds ? { bookIds: node.bookIds } : {}),
+      ...(node.chapter !== undefined ? { chapter: node.chapter } : {}),
+      ...(node.mode ? { mode: node.mode } : {}),
+    }))
+    .filter((node): node is AssistantExecuteStepRef => node !== null);
+}
+
 function normalizeAssistantCrudKeyword(input: unknown): string | undefined {
   if (typeof input !== "string") return undefined;
   const normalized = input.trim();
@@ -938,6 +1181,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   let runtimeEventIdCounter = 0;
   let sseClientCount = 0;
   const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
+  const assistantTaskGraphs = new Map<string, TaskGraph>();
   const assistantDeletePreviews = new Map<string, { readonly body: { target: "chapter" | "run"; bookId: string; chapter?: number; runId?: string }; readonly expiresAt: number }>();
   const assistantDeleteRecoveryStorePath = join(root, ".inkos", "assistant-delete-recovery.v1.json");
   const assistantTaskSnapshotStorePath = join(root, ASSISTANT_TASK_SNAPSHOT_STORE_FILE);
@@ -983,6 +1227,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const parsed = parseAssistantTaskSnapshotStore(JSON.parse(raw));
       parsed.tasks.forEach((snapshot) => {
         assistantTaskSnapshots.set(snapshot.taskId, snapshot);
+        if (snapshot.graph) {
+          assistantTaskGraphs.set(snapshot.taskId, snapshot.graph);
+        }
       });
     } catch {
       // ignore hydration errors and fallback to in-memory snapshots
@@ -1037,9 +1284,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const taskId = payload.taskId;
     const previous = assistantTaskSnapshots.get(taskId);
     const currentStepId = typeof payload.stepId === "string" ? payload.stepId : undefined;
+    const currentNodeId = typeof payload.nodeId === "string" ? payload.nodeId : currentStepId;
     const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
       ? payload.retryContext as Record<string, unknown>
       : undefined;
+    const graph = normalizeAssistantTaskGraph(payload.graph, taskId) ?? previous?.graph;
+    if (graph) {
+      assistantTaskGraphs.set(taskId, graph);
+    }
 
     if (event === "assistant:done") {
       assistantTaskSnapshots.set(taskId, {
@@ -1048,9 +1300,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         status: payload.status === "succeeded" ? "succeeded" : "failed",
         ...(currentStepId !== undefined ? { currentStepId } : {}),
         steps: previous?.steps ?? {},
+        ...(previous?.nodes ? { nodes: previous.nodes } : {}),
+        ...(graph ? { graph } : {}),
         lastUpdatedAt: timestamp,
         ...(typeof payload.error === "string" ? { error: payload.error } : {}),
-        ...(retryContext ? { retryContext } : {}),
+        ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
       });
       scheduleAssistantTaskSnapshotPersistence();
       broadcast(event, data);
@@ -1058,7 +1312,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const stepId = currentStepId;
-    const stepStatus = event === "assistant:step:start" ? "running" : event === "assistant:step:success" ? "succeeded" : "failed";
+    const nodeStatus = parseAssistantTaskNodeStatus(payload.nodeStatus)
+      ?? (event === "assistant:step:start" ? "running" : event === "assistant:step:success" ? "succeeded" : "failed");
+    const stepStatus = event === "assistant:step:start"
+      ? "running"
+      : event === "assistant:step:success"
+        ? "succeeded"
+        : nodeStatus === "failed"
+          ? "failed"
+          : "running";
     const previousStep = stepId ? previous?.steps?.[stepId] : undefined;
     const nextSteps = {
       ...(previous?.steps ?? {}),
@@ -1077,13 +1339,49 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
         : {}),
     };
+    const previousNode = currentNodeId ? previous?.nodes?.[currentNodeId] : undefined;
+    const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
+      ? payload.checkpoint as CheckpointState
+      : previousNode?.checkpoint;
+    const attempts = typeof payload.attempts === "number" && Number.isFinite(payload.attempts)
+      ? payload.attempts
+      : previousNode?.attempts ?? 0;
+    const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
+      ? payload.maxRetries
+      : previousNode?.maxRetries ?? 0;
+    const nextNodes = {
+      ...(previous?.nodes ?? {}),
+      ...(currentNodeId
+        ? {
+          [currentNodeId]: {
+            nodeId: currentNodeId,
+            type: parseAssistantTaskNodeType(payload.nodeType) ?? previousNode?.type ?? "task",
+            ...(typeof payload.action === "string" ? { action: payload.action } : previousNode?.action ? { action: previousNode.action } : {}),
+            ...(typeof payload.runId === "string" ? { runId: payload.runId } : previousNode?.runId ? { runId: previousNode.runId } : {}),
+            status: nodeStatus,
+            attempts,
+            maxRetries,
+            ...(nodeStatus === "running" || nodeStatus === "waiting_approval"
+              ? { startedAt: previousNode?.startedAt ?? timestamp }
+              : {
+                  ...(previousNode?.startedAt !== undefined ? { startedAt: previousNode.startedAt } : {}),
+                  finishedAt: timestamp,
+                }),
+            ...(typeof payload.error === "string" ? { error: payload.error } : previousNode?.error ? { error: previousNode.error } : {}),
+            ...(checkpoint ? { checkpoint } : {}),
+          } satisfies AssistantTaskNodeSnapshot,
+        }
+        : {}),
+    };
 
     assistantTaskSnapshots.set(taskId, {
       taskId,
       sessionId: payload.sessionId,
-      status: event === "assistant:step:fail" ? "failed" : "running",
+      status: event === "assistant:step:fail" && nodeStatus === "failed" ? "failed" : "running",
       ...(stepId !== undefined ? { currentStepId: stepId } : {}),
       steps: nextSteps,
+      ...(Object.keys(nextNodes).length > 0 ? { nodes: nextNodes } : {}),
+      ...(graph ? { graph } : {}),
       lastUpdatedAt: timestamp,
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
       ...(retryContext ? { retryContext } : previous?.retryContext !== undefined ? { retryContext: previous.retryContext } : {}),
@@ -1367,6 +1665,148 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   function generateAssistantRunId(): string {
     return `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   }
+
+  function createAssistantTaskNodesSnapshot(graph: TaskGraph): Record<string, AssistantTaskNodeSnapshot> {
+    return Object.fromEntries(graph.nodes.map((node) => [
+      node.nodeId,
+      {
+        nodeId: node.nodeId,
+        type: node.type,
+        action: node.action,
+        status: "pending",
+        attempts: 0,
+        maxRetries: Math.max(node.maxRetries ?? 0, 0),
+        ...(node.checkpoint ? { checkpoint: node.checkpoint } : {}),
+      } satisfies AssistantTaskNodeSnapshot,
+    ]));
+  }
+
+  function ensureAssistantTaskSnapshot(taskId: string, sessionId: string, graph: TaskGraph): AssistantTaskSnapshot {
+    const now = new Date().toISOString();
+    const previous = assistantTaskSnapshots.get(taskId);
+    const snapshot: AssistantTaskSnapshot = {
+      taskId,
+      sessionId,
+      status: previous?.status ?? "running",
+      ...(previous?.currentStepId ? { currentStepId: previous.currentStepId } : {}),
+      steps: previous?.steps ?? {},
+      nodes: previous?.nodes ?? createAssistantTaskNodesSnapshot(graph),
+      graph,
+      lastUpdatedAt: now,
+      ...(previous?.error ? { error: previous.error } : {}),
+      ...(previous?.retryContext ? { retryContext: previous.retryContext } : {}),
+    };
+    assistantTaskGraphs.set(taskId, graph);
+    assistantTaskSnapshots.set(taskId, snapshot);
+    scheduleAssistantTaskSnapshotPersistence();
+    return snapshot;
+  }
+
+  function summarizeAssistantTaskRun(taskId: string): Record<string, unknown> {
+    const runtime = assistantConductor.getRunState(taskId);
+    const snapshot = assistantTaskSnapshots.get(taskId);
+    if (!runtime && !snapshot) {
+      return {};
+    }
+    const responseStatus = runtime?.status ?? (snapshot?.status ?? "running");
+    const status = responseStatus === "pending" ? "running" : responseStatus;
+    const stepRunIds = runtime?.stepRunIds ?? {};
+    return {
+      taskId,
+      sessionId: runtime?.sessionId ?? snapshot?.sessionId ?? "",
+      status,
+      ...(runtime?.currentNodeId ? { currentNodeId: runtime.currentNodeId } : {}),
+      ...(snapshot?.currentStepId ? { currentStepId: snapshot.currentStepId } : {}),
+      ...(Object.keys(stepRunIds).length > 0 ? { stepRunIds } : {}),
+      ...(runtime?.status === "waiting_approval" && runtime.currentNodeId ? {
+        awaitingApproval: { nodeId: runtime.currentNodeId },
+      } : {}),
+    };
+  }
+
+  function applyAssistantConductorEvent(event: AssistantConductorEvent): void {
+    if (event.type === "graph") {
+      emitAssistantTaskEvent("assistant:done", {
+        taskId: event.taskId,
+        sessionId: event.sessionId,
+        status: event.status,
+        timestamp: event.timestamp,
+        ...(event.error ? { error: event.error } : {}),
+      });
+      return;
+    }
+    emitAssistantTaskEvent(event.phase === "start"
+      ? "assistant:step:start"
+      : event.phase === "success"
+        ? "assistant:step:success"
+        : "assistant:step:fail", {
+      taskId: event.taskId,
+      sessionId: event.sessionId,
+      stepId: event.nodeId,
+      nodeId: event.nodeId,
+      nodeType: event.nodeType,
+      nodeStatus: event.nodeStatus,
+      action: event.action,
+      timestamp: event.timestamp,
+      attempts: event.attempts,
+      maxRetries: event.maxRetries,
+      ...(event.runId ? { runId: event.runId } : {}),
+      ...(event.error ? { error: event.error } : {}),
+      ...(event.bookId ? { bookId: event.bookId } : {}),
+      ...(event.bookIds ? { bookIds: event.bookIds } : {}),
+      ...(event.chapter !== undefined ? { chapter: event.chapter } : {}),
+      ...(event.mode ? { mode: event.mode } : {}),
+      ...(event.checkpoint ? { checkpoint: event.checkpoint } : {}),
+      ...(event.retryContext ? { retryContext: event.retryContext } : {}),
+    });
+  }
+
+  const assistantConductor = new AssistantConductor({
+    prepareNode: async (node, context) => {
+      if (node.action === "audit" || node.action === "re-audit") {
+        const runId = generateAssistantRunId();
+        return {
+          runId,
+          execute: async () => {
+            const response = await app.request(
+              `http://localhost/api/books/${node.bookId}/audit/${node.chapter}`,
+              { method: "POST" },
+            );
+            if (!response.ok) {
+              throw new Error(await parseApiErrorMessage(response));
+            }
+          },
+        };
+      }
+
+      if (node.action === "revise") {
+        const response = await app.request(
+          `http://localhost/api/books/${node.bookId}/revise/${node.chapter}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...(node.mode !== undefined ? { mode: node.mode } : {}) }),
+          },
+        );
+        const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+        if (!response.ok || typeof payload?.["runId"] !== "string") {
+          throw new Error(!response.ok ? await parseApiErrorMessage(response) : "revise step did not return runId");
+        }
+        const runId = payload["runId"];
+        return {
+          runId,
+          execute: async () => {
+            const reviseRun = await waitForChapterRunCompletion(node.bookId!, runId);
+            if (reviseRun.status !== "succeeded") {
+              throw new Error(reviseRun.error ?? "revise step failed");
+            }
+          },
+        };
+      }
+
+      throw new Error(`Unsupported assistant node action: ${node.action}`);
+    },
+  });
 
   async function loadAssistantDeleteRecoveryStore(): Promise<AssistantCrudDeleteRecoveryStore> {
     try {
@@ -3211,10 +3651,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
+    const graph = buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level);
+    assistantTaskGraphs.set(taskId, graph);
     return c.json({
       taskId,
       intent,
       plan: drafted.plan,
+      graph,
       requiresConfirmation: true,
       risk: drafted.risk,
     });
@@ -3286,9 +3729,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
     if (!sessionId) errors.push({ field: "sessionId", message: "sessionId must be a non-empty string" });
     const approved = body.approved === true;
-    if (!Array.isArray(body.plan)) {
-      errors.push({ field: "plan", message: "plan must be a non-empty array" });
-    }
     const budgetParsed = parseAssistantPolicyBudget(body.budget);
     if (!budgetParsed.ok) {
       errors.push(...budgetParsed.errors);
@@ -3301,25 +3741,40 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ code: "ASSISTANT_EXECUTE_VALIDATION_FAILED", errors }, 422);
     }
 
-    const plan = (body.plan as AssistantPlanStep[])
-      .map((step) => normalizeAssistantExecuteStep(step))
-      .filter((step): step is AssistantExecuteStepRef => step !== null);
-    const auditStep = plan.find((step) => step.action === "audit");
-    const reviseStep = plan.find((step) => step.action === "revise");
-    const reAuditStep = plan.find((step) => step.action === "re-audit");
-    if (!auditStep || !reviseStep || !reAuditStep) {
+    const storedGraph = assistantTaskGraphs.get(taskId);
+    const bodyGraph = normalizeAssistantTaskGraph(body.graph, taskId);
+    const legacyPlan = Array.isArray(body.plan)
+      ? (body.plan as AssistantPlanStep[])
+      : null;
+    const graph = storedGraph
+      ?? bodyGraph
+      ?? (legacyPlan ? buildAssistantTaskGraphFromPlan(taskId, legacyPlan, "medium") : null);
+    if (!graph) {
       return c.json({
         code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
         errors: [{
-          field: "plan",
-          message: "plan must include audit, revise and re-audit steps with single book and chapter targets",
+          field: "taskId",
+          message: "taskId must reference a planned graph, or body must include graph/plan fallback data",
+        }],
+      }, 422);
+    }
+    assistantTaskGraphs.set(taskId, graph);
+
+    const executableNodes = collectAssistantExecutableNodes(graph);
+    if (executableNodes.length === 0) {
+      return c.json({
+        code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
+        errors: [{
+          field: "graph",
+          message: "graph must include at least one executable audit/revise/re-audit task node with single book and chapter targets",
         }],
       }, 422);
     }
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
+    const policyPlan = flattenAssistantPolicyPlanFromGraph(graph);
 
-    const skillAuthorization = authorizeAssistantSkillPlan(plan, permissionsInput);
+    const skillAuthorization = authorizeAssistantSkillPlan(executableNodes, permissionsInput);
     if (!skillAuthorization.allow) {
       const reasons = skillAuthorization.denied.map((item) => item.reason);
       const finalBlockedMessage = reasons.join("; ");
@@ -3355,13 +3810,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const policy = evaluateAssistantPolicy({
-      plan,
+      plan: policyPlan,
       approved,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
+    const graphHasCheckpoint = graph.nodes.some((node) => node.type === "checkpoint");
+    const filteredPolicyReasons = graphHasCheckpoint && !approved
+      ? policy.reasons.filter((reason) => reason !== "High-risk actions require manual approval before execution.")
+      : policy.reasons;
     const blockedMessage = policy.reasons.join("; ");
-    const finalBlockedMessage = blockedMessage.length > 0
+    const finalBlockedMessage = filteredPolicyReasons.join("; ").length > 0
+      ? filteredPolicyReasons.join("; ")
+      : blockedMessage.length > 0
       ? blockedMessage
       : "Assistant execution blocked by policy guard.";
     if (policy.budgetWarning) {
@@ -3374,7 +3835,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...policy.budgetWarning,
       });
     }
-    if (!policy.allow) {
+    if (filteredPolicyReasons.length > 0) {
       broadcast("assistant:policy:blocked", {
         taskId,
         sessionId,
@@ -3382,7 +3843,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         severity: "warn",
         timestamp: new Date().toISOString(),
         riskLevel: policy.riskLevel,
-        reasons: policy.reasons,
+        reasons: filteredPolicyReasons,
         requiredApprovals: policy.requiredApprovals,
         message: finalBlockedMessage,
       });
@@ -3397,184 +3858,30 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
           message: finalBlockedMessage,
           taskId,
-          policy,
+          policy: {
+            ...policy,
+            allow: false,
+            reasons: filteredPolicyReasons,
+          },
         },
       }, 409);
     }
 
-    const auditRunId = generateAssistantRunId();
-    const reAuditRunId = generateAssistantRunId();
-
-    emitAssistantTaskEvent("assistant:step:start", {
-      taskId,
+    ensureAssistantTaskSnapshot(taskId, sessionId, graph);
+    const runner = assistantConductor.runGraph(graph, {
       sessionId,
-      stepId: auditStep.stepId,
-      action: auditStep.action,
-      runId: auditRunId,
-      bookId: auditStep.bookId,
-      chapter: auditStep.chapter,
+      autoApproveCheckpoints: approved,
     });
-    const auditResponse = await app.request(
-      `http://localhost/api/books/${auditStep.bookId}/audit/${auditStep.chapter}`,
-      { method: "POST" },
-    );
-    if (!auditResponse.ok) {
-      const error = await parseApiErrorMessage(auditResponse);
-      emitAssistantTaskEvent("assistant:step:fail", {
-        taskId,
-        sessionId,
-        stepId: auditStep.stepId,
-        action: auditStep.action,
-        runId: auditRunId,
-        bookId: auditStep.bookId,
-        chapter: auditStep.chapter,
-        error,
-      });
-      return c.json({
-        error: {
-          code: "ASSISTANT_EXECUTE_STEP_FAILED",
-          message: error,
-          taskId,
-          stepId: auditStep.stepId,
-          runId: auditRunId,
-        },
-      }, 500);
-    }
-    emitAssistantTaskEvent("assistant:step:success", {
-      taskId,
-      sessionId,
-      stepId: auditStep.stepId,
-      action: auditStep.action,
-      runId: auditRunId,
-      bookId: auditStep.bookId,
-      chapter: auditStep.chapter,
-    });
-
-    const reviseResponse = await app.request(
-      `http://localhost/api/books/${reviseStep.bookId}/revise/${reviseStep.chapter}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...(reviseStep.mode !== undefined ? { mode: reviseStep.mode } : {}) }),
-      },
-    );
-    const revisePayload = await reviseResponse.json().catch(() => null) as Record<string, unknown> | null;
-    if (!reviseResponse.ok || typeof revisePayload?.["runId"] !== "string") {
-      const error = !reviseResponse.ok
-        ? await parseApiErrorMessage(reviseResponse)
-        : "revise step did not return runId";
-      emitAssistantTaskEvent("assistant:step:fail", {
-        taskId,
-        sessionId,
-        stepId: reviseStep.stepId,
-        action: reviseStep.action,
-        bookId: reviseStep.bookId,
-        chapter: reviseStep.chapter,
-        error,
-      });
-      return c.json({
-        error: {
-          code: "ASSISTANT_EXECUTE_STEP_FAILED",
-          message: error,
-          taskId,
-          stepId: reviseStep.stepId,
-        },
-      }, 500);
-    }
-    const reviseRunId = revisePayload["runId"];
-    emitAssistantTaskEvent("assistant:step:start", {
-      taskId,
-      sessionId,
-      stepId: reviseStep.stepId,
-      action: reviseStep.action,
-      runId: reviseRunId,
-      bookId: reviseStep.bookId,
-      chapter: reviseStep.chapter,
-    });
-
-    void (async () => {
-      try {
-        const reviseRun = await waitForChapterRunCompletion(reviseStep.bookId, reviseRunId);
-        if (reviseRun.status !== "succeeded") {
-          const error = reviseRun.error ?? "revise step failed";
-          emitAssistantTaskEvent("assistant:step:fail", {
-            taskId,
-            sessionId,
-            stepId: reviseStep.stepId,
-            action: reviseStep.action,
-            runId: reviseRunId,
-            bookId: reviseStep.bookId,
-            chapter: reviseStep.chapter,
-            error,
-          });
-          emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
-          return;
+    const firstEvent = await runner.next();
+    if (!firstEvent.done && firstEvent.value) {
+      applyAssistantConductorEvent(firstEvent.value);
+      void (async () => {
+        for await (const event of runner) {
+          applyAssistantConductorEvent(event);
         }
-
-        emitAssistantTaskEvent("assistant:step:success", {
-          taskId,
-          sessionId,
-          stepId: reviseStep.stepId,
-          action: reviseStep.action,
-          runId: reviseRunId,
-          bookId: reviseStep.bookId,
-          chapter: reviseStep.chapter,
-        });
-        emitAssistantTaskEvent("assistant:step:start", {
-          taskId,
-          sessionId,
-          stepId: reAuditStep.stepId,
-          action: reAuditStep.action,
-          runId: reAuditRunId,
-          bookId: reAuditStep.bookId,
-          chapter: reAuditStep.chapter,
-        });
-        const reAuditResponse = await app.request(
-          `http://localhost/api/books/${reAuditStep.bookId}/audit/${reAuditStep.chapter}`,
-          { method: "POST" },
-        );
-        if (!reAuditResponse.ok) {
-          const error = await parseApiErrorMessage(reAuditResponse);
-          emitAssistantTaskEvent("assistant:step:fail", {
-            taskId,
-            sessionId,
-            stepId: reAuditStep.stepId,
-            action: reAuditStep.action,
-            runId: reAuditRunId,
-            bookId: reAuditStep.bookId,
-            chapter: reAuditStep.chapter,
-            error,
-          });
-          emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
-          return;
-        }
-        emitAssistantTaskEvent("assistant:step:success", {
-          taskId,
-          sessionId,
-          stepId: reAuditStep.stepId,
-          action: reAuditStep.action,
-          runId: reAuditRunId,
-          bookId: reAuditStep.bookId,
-          chapter: reAuditStep.chapter,
-        });
-        emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "succeeded" });
-      } catch (e) {
-        const error = e instanceof Error ? e.message : String(e);
-        emitAssistantTaskEvent("assistant:done", { taskId, sessionId, status: "failed", error });
-      }
-    })();
-
-    return c.json({
-      taskId,
-      sessionId,
-      status: "running",
-      stepRunIds: {
-        [auditStep.stepId]: auditRunId,
-        [reviseStep.stepId]: reviseRunId,
-        [reAuditStep.stepId]: reAuditRunId,
-      },
-      currentStepId: reviseStep.stepId,
-    });
+      })();
+    }
+    return c.json(summarizeAssistantTaskRun(taskId));
   });
 
   app.post("/api/assistant/evaluate", async (c) => {
@@ -3913,6 +4220,38 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       },
     }, 500);
 
+  });
+
+  app.post("/api/assistant/tasks/:taskId/approve/:nodeId", async (c) => {
+    await assistantTaskSnapshotHydration;
+    const taskId = c.req.param("taskId");
+    const nodeId = c.req.param("nodeId");
+    const snapshot = assistantTaskSnapshots.get(taskId);
+    if (!snapshot) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_TASK_NOT_FOUND",
+          message: "Assistant task was not found.",
+        },
+      }, 404);
+    }
+    const approved = assistantConductor.approve(taskId, nodeId, "manual");
+    if (!approved) {
+      return c.json({
+        error: {
+          code: "ASSISTANT_TASK_APPROVAL_UNAVAILABLE",
+          message: "Assistant task node is not waiting for approval.",
+          taskId,
+          nodeId,
+        },
+      }, 409);
+    }
+    return c.json({
+      ok: true,
+      taskId,
+      nodeId,
+      ...summarizeAssistantTaskRun(taskId),
+    });
   });
 
   app.get("/api/assistant/tasks", async (c) => {

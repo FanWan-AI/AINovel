@@ -106,7 +106,7 @@ export interface AssistantTaskTimelineEntry {
 export interface AssistantTaskExecution {
   readonly taskId: string;
   readonly sessionId: string;
-  readonly status: "running" | "succeeded" | "failed";
+  readonly status: "running" | "waiting_approval" | "succeeded" | "failed";
   readonly stepRunIds?: Record<string, string>;
   readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
   readonly lastSyncedAt: number;
@@ -184,6 +184,23 @@ interface AssistantTaskSnapshot {
   readonly sessionId: string;
   readonly status: "running" | "succeeded" | "failed";
   readonly currentStepId?: string;
+  readonly nodes?: Record<string, {
+    readonly nodeId: string;
+    readonly type: "task" | "checkpoint";
+    readonly action?: string;
+    readonly status: "pending" | "running" | "waiting_approval" | "succeeded" | "failed";
+    readonly attempts: number;
+    readonly maxRetries: number;
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly error?: string;
+    readonly checkpoint?: {
+      readonly nodeId: string;
+      readonly requiredApproval: boolean;
+      readonly approvedAt?: string;
+      readonly approvedBy?: string;
+    };
+  }>;
   readonly steps: Record<string, {
     readonly stepId: string;
     readonly action?: string;
@@ -792,7 +809,9 @@ export function parseAssistantTaskRecoveryPayload(raw: string | null): Assistant
     if (!taskId) {
       return null;
     }
-    const status = payload.status === "succeeded" || payload.status === "failed" ? payload.status : "running";
+    const status = payload.status === "succeeded" || payload.status === "failed" || payload.status === "waiting_approval"
+      ? payload.status
+      : "running";
     return {
       version: 1,
       taskId,
@@ -836,10 +855,21 @@ export function recoverAssistantStateFromSnapshot(
 
 export function formatAssistantTimelineMessage(
   event: AssistantTaskTimelineEntry["event"],
-  payload: { readonly stepId?: string; readonly action?: string; readonly error?: string; readonly status?: string },
+  payload: { readonly stepId?: string; readonly action?: string; readonly error?: string; readonly status?: string; readonly nodeStatus?: string },
 ): string {
   if (event === "assistant:done") {
     return payload.status === "succeeded" ? "任务完成" : `任务失败${payload.error ? `：${payload.error}` : ""}`;
+  }
+  if (payload.action === "checkpoint") {
+    if (event === "assistant:step:start") {
+      return payload.nodeStatus === "waiting_approval"
+        ? `审批节点 ${payload.stepId ?? ""} 等待批准`
+        : `审批节点 ${payload.stepId ?? ""} 已触发`;
+    }
+    if (event === "assistant:step:success") {
+      return `审批节点 ${payload.stepId ?? ""} 已批准`;
+    }
+    return `审批节点 ${payload.stepId ?? ""} 失败${payload.error ? `：${payload.error}` : ""}`;
   }
   const stepText = payload.stepId ? `步骤 ${payload.stepId}` : "步骤";
   const actionText = payload.action ? `（${payload.action}）` : "";
@@ -878,22 +908,25 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
     message: formatAssistantTimelineMessage(
       message.event as AssistantTaskTimelineEntry["event"],
-      {
-        ...(typeof payload?.stepId === "string" ? { stepId: payload.stepId } : {}),
-        ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
-        ...(typeof payload?.error === "string" ? { error: payload.error } : {}),
-        ...(typeof payload?.status === "string" ? { status: payload.status } : {}),
-      },
-    ),
-    timestamp,
-  };
+        {
+          ...(typeof payload?.stepId === "string" ? { stepId: payload.stepId } : {}),
+          ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
+          ...(typeof payload?.error === "string" ? { error: payload.error } : {}),
+          ...(typeof payload?.status === "string" ? { status: payload.status } : {}),
+          ...(typeof payload?.nodeStatus === "string" ? { nodeStatus: payload.nodeStatus } : {}),
+        },
+      ),
+      timestamp,
+    };
   const terminal = message.event === "assistant:done";
   const taskStatus = message.event === "assistant:done"
     ? (payload?.status === "succeeded" ? "succeeded" : "failed")
-    : "running";
+    : payload?.nodeStatus === "waiting_approval"
+      ? "waiting_approval"
+      : "running";
   return {
     ...state,
-    loading: terminal ? false : state.loading,
+    loading: terminal || taskStatus === "waiting_approval" ? false : state.loading,
     taskPlan: terminal
       ? (state.taskPlan ? transitionAssistantTaskPlan(state.taskPlan, taskStatus, timestamp) : state.taskPlan)
       : state.taskPlan,
@@ -914,7 +947,17 @@ export function reconcileAssistantTaskFromSnapshot(
   if (!state.taskExecution || state.taskExecution.taskId !== snapshot.taskId) {
     return state;
   }
-  const timeline = Object.values(snapshot.steps)
+  const timelineSource = snapshot.nodes
+    ? Object.values(snapshot.nodes).map((node) => ({
+        stepId: node.nodeId,
+        action: node.action,
+        status: node.status === "pending" ? "running" : node.status,
+        startedAt: node.startedAt,
+        finishedAt: node.finishedAt,
+        error: node.error,
+      }))
+    : Object.values(snapshot.steps);
+  const timeline = timelineSource
     .flatMap((step) => {
       const entries: AssistantTaskTimelineEntry[] = [];
       if (step.startedAt) {
@@ -925,11 +968,11 @@ export function reconcileAssistantTaskFromSnapshot(
           taskId: snapshot.taskId,
           stepId: step.stepId,
           ...(step.action ? { action: step.action } : {}),
-          message: formatAssistantTimelineMessage("assistant:step:start", { stepId: step.stepId, action: step.action }),
+          message: formatAssistantTimelineMessage("assistant:step:start", { stepId: step.stepId, action: step.action, nodeStatus: step.status }),
           timestamp: startedAt,
         });
       }
-      if (step.status !== "running" && step.finishedAt) {
+      if (step.status !== "running" && step.status !== "waiting_approval" && step.finishedAt) {
         const event = step.status === "succeeded" ? "assistant:step:success" : "assistant:step:fail";
         const finishedAt = parseAssistantEventTimestamp(step.finishedAt);
         entries.push({
@@ -938,7 +981,7 @@ export function reconcileAssistantTaskFromSnapshot(
           taskId: snapshot.taskId,
           stepId: step.stepId,
           ...(step.action ? { action: step.action } : {}),
-          message: formatAssistantTimelineMessage(event, { stepId: step.stepId, action: step.action, error: step.error }),
+          message: formatAssistantTimelineMessage(event, { stepId: step.stepId, action: step.action, error: step.error, nodeStatus: step.status }),
           timestamp: finishedAt,
         });
       }
@@ -956,6 +999,9 @@ export function reconcileAssistantTaskFromSnapshot(
     });
   }
   const done = snapshot.status !== "running";
+  const executionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
+    ? "waiting_approval"
+    : snapshot.status;
   return {
     ...state,
     loading: done ? false : state.loading,
@@ -963,7 +1009,7 @@ export function reconcileAssistantTaskFromSnapshot(
     taskExecution: {
       taskId: snapshot.taskId,
       sessionId: snapshot.sessionId,
-      status: snapshot.status,
+      status: executionStatus,
       stepRunIds: state.taskExecution.stepRunIds,
       timeline,
       lastSyncedAt: Date.now(),
@@ -2580,6 +2626,7 @@ export function AssistantView({
       const planned = await postApi<{
         readonly taskId: string;
         readonly plan: ReadonlyArray<Record<string, unknown>>;
+        readonly graph?: Record<string, unknown>;
       }>("/assistant/plan", {
         sessionId,
         input: state.taskPlan.prompt,
@@ -2591,7 +2638,6 @@ export function AssistantView({
         taskId: planned.taskId,
         sessionId,
         approved: true,
-        plan: planned.plan,
       });
       setState((prev) => ({
         ...prev,
