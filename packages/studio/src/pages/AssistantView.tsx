@@ -10,11 +10,16 @@ import {
   type AssistantOperatorParseResult,
 } from "../api/services/assistant-command-parser";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
-import { QualityReportCard, type QualityReportPayload } from "../components/assistant/QualityReportCard";
+import {
+  QualityReportCard,
+  type QualityReportBundle,
+  type QualityReportPayload,
+} from "../components/assistant/QualityReportCard";
 import {
   WorldConsistencyMarketCard,
   type AssistantWorldConsistencyMarketReport,
 } from "../components/assistant/WorldConsistencyMarketCard";
+import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 
@@ -38,7 +43,7 @@ export interface AssistantComposerState {
   readonly nextMessageId: number;
   readonly taskPlan: AssistantTaskPlan | null;
   readonly taskExecution: AssistantTaskExecution | null;
-  readonly qualityReport: QualityReportPayload | null;
+  readonly qualityReport: QualityReportBundle | null;
   readonly worldConsistencyReport: AssistantWorldConsistencyMarketReport | null;
   readonly suggestedNextActions: ReadonlyArray<string>;
   readonly operatorSession: AssistantOperatorSession;
@@ -108,10 +113,42 @@ export interface AssistantTaskExecution {
   readonly sessionId: string;
   readonly status: "running" | "waiting_approval" | "succeeded" | "failed";
   readonly stepRunIds?: Record<string, string>;
+  readonly candidateSelection?: AssistantCandidateSelection | null;
   readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
   readonly lastSyncedAt: number;
   readonly nextSequence: number;
 }
+
+export interface AssistantCandidateScoreEvidence {
+  readonly source: string;
+  readonly excerpt: string;
+  readonly reason: string;
+}
+
+export interface AssistantCandidateSelectionItem {
+  readonly candidateId: string;
+  readonly runId: string;
+  readonly score: number;
+  readonly status: "succeeded" | "failed";
+  readonly decision?: "applied" | "unchanged" | "failed" | null;
+  readonly excerpt: string;
+  readonly evidence: ReadonlyArray<AssistantCandidateScoreEvidence>;
+  readonly pendingApproval: boolean;
+  readonly error?: string;
+}
+
+export interface AssistantCandidateSelection {
+  readonly nodeId: string;
+  readonly mode: "auto" | "manual";
+  readonly status: "pending" | "selected";
+  readonly winnerCandidateId?: string;
+  readonly winnerRunId?: string;
+  readonly winnerScore?: number;
+  readonly winnerReason?: string;
+  readonly candidates: ReadonlyArray<AssistantCandidateSelectionItem>;
+}
+
+type AssistantCandidateDecisionState = Omit<AssistantCandidateSelection, "nodeId">;
 
 export interface AssistantEvaluateResponse {
   readonly taskId: string;
@@ -207,13 +244,15 @@ interface AssistantTaskSnapshot {
     readonly startedAt?: string;
     readonly finishedAt?: string;
     readonly error?: string;
-    readonly checkpoint?: {
-      readonly nodeId: string;
-      readonly requiredApproval: boolean;
-      readonly approvedAt?: string;
-      readonly approvedBy?: string;
-    };
-  }>;
+     readonly checkpoint?: {
+        readonly nodeId: string;
+        readonly requiredApproval: boolean;
+        readonly approvedAt?: string;
+        readonly approvedBy?: string;
+      };
+      readonly parallelCandidates?: number;
+      readonly candidateDecision?: AssistantCandidateDecisionState;
+    }>;
   readonly steps: Record<string, {
     readonly stepId: string;
     readonly action?: string;
@@ -224,6 +263,11 @@ interface AssistantTaskSnapshot {
   }>;
   readonly lastUpdatedAt: string;
   readonly error?: string;
+  readonly awaitingApproval?: {
+    readonly nodeId: string;
+    readonly type: "checkpoint" | "candidate-selection";
+    readonly candidates?: ReadonlyArray<AssistantCandidateSelectionItem>;
+  };
 }
 
 const ASSISTANT_TIMELINE_MAX_ENTRIES = 50;
@@ -933,6 +977,7 @@ export function recoverAssistantStateFromSnapshot(
       taskId: snapshot.taskId,
       sessionId: snapshot.sessionId || payload.sessionId,
       status: snapshot.status,
+      candidateSelection: state.taskExecution?.taskId === snapshot.taskId ? (state.taskExecution.candidateSelection ?? null) : null,
       timeline: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.timeline : [],
       lastSyncedAt: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.lastSyncedAt : Date.now(),
       nextSequence: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.nextSequence : 0,
@@ -940,6 +985,39 @@ export function recoverAssistantStateFromSnapshot(
     },
   };
   return reconcileAssistantTaskFromSnapshot(seeded, snapshot);
+}
+
+export function resolveAssistantCandidateSelection(
+  snapshot: AssistantTaskSnapshot,
+): AssistantCandidateSelection | null {
+  if (snapshot.awaitingApproval?.type === "candidate-selection") {
+    const node = snapshot.awaitingApproval.nodeId ? snapshot.nodes?.[snapshot.awaitingApproval.nodeId] : undefined;
+    const candidateDecision = node?.candidateDecision;
+    if (candidateDecision) {
+      return {
+        nodeId: snapshot.awaitingApproval.nodeId,
+        ...candidateDecision,
+      };
+    }
+    if (snapshot.awaitingApproval.candidates && snapshot.awaitingApproval.candidates.length > 0) {
+      return {
+        nodeId: snapshot.awaitingApproval.nodeId,
+        mode: "manual",
+        status: "pending",
+        candidates: snapshot.awaitingApproval.candidates,
+      };
+    }
+  }
+  const withDecision = snapshot.nodes
+    ? Object.values(snapshot.nodes).find((node) => node.candidateDecision)
+    : undefined;
+  if (!withDecision?.candidateDecision) {
+    return null;
+  }
+  return {
+    nodeId: withDecision.nodeId,
+    ...withDecision.candidateDecision,
+  };
 }
 
 export function formatAssistantTimelineMessage(
@@ -988,6 +1066,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     taskId,
     sessionId: typeof payload?.sessionId === "string" ? payload.sessionId : "",
     status: "running" as const,
+    candidateSelection: null,
     timeline: [],
     lastSyncedAt: timestamp,
     nextSequence: 0,
@@ -1028,6 +1107,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     taskExecution: {
       ...currentExecution,
       status: taskStatus,
+      candidateSelection: currentExecution.candidateSelection ?? null,
       timeline: [...currentExecution.timeline.slice(-(ASSISTANT_TIMELINE_MAX_ENTRIES - 1)), nextEntry],
       lastSyncedAt: timestamp,
       nextSequence: currentExecution.nextSequence + 1,
@@ -1094,6 +1174,7 @@ export function reconcileAssistantTaskFromSnapshot(
     });
   }
   const done = snapshot.status !== "running";
+  const candidateSelection = resolveAssistantCandidateSelection(snapshot);
   const executionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
     ? "waiting_approval"
     : snapshot.status;
@@ -1106,6 +1187,7 @@ export function reconcileAssistantTaskFromSnapshot(
       sessionId: snapshot.sessionId,
       status: executionStatus,
       stepRunIds: state.taskExecution.stepRunIds,
+      candidateSelection,
       timeline,
       lastSyncedAt: Date.now(),
       nextSequence: timeline.length,
@@ -1711,6 +1793,19 @@ export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | 
   }, []);
 }
 
+function mergeAssistantSuggestedNextActions(
+  ...groups: ReadonlyArray<ReadonlyArray<string>>
+): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  groups.flat().forEach((action) => {
+    if (!action || seen.has(action)) return;
+    seen.add(action);
+    merged.push(action);
+  });
+  return merged;
+}
+
 function buildAssistantAgentInstruction(
   prompt: string,
   selectedBookTitles: ReadonlyArray<string>,
@@ -2206,7 +2301,7 @@ export function AssistantView({
     } catch {
       payload = null;
     }
-    if (!payload || payload.status !== "running" || taskRecoveryAppliedRef.current === payload.taskId) {
+    if (!payload || (payload.status !== "running" && payload.status !== "waiting_approval") || taskRecoveryAppliedRef.current === payload.taskId) {
       return;
     }
     taskRecoveryAppliedRef.current = payload.taskId;
@@ -2281,19 +2376,11 @@ export function AssistantView({
     }
     evaluatedTaskIdRef.current = state.taskExecution.taskId;
 
-    const scope = state.taskPlan.chapterNumber !== undefined
-      ? {
-          type: "chapter" as const,
-          bookId: state.taskPlan.targetBookIds[0] ?? "",
-          chapter: state.taskPlan.chapterNumber,
-        }
-      : {
-          type: "book" as const,
-          bookId: state.taskPlan.targetBookIds[0] ?? "",
-        };
-    if (!scope.bookId) {
+    const bookId = state.taskPlan.targetBookIds[0] ?? "";
+    if (!bookId) {
       return;
     }
+    const chapterNumber = state.taskPlan.chapterNumber;
     const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
     const taskId = state.taskExecution.taskId;
     const applySuggestedNextActions = (
@@ -2305,14 +2392,38 @@ export function AssistantView({
     });
     void (async () => {
       try {
-        const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-          taskId,
-          scope,
-          ...(runIds.length > 0 ? { runIds } : {}),
-        });
+        const [chapterResult, bookResult] = await Promise.all([
+          chapterNumber !== undefined
+            ? postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+                taskId,
+                scope: {
+                  type: "chapter" as const,
+                  bookId,
+                  chapter: chapterNumber,
+                },
+                ...(runIds.length > 0 ? { runIds } : {}),
+              })
+            : Promise.resolve(null),
+          postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+            taskId,
+            scope: {
+              type: "book" as const,
+              bookId,
+            },
+          }),
+        ]);
+        const bookReport = bookResult.report;
+        const qualityReport: QualityReportBundle = {
+          ...(chapterResult?.report ? { chapter: chapterResult.report } : {}),
+          book: bookReport,
+        };
+        const suggestedNextActions = mergeAssistantSuggestedNextActions(
+          chapterResult?.suggestedNextActions ?? [],
+          bookResult.suggestedNextActions,
+        );
         setState((prev) => ({
-          ...applySuggestedNextActions(prev, result.suggestedNextActions),
-          qualityReport: result.report,
+          ...applySuggestedNextActions(prev, suggestedNextActions),
+          qualityReport,
         }));
       } catch {
         setState((prev) => {
@@ -2764,6 +2875,7 @@ export function AssistantView({
           sessionId,
           status: "running",
           stepRunIds: executeResult.stepRunIds,
+          candidateSelection: null,
           timeline: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.timeline : [],
           lastSyncedAt: Date.now(),
           nextSequence: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.nextSequence : 0,
@@ -2781,6 +2893,25 @@ export function AssistantView({
 
   const handleRunNextAction = (action: string) => {
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
+  };
+
+  const handleSelectCandidate = async (nodeId: string, candidateId: string) => {
+    if (!state.taskExecution) {
+      return;
+    }
+    setState((prev) => ({ ...prev, loading: true }));
+    try {
+      await postApi(`/assistant/tasks/${state.taskExecution.taskId}/approve/${nodeId}`, { candidateId });
+      const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${state.taskExecution.taskId}`);
+      setState((prev) => reconcileAssistantTaskFromSnapshot({
+        ...prev,
+        loading: false,
+      }, snapshot));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setScopeBlockHint(`候选选择失败：${message}`);
+      setState((prev) => ({ ...prev, loading: false }));
+    }
   };
 
   const handleRunWorldRepairTask = (stepId: string) => {
@@ -2876,6 +3007,13 @@ export function AssistantView({
               targetBookTitles={taskPlanTargetBookTitles}
               onConfirm={handleConfirmAction}
               onCancel={() => setState((prev) => cancelAssistantPendingAction(prev))}
+            />
+          )}
+          {state.taskExecution?.candidateSelection && (
+            <CandidateComparisonCard
+              selection={state.taskExecution.candidateSelection}
+              disabled={state.loading}
+              onSelectCandidate={handleSelectCandidate}
             />
           )}
           {state.qualityReport && (

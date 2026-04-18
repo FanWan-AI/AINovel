@@ -15,7 +15,7 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative } from "node:path";
 import { isSafeBookId } from "./safety.js";
@@ -111,6 +111,8 @@ const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
+const ASSISTANT_BOOK_EVALUATE_BATCH_SIZE = 12;
+const ASSISTANT_BOOK_EVALUATE_SNIPPET_MAX_LENGTH = 220;
 const ASSISTANT_HIGH_RISK_APPROVAL_REASON = "High-risk actions require manual approval before execution.";
 const ASSISTANT_AUTOPILOT_BUDGET_PAUSED_CODE = "ASSISTANT_AUTOPILOT_BUDGET_PAUSED";
 const ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED_CODE = "ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED";
@@ -167,6 +169,41 @@ interface ManualCandidateRevision {
   readonly auditIssues: ReadonlyArray<string>;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: unknown;
+}
+
+interface AssistantCandidateScoreEvidence {
+  readonly source: string;
+  readonly excerpt: string;
+  readonly reason: string;
+}
+
+interface AssistantTaskCandidateSnapshot {
+  readonly candidateId: string;
+  readonly runId: string;
+  readonly score: number;
+  readonly status: "succeeded" | "failed";
+  readonly decision?: "applied" | "unchanged" | "failed" | null;
+  readonly excerpt: string;
+  readonly evidence: ReadonlyArray<AssistantCandidateScoreEvidence>;
+  readonly pendingApproval: boolean;
+  readonly error?: string;
+  readonly candidateRevision?: ManualCandidateRevision;
+}
+
+interface AssistantCandidateDecisionSnapshot {
+  readonly mode: "auto" | "manual";
+  readonly status: "pending" | "selected";
+  readonly candidates: ReadonlyArray<AssistantTaskCandidateSnapshot>;
+  readonly winnerCandidateId?: string;
+  readonly winnerRunId?: string;
+  readonly winnerScore?: number;
+  readonly winnerReason?: string;
+}
+
+interface AssistantTaskAwaitingApproval {
+  readonly nodeId: string;
+  readonly type: "checkpoint" | "candidate-selection";
+  readonly candidates?: ReadonlyArray<AssistantTaskCandidateSnapshot>;
 }
 
 function normalizeWritingGovernanceSettings(raw: unknown, fallbackUpdatedAt = ""): WritingGovernanceSettings {
@@ -442,6 +479,7 @@ interface AssistantPlanStep {
   readonly bookIds?: ReadonlyArray<string>;
   readonly chapter?: number;
   readonly mode?: string;
+  readonly parallelCandidates?: number;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly maxRetries?: number;
 }
@@ -452,6 +490,7 @@ interface AssistantExecuteStepRef {
   readonly bookId: string;
   readonly chapter: number;
   readonly mode?: string;
+  readonly parallelCandidates?: number;
 }
 
 interface AssistantTaskStepSnapshot {
@@ -470,12 +509,14 @@ interface AssistantTaskNodeSnapshot {
   readonly action?: string;
   readonly runId?: string;
   readonly status: TaskNodeStatus;
+  readonly parallelCandidates?: number;
   readonly attempts: number;
   readonly maxRetries: number;
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly error?: string;
   readonly checkpoint?: CheckpointState;
+  readonly candidateDecision?: AssistantCandidateDecisionSnapshot;
 }
 
 interface AssistantTaskSnapshot {
@@ -489,6 +530,7 @@ interface AssistantTaskSnapshot {
   readonly lastUpdatedAt: string;
   readonly error?: string;
   readonly retryContext?: Record<string, unknown>;
+  readonly awaitingApproval?: AssistantTaskAwaitingApproval;
 }
 
 interface AssistantTaskSnapshotStore {
@@ -552,6 +594,9 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
   const status = parseAssistantTaskNodeStatus(payload.status);
   const attempts = typeof payload.attempts === "number" && Number.isFinite(payload.attempts) ? payload.attempts : Number.NaN;
   const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries) ? payload.maxRetries : Number.NaN;
+  const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+    ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+    : undefined;
   if (!nodeId || !type || !status || !Number.isFinite(attempts) || !Number.isFinite(maxRetries)) {
     return null;
   }
@@ -564,6 +609,7 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
     status,
     attempts,
     maxRetries,
+    ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(typeof payload.action === "string" ? { action: payload.action } : {}),
     ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
     ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
@@ -593,6 +639,9 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
   const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
     ? Math.max(payload.maxRetries, 0)
     : undefined;
+  const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+    ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+    : undefined;
   const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
     ? payload.checkpoint as CheckpointState
     : undefined;
@@ -604,6 +653,7 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
     ...(bookIds.length > 0 ? { bookIds } : {}),
     ...(typeof payload.chapter === "number" && Number.isInteger(payload.chapter) && payload.chapter > 0 ? { chapter: payload.chapter } : {}),
     ...(typeof payload.mode === "string" ? { mode: payload.mode } : {}),
+    ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(dependsOn.length > 0 ? { dependsOn } : {}),
     ...(maxRetries !== undefined ? { maxRetries } : {}),
     ...(checkpoint ? { checkpoint } : {}),
@@ -688,6 +738,9 @@ function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string)
   const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
     ? payload.retryContext as Record<string, unknown>
     : undefined;
+  const awaitingApproval = typeof payload.awaitingApproval === "object" && payload.awaitingApproval !== null && !Array.isArray(payload.awaitingApproval)
+    ? payload.awaitingApproval as AssistantTaskAwaitingApproval
+    : undefined;
   const graph = normalizeAssistantTaskGraph(payload.graph, taskId);
   return {
     taskId,
@@ -700,6 +753,7 @@ function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string)
     lastUpdatedAt,
     ...(typeof payload.error === "string" ? { error: payload.error } : {}),
     ...(retryContext ? { retryContext } : {}),
+    ...(awaitingApproval ? { awaitingApproval } : {}),
   };
 }
 
@@ -789,18 +843,27 @@ interface AssistantCrudDeleteRecoveryStore {
   readonly entries: AssistantCrudDeleteRecoveryEntry[];
 }
 
-interface AssistantEvaluateDimensions {
-  readonly continuity: number;
-  readonly readability: number;
-  readonly styleConsistency: number;
-  readonly aiTraceRisk: number;
-}
+type AssistantEvaluateDimensionKey =
+  | "continuity"
+  | "readability"
+  | "styleConsistency"
+  | "aiTraceRisk"
+  | "mainline"
+  | "character"
+  | "foreshadowing"
+  | "repetition"
+  | "style"
+  | "pacing";
+
+type AssistantEvaluateDimensions = Partial<Record<AssistantEvaluateDimensionKey, number>>;
 
 interface AssistantEvaluateReport {
+  readonly scopeType: "chapter" | "book";
   readonly overallScore: number;
   readonly dimensions: AssistantEvaluateDimensions;
   readonly blockingIssues: ReadonlyArray<string>;
   readonly evidence: ReadonlyArray<AssistantEvaluateEvidence>;
+  readonly cached?: boolean;
 }
 
 interface AssistantOptimizeIteration {
@@ -1252,6 +1315,7 @@ function buildAssistantTaskGraphFromPlan(
       ...(Array.isArray(step.bookIds) ? { bookIds: [...step.bookIds] } : {}),
       ...(typeof step.chapter === "number" ? { chapter: step.chapter } : {}),
       ...(typeof step.mode === "string" ? { mode: step.mode } : {}),
+      ...(typeof step.parallelCandidates === "number" ? { parallelCandidates: Math.max(1, Math.min(3, Math.trunc(step.parallelCandidates))) } : {}),
       ...(Array.isArray(step.dependsOn) && step.dependsOn.length > 0 ? { dependsOn: [...step.dependsOn] } : {}),
       maxRetries: Math.max(step.maxRetries ?? 0, 0),
     });
@@ -1423,6 +1487,7 @@ function collectAssistantExecutableNodes(graph: TaskGraph): AssistantExecuteStep
         bookId: stepBookId,
         chapter: stepChapter,
         ...(node.mode !== undefined ? { mode: node.mode } : {}),
+        ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
       } satisfies AssistantExecuteStepRef;
     })
     .filter((node): node is AssistantExecuteStepRef => node !== null);
@@ -1529,6 +1594,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   let sseClientCount = 0;
   const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
   const assistantTaskGraphs = new Map<string, TaskGraph>();
+  const assistantCandidateApprovalResolvers = new Map<string, (candidateId: string) => void>();
+  const assistantTaskExecutionAutopilotLevels = new Map<string, AssistantAutopilotLevel>();
   const assistantDeletePreviews = new Map<string, { readonly body: { target: "chapter" | "run"; bookId: string; chapter?: number; runId?: string }; readonly expiresAt: number }>();
   const assistantDeleteRecoveryStorePath = join(root, ".inkos", "assistant-delete-recovery.v1.json");
   const assistantTaskSnapshotStorePath = join(root, ASSISTANT_TASK_SNAPSHOT_STORE_FILE);
@@ -1704,6 +1771,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
       ? payload.maxRetries
       : previousNode?.maxRetries ?? 0;
+    const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+      ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+      : previousNode?.parallelCandidates;
     const nextNodes = {
       ...(previous?.nodes ?? {}),
       ...(currentNodeId
@@ -1714,6 +1784,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             ...(typeof payload.action === "string" ? { action: payload.action } : previousNode?.action ? { action: previousNode.action } : {}),
             ...(typeof payload.runId === "string" ? { runId: payload.runId } : previousNode?.runId ? { runId: previousNode.runId } : {}),
             status: nodeStatus,
+            ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
             attempts,
             maxRetries,
             ...(nodeStatus === "running" || nodeStatus === "waiting_approval"
@@ -1724,6 +1795,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 }),
             ...(typeof payload.error === "string" ? { error: payload.error } : previousNode?.error ? { error: previousNode.error } : {}),
             ...(checkpoint ? { checkpoint } : {}),
+            ...(previousNode?.candidateDecision ? { candidateDecision: previousNode.candidateDecision } : {}),
           } satisfies AssistantTaskNodeSnapshot,
         }
         : {}),
@@ -1740,6 +1812,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       lastUpdatedAt: timestamp,
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
       ...(mergedRetryContext ? { retryContext: mergedRetryContext } : {}),
+      ...(Object.values(nextNodes).some((node) => node.status === "waiting_approval") && previous?.awaitingApproval
+        ? { awaitingApproval: previous.awaitingApproval }
+        : {}),
     });
     scheduleAssistantTaskSnapshotPersistence();
 
@@ -2014,6 +2089,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       bookId: stepBookId,
       chapter: stepChapter,
       ...(step.mode !== undefined ? { mode: step.mode } : {}),
+      ...(step.parallelCandidates !== undefined ? { parallelCandidates: clampParallelCandidates(step.parallelCandidates) } : {}),
     };
   }
 
@@ -2062,6 +2138,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         status: "pending",
         attempts: 0,
         maxRetries: Math.max(node.maxRetries ?? 0, 0),
+        ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
         ...(node.checkpoint ? { checkpoint: node.checkpoint } : {}),
       } satisfies AssistantTaskNodeSnapshot,
     ]));
@@ -2095,8 +2172,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return {};
     }
     const responseStatus = runtime?.status ?? (snapshot?.status ?? "running");
-    const status = responseStatus === "pending" ? "running" : responseStatus;
+    const status = snapshot?.awaitingApproval
+      ? "waiting_approval"
+      : responseStatus === "pending" ? "running" : responseStatus;
     const stepRunIds = runtime?.stepRunIds ?? {};
+    const candidateDecisions = snapshot?.nodes
+      ? Object.fromEntries(
+          Object.entries(snapshot.nodes)
+            .filter(([, node]) => node.candidateDecision)
+            .map(([nodeId, node]) => [nodeId, node.candidateDecision]),
+        )
+      : {};
     return {
       taskId,
       sessionId: runtime?.sessionId ?? snapshot?.sessionId ?? "",
@@ -2104,14 +2190,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(runtime?.currentNodeId ? { currentNodeId: runtime.currentNodeId } : {}),
       ...(snapshot?.currentStepId ? { currentStepId: snapshot.currentStepId } : {}),
       ...(Object.keys(stepRunIds).length > 0 ? { stepRunIds } : {}),
-      ...(runtime?.status === "waiting_approval" && runtime.currentNodeId ? {
-        awaitingApproval: { nodeId: runtime.currentNodeId },
-      } : {}),
+      ...(Object.keys(candidateDecisions).length > 0 ? { candidateDecisions } : {}),
+      ...(snapshot?.awaitingApproval
+        ? { awaitingApproval: snapshot.awaitingApproval }
+        : runtime?.status === "waiting_approval" && runtime.currentNodeId
+          ? { awaitingApproval: { nodeId: runtime.currentNodeId, type: "checkpoint" } }
+          : {}),
     };
   }
 
   function applyAssistantConductorEvent(event: AssistantConductorEvent): void {
     if (event.type === "graph") {
+      assistantTaskExecutionAutopilotLevels.delete(event.taskId);
+      assistantCandidateApprovalResolvers.delete(`${event.taskId}:${assistantTaskSnapshots.get(event.taskId)?.awaitingApproval?.nodeId ?? ""}`);
       if (event.reasonCode || event.errorCode) {
         broadcast("assistant:policy:blocked", {
           taskId: event.taskId,
@@ -2181,25 +2272,108 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       if (node.action === "revise") {
-        const response = await app.request(
-          `http://localhost/api/books/${node.bookId}/revise/${node.chapter}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...(node.mode !== undefined ? { mode: node.mode } : {}) }),
-          },
-        );
-        const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
-        if (!response.ok || typeof payload?.["runId"] !== "string") {
-          throw new Error(!response.ok ? await parseApiErrorMessage(response) : "revise step did not return runId");
-        }
-        const runId = payload["runId"];
+        const parallelCandidates = clampParallelCandidates(node.parallelCandidates);
+        const startReviseRun = async (): Promise<string> => {
+          const response = await app.request(
+            `http://localhost/api/books/${node.bookId}/revise/${node.chapter}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...(node.mode !== undefined ? { mode: node.mode } : {}) }),
+            },
+          );
+          const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+          if (!response.ok || typeof payload?.["runId"] !== "string") {
+            throw new Error(!response.ok ? await parseApiErrorMessage(response) : "revise step did not return runId");
+          }
+          return payload["runId"];
+        };
+        const runIds = parallelCandidates > 1
+          ? await Promise.all(Array.from({ length: parallelCandidates }, async () => await startReviseRun()))
+          : [await startReviseRun()];
+        const runId = runIds[0]!;
         return {
           runId,
           execute: async () => {
-            const reviseRun = await waitForChapterRunCompletion(node.bookId!, runId);
-            if (reviseRun.status !== "succeeded") {
-              throw new Error(reviseRun.error ?? "revise step failed");
+            const reviseRuns = await Promise.all(
+              runIds.map(async (currentRunId) => await waitForChapterRunCompletion(node.bookId!, currentRunId)),
+            );
+            if (parallelCandidates === 1) {
+              const reviseRun = reviseRuns[0]!;
+              if (reviseRun.status !== "succeeded") {
+                throw new Error(reviseRun.error ?? "revise step failed");
+              }
+              return;
+            }
+            const scope: AssistantEvaluateScope = {
+              type: "chapter",
+              bookId: node.bookId!,
+              chapter: node.chapter!,
+            };
+            const candidates = reviseRuns.map((reviseRun, index) =>
+              buildAssistantCandidateSnapshot(node.nodeId, index, reviseRun, scope));
+            const winner = pickWinningAssistantCandidate(candidates);
+            if (!winner) {
+              throw new Error(reviseRuns[0]?.error ?? "parallel candidate generation failed");
+            }
+            const autopilotLevel = assistantTaskExecutionAutopilotLevels.get(context.taskId) ?? DEFAULT_ASSISTANT_AUTOPILOT_LEVEL;
+            const requiresManualVote = autopilotLevel === "L1" || autopilotLevel === "L2" || autopilotLevel === "guarded";
+            if (requiresManualVote) {
+              updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+                mode: "manual",
+                status: "pending",
+                candidates,
+              }, {
+                nodeStatus: "waiting_approval",
+                awaitingApproval: {
+                  nodeId: node.nodeId,
+                  type: "candidate-selection",
+                  candidates,
+                },
+              });
+              const approvalKey = `${context.taskId}:${node.nodeId}`;
+              const selectedCandidateId = await new Promise<string>((resolve) => {
+                assistantCandidateApprovalResolvers.set(approvalKey, resolve);
+              });
+              assistantCandidateApprovalResolvers.delete(approvalKey);
+              const selected = candidates.find((candidate) => candidate.candidateId === selectedCandidateId) ?? winner;
+              updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+                mode: "manual",
+                status: "selected",
+                candidates,
+                winnerCandidateId: selected.candidateId,
+                winnerRunId: selected.runId,
+                winnerScore: selected.score,
+                winnerReason: selected.evidence[0]?.reason ?? "人工投票已选择候选",
+              }, {
+                nodeStatus: "running",
+                awaitingApproval: null,
+              });
+              if (selected.pendingApproval) {
+                await approveAssistantCandidateRun(node.bookId!, selected.runId, "Candidate revision approved by assistant manual vote.");
+              }
+              if (selected.status !== "succeeded") {
+                throw new Error(selected.error ?? "selected candidate failed");
+              }
+              return;
+            }
+            updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+              mode: "auto",
+              status: "selected",
+              candidates,
+              winnerCandidateId: winner.candidateId,
+              winnerRunId: winner.runId,
+              winnerScore: winner.score,
+              winnerReason: winner.evidence[0]?.reason ?? "自动投票选择最高分候选",
+            }, {
+              nodeStatus: "running",
+              awaitingApproval: null,
+            });
+            if (winner.pendingApproval) {
+              await approveAssistantCandidateRun(node.bookId!, winner.runId, "Candidate revision approved by assistant auto vote.");
+            }
+            if (winner.status !== "succeeded") {
+              throw new Error(winner.error ?? "winning candidate failed");
             }
           },
         };
@@ -2323,21 +2497,80 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return Math.max(0, Math.min(100, Math.round(value)));
   }
 
-  function deriveAssistantEvaluateReport(
+  interface AssistantBookEvaluateChapterSample {
+    readonly chapter: number;
+    readonly fileName: string;
+    readonly snippet: string;
+    readonly wordCount: number;
+    readonly normalizedSnippet: string;
+    readonly latestRun: ChapterRunRecord | null;
+  }
+
+  interface AssistantBookEvaluateSourceText {
+    readonly fileName: string;
+    readonly content: string;
+    readonly size: number;
+    readonly updatedAtMs: number;
+  }
+
+  interface AssistantBookEvaluateInput {
+    readonly bookId: string;
+    readonly runIds?: ReadonlyArray<string>;
+  }
+
+  function normalizeEvaluateText(value: string | null | undefined, maxLength = 160): string {
+    return (value ?? "").replace(/\s+/gu, " ").trim().slice(0, maxLength);
+  }
+
+  function mean(values: ReadonlyArray<number>): number {
+    if (values.length === 0) return 0;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  function coefficientOfVariation(values: ReadonlyArray<number>): number {
+    if (values.length < 2) return 0;
+    const average = mean(values);
+    if (average <= 0) return 0;
+    const variance = values.reduce((sum, value) => sum + ((value - average) ** 2), 0) / values.length;
+    return Math.sqrt(variance) / average;
+  }
+
+  function buildAssistantEvaluateFallbackEvidence(scope: AssistantEvaluateScope): AssistantEvaluateEvidence {
+    const fallbackSource = scope.type === "chapter"
+      ? `chapter:${scope.bookId}:${scope.chapter}`
+      : `book:${scope.bookId}`;
+    return {
+      source: fallbackSource,
+      excerpt: "暂无运行证据，使用范围级摘要作为最小可追溯证据。",
+      reason: "当前评估未检索到可用 run 数据",
+    };
+  }
+
+  function buildUnknownAssistantEvaluateScope(scopeType: "chapter" | "book"): AssistantEvaluateScope {
+    return scopeType === "chapter"
+      ? { type: "chapter", bookId: "unknown", chapter: 1 }
+      : { type: "book", bookId: "unknown" };
+  }
+
+  function deriveChapterAssistantEvaluateReport(
     runs: ReadonlyArray<ChapterRunRecord>,
     scope: AssistantEvaluateScope,
   ): AssistantEvaluateReport {
     const failedRuns = runs.filter((run) => run.status === "failed");
     const unchangedRuns = runs.filter((run) => run.decision === "unchanged");
     const appliedRuns = runs.filter((run) => run.decision === "applied");
+    const continuity = clampSerializableScore(85 - failedRuns.length * 25 - unchangedRuns.length * 8 + appliedRuns.length * 2);
+    const readability = clampSerializableScore(82 - failedRuns.length * 18 - unchangedRuns.length * 5 + appliedRuns.length * 2);
+    const styleConsistency = clampSerializableScore(80 - failedRuns.length * 15 - unchangedRuns.length * 6 + appliedRuns.length * 2);
+    const aiTraceRisk = clampSerializableScore(78 - failedRuns.length * 20 - unchangedRuns.length * 7 + appliedRuns.length);
     const dimensions: AssistantEvaluateDimensions = {
-      continuity: clampSerializableScore(85 - failedRuns.length * 25 - unchangedRuns.length * 8 + appliedRuns.length * 2),
-      readability: clampSerializableScore(82 - failedRuns.length * 18 - unchangedRuns.length * 5 + appliedRuns.length * 2),
-      styleConsistency: clampSerializableScore(80 - failedRuns.length * 15 - unchangedRuns.length * 6 + appliedRuns.length * 2),
-      aiTraceRisk: clampSerializableScore(78 - failedRuns.length * 20 - unchangedRuns.length * 7 + appliedRuns.length),
+      continuity,
+      readability,
+      styleConsistency,
+      aiTraceRisk,
     };
     const overallScore = clampSerializableScore(
-      (dimensions.continuity + dimensions.readability + dimensions.styleConsistency + dimensions.aiTraceRisk) / 4,
+      (continuity + readability + styleConsistency + aiTraceRisk) / 4,
     );
 
     const blockingIssues = [
@@ -2364,19 +2597,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         source: `chapter-run:${run.runId}:book:${run.bookId}:chapter:${run.chapter}`,
         excerpt,
         reason,
-      };
+        };
     });
-    const fallbackSource = scope.type === "chapter"
-      ? `chapter:${scope.bookId}:${scope.chapter}`
-      : `book:${scope.bookId}`;
-    const fallbackEvidence: AssistantEvaluateEvidence = {
-      source: fallbackSource,
-      excerpt: "暂无运行证据，使用范围级摘要作为最小可追溯证据。",
-      reason: "当前评估未检索到可用 run 数据",
-    };
-
-    const evidence = evidenceFromRuns.length > 0 ? evidenceFromRuns : [fallbackEvidence];
+    const evidence = evidenceFromRuns.length > 0 ? evidenceFromRuns : [buildAssistantEvaluateFallbackEvidence(scope)];
     return {
+      scopeType: "chapter",
       overallScore,
       dimensions,
       blockingIssues,
@@ -2643,7 +2868,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           return;
         }
         chaptersForDay.forEach((chapterRuns) => {
-          const score = deriveAssistantEvaluateReport(chapterRuns, {
+          const score = deriveChapterAssistantEvaluateReport(chapterRuns, {
             type: "chapter",
             bookId,
             chapter: chapterRuns[0]?.chapter ?? 1,
@@ -2702,7 +2927,324 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       },
     };
   }
+  function normalizeAssistantEvaluateReport(raw: unknown): AssistantEvaluateReport | null {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const source = raw as Record<string, unknown>;
+    const scopeType = source["scopeType"] === "chapter" || source["scopeType"] === "book"
+      ? source["scopeType"]
+      : null;
+    if (!scopeType) return null;
+    const dimensionsSource = source["dimensions"];
+    const dimensions = typeof dimensionsSource === "object" && dimensionsSource !== null && !Array.isArray(dimensionsSource)
+      ? Object.fromEntries(Object.entries(dimensionsSource).flatMap(([key, value]) =>
+        typeof value === "number" && Number.isFinite(value)
+          ? [[key, clampSerializableScore(value)]]
+          : []))
+      : {};
+    const blockingIssues = Array.isArray(source["blockingIssues"])
+      ? source["blockingIssues"].flatMap((issue) => typeof issue === "string" && issue.trim().length > 0 ? [issue.trim()] : [])
+      : [];
+    const evidence = Array.isArray(source["evidence"])
+      ? source["evidence"].flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const evidenceItem = item as Record<string, unknown>;
+        const sourceText = typeof evidenceItem["source"] === "string" ? evidenceItem["source"].trim() : "";
+        const excerpt = normalizeEvaluateText(typeof evidenceItem["excerpt"] === "string" ? evidenceItem["excerpt"] : "");
+        const reason = normalizeEvaluateText(typeof evidenceItem["reason"] === "string" ? evidenceItem["reason"] : "");
+        if (!sourceText || !excerpt || !reason) return [];
+        return [{ source: sourceText, excerpt, reason }];
+      })
+      : [];
+    return {
+      scopeType,
+      overallScore: clampSerializableScore(typeof source["overallScore"] === "number" ? source["overallScore"] : Number.NaN),
+      dimensions,
+      blockingIssues,
+      evidence: evidence.length > 0 ? evidence : [buildAssistantEvaluateFallbackEvidence(buildUnknownAssistantEvaluateScope(scopeType))],
+      ...(source["cached"] === true ? { cached: true } : {}),
+    };
+  }
 
+  async function loadAssistantBookEvaluateSource(
+    bookId: string,
+    fileName: string,
+  ): Promise<AssistantBookEvaluateSourceText | null> {
+    const filePath = join(state.bookDir(bookId), "story", fileName);
+    try {
+      const [content, info] = await Promise.all([
+        readFile(filePath, "utf-8"),
+        stat(filePath),
+      ]);
+      return {
+        fileName,
+        content,
+        size: info.size,
+        updatedAtMs: info.mtimeMs,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function loadAssistantBookEvaluateChapterSamples(
+    input: AssistantBookEvaluateInput,
+  ): Promise<ReadonlyArray<AssistantBookEvaluateChapterSample>> {
+    const chaptersDir = join(state.bookDir(input.bookId), "chapters");
+    let files: string[] = [];
+    try {
+      files = (await readdir(chaptersDir))
+        .filter((file) => /^\d+_.+\.md$/u.test(file))
+        .sort((left, right) => left.localeCompare(right));
+    } catch {
+      return [];
+    }
+    const results: AssistantBookEvaluateChapterSample[] = [];
+    const requestedRunIds = input.runIds ?? [];
+    for (let index = 0; index < files.length; index += ASSISTANT_BOOK_EVALUATE_BATCH_SIZE) {
+      const batch = files.slice(index, index + ASSISTANT_BOOK_EVALUATE_BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(async (fileName) => {
+        const underscoreIndex = fileName.indexOf("_");
+        if (underscoreIndex === -1) return null;
+        const chapter = Number.parseInt(fileName.slice(0, underscoreIndex), 10);
+        if (!Number.isInteger(chapter) || chapter < 1) return null;
+        const filePath = join(chaptersDir, fileName);
+        let content = "";
+        try {
+          content = await readFile(filePath, "utf-8");
+        } catch {
+          content = "";
+        }
+        const normalizedSnippet = normalizeEvaluateText(
+          content
+            .replace(/^#.*$/gmu, "")
+            .replace(/\s+/gu, " "),
+          ASSISTANT_BOOK_EVALUATE_SNIPPET_MAX_LENGTH,
+        );
+        const wordCount = content.trim().length;
+        const chapterRuns = await chapterRunStore.listRuns(input.bookId, { chapter, limit: 8 });
+        const latestRun = requestedRunIds.length > 0
+          ? chapterRuns.find((run) => requestedRunIds.includes(run.runId)) ?? null
+          : chapterRuns[0] ?? null;
+        return {
+          chapter,
+          fileName,
+          snippet: normalizedSnippet || `第${chapter}章暂无可提取正文片段。`,
+          wordCount,
+          normalizedSnippet,
+          latestRun,
+        } satisfies AssistantBookEvaluateChapterSample;
+      }));
+      results.push(...batchResults.flatMap((item) => item ? [item] : []));
+    }
+    return results.sort((left, right) => left.chapter - right.chapter);
+  }
+
+  function buildAssistantBookEvaluateCacheKey(input: {
+    readonly storySources: ReadonlyArray<AssistantBookEvaluateSourceText>;
+    readonly chapters: ReadonlyArray<AssistantBookEvaluateChapterSample>;
+  }): string {
+    return JSON.stringify({
+      story: input.storySources.map((source) => [source.fileName, source.size, Math.round(source.updatedAtMs)]),
+      chapters: input.chapters.map((chapter) => [
+        chapter.chapter,
+        chapter.wordCount,
+        chapter.latestRun?.runId ?? null,
+        chapter.latestRun?.status ?? null,
+        chapter.latestRun?.decision ?? null,
+      ]),
+    });
+  }
+
+  function deriveBookAssistantEvaluateReport(
+    scope: AssistantEvaluateScopeBook,
+    chapters: ReadonlyArray<AssistantBookEvaluateChapterSample>,
+    storySources: ReadonlyArray<AssistantBookEvaluateSourceText>,
+  ): AssistantEvaluateReport {
+    const storyBible = storySources.find((item) => item.fileName === "story_bible.md") ?? null;
+    const characterMatrix = storySources.find((item) => item.fileName === "character_matrix.md") ?? null;
+    const pendingHooks = storySources.find((item) => item.fileName === "pending_hooks.md") ?? null;
+    const volumeOutline = storySources.find((item) => item.fileName === "volume_outline.md") ?? null;
+    const runs = chapters.flatMap((chapter) => chapter.latestRun ? [chapter.latestRun] : []);
+    const failedRuns = runs.filter((run) => run.status === "failed").length;
+    const unchangedRuns = runs.filter((run) => run.decision === "unchanged").length;
+    const appliedRuns = runs.filter((run) => run.decision === "applied").length;
+    const chapterWordCounts = chapters.map((chapter) => chapter.wordCount).filter((value) => value > 0);
+    const coverage = chapters.length > 0 ? runs.length / chapters.length : 0;
+    const duplicateCount = Math.max(0, chapters.length - new Set(
+      chapters
+        .map((chapter) => chapter.normalizedSnippet)
+        .filter((snippet) => snippet.length > 0),
+    ).size);
+    const duplicateRatio = chapters.length > 0 ? duplicateCount / chapters.length : 0;
+    const variation = coefficientOfVariation(chapterWordCounts);
+    const hookCount = normalizeEvaluateText(pendingHooks?.content, 1000)
+      .split(/[\n•\-]/u)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 3)
+      .length;
+    const dimensions: AssistantEvaluateDimensions = {
+      mainline: clampSerializableScore(58 + (storyBible ? 18 : -10) + (volumeOutline ? 10 : 0) + coverage * 12 - failedRuns * 8),
+      character: clampSerializableScore(56 + (characterMatrix ? 18 : -10) + Math.min(12, chapters.length * 2) - failedRuns * 5),
+      foreshadowing: clampSerializableScore(52 + (pendingHooks ? 24 : -6) + Math.min(10, hookCount * 2) - Math.max(0, hookCount - 5) * 4),
+      repetition: clampSerializableScore(88 - duplicateRatio * 55 - unchangedRuns * 4),
+      style: clampSerializableScore(72 + Math.max(0, 10 - Math.abs(variation - 0.22) * 60) - failedRuns * 4),
+      pacing: clampSerializableScore(70 + coverage * 12 - Math.max(0, variation - 0.45) * 30 - unchangedRuns * 3),
+    };
+    const dimensionValues = Object.values(dimensions).filter((value): value is number => value !== undefined);
+    const overallScore = clampSerializableScore(
+      dimensionValues.length > 0
+        ? dimensionValues.reduce((sum, value) => sum + value, 0) / dimensionValues.length
+        : 0,
+    );
+    const seenSnippets = new Set<string>();
+    const repeatedChapter = chapters.find((chapter) => {
+      if (!chapter.normalizedSnippet) return false;
+      if (seenSnippets.has(chapter.normalizedSnippet)) {
+        return true;
+      }
+      seenSnippets.add(chapter.normalizedSnippet);
+      return false;
+    }) ?? null;
+    const lastChapter = chapters.at(-1);
+    const evidence: AssistantEvaluateEvidence[] = [
+      {
+        source: storyBible ? `book-story:${scope.bookId}:story_bible.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(storyBible?.content ?? chapters[0]?.snippet ?? "暂无主线材料。"),
+        reason: storyBible
+          ? `主线评估基于 story_bible.md，并结合 ${chapters.length} 章的章节覆盖率 ${Math.round(coverage * 100)}%。`
+          : "缺少 story_bible.md，主线分数退回到章节片段估算。",
+      },
+      {
+        source: characterMatrix ? `book-story:${scope.bookId}:character_matrix.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(characterMatrix?.content ?? chapters.at(-1)?.snippet ?? "暂无角色矩阵材料。"),
+        reason: characterMatrix
+          ? "角色评分优先依据 character_matrix.md，并用章节样本校验人物行动是否持续出现。"
+          : "缺少角色矩阵，仅能从章节正文推断角色连贯性。",
+      },
+      {
+        source: pendingHooks ? `book-story:${scope.bookId}:pending_hooks.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(pendingHooks?.content ?? chapters[Math.max(0, Math.floor(chapters.length / 2))]?.snippet ?? "暂无伏笔材料。"),
+        reason: pendingHooks
+          ? `伏笔评分依据 pending_hooks.md 中识别出的 ${hookCount} 条钩子项。`
+          : "缺少 pending_hooks.md，伏笔分数按正文估算。",
+      },
+      {
+        source: repeatedChapter ? `book-chapter:${scope.bookId}:${repeatedChapter.chapter}` : `book:${scope.bookId}:chapters`,
+        excerpt: repeatedChapter?.snippet ?? "章节片段重复率较低。",
+        reason: duplicateCount > 0
+          ? `检测到 ${duplicateCount} 章存在高重复片段，重复度评分已下调。`
+          : "章节片段重复率较低，重复度评分保持稳定。",
+      },
+      {
+        source: chapters[0] ? `book-chapter:${scope.bookId}:${chapters[0].chapter}` : `book:${scope.bookId}`,
+        excerpt: chapters[0]?.snippet ?? "暂无章节风格样本。",
+        reason: `风格评分结合章节字数波动系数 ${variation.toFixed(2)} 与 ${appliedRuns} 次已应用修订结果。`,
+      },
+      {
+        source: lastChapter ? `book-chapter:${scope.bookId}:${lastChapter.chapter}` : `book:${scope.bookId}`,
+        excerpt: lastChapter?.snippet ?? "暂无节奏样本。",
+        reason: `节奏评分结合 ${chapters.length} 章样本、${runs.length} 条最新运行记录与章节长度离散度。`,
+      },
+    ];
+    const blockingIssues = [
+      ...(!storyBible ? ["缺少全书主线基线（story_bible.md），全书评估可信度受限。"] : []),
+      ...(!characterMatrix ? ["缺少角色矩阵（character_matrix.md），角色线难以校验。"] : []),
+      ...(hookCount > 6 ? [`待回收伏笔较多（${hookCount} 条），建议先梳理 pending_hooks.md。`] : []),
+      ...(duplicateRatio >= 0.25 ? [`章节片段重复率约 ${Math.round(duplicateRatio * 100)}%，建议去重并拉开桥段差异。`] : []),
+      ...(failedRuns > 0 ? [`最新章节运行中有 ${failedRuns} 条失败记录，需先处理阻断问题。`] : []),
+    ];
+    return {
+      scopeType: "book",
+      overallScore,
+      dimensions,
+      blockingIssues,
+      evidence: evidence.slice(0, 6),
+    };
+  }
+
+  async function deriveAssistantBookEvaluateReport(
+    scope: AssistantEvaluateScopeBook,
+    runIds: ReadonlyArray<string>,
+  ): Promise<AssistantEvaluateReport> {
+    const storySources = (await Promise.all([
+      loadAssistantBookEvaluateSource(scope.bookId, "story_bible.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "volume_outline.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "character_matrix.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "pending_hooks.md"),
+    ])).flatMap((item) => item ? [item] : []);
+    const chapters = await loadAssistantBookEvaluateChapterSamples({
+      bookId: scope.bookId,
+      ...(runIds.length > 0 ? { runIds } : {}),
+    });
+    if (chapters.length === 0 && storySources.length === 0) {
+      return {
+        scopeType: "book",
+        overallScore: 0,
+        dimensions: {
+          mainline: 0,
+          character: 0,
+          foreshadowing: 0,
+          repetition: 0,
+          style: 0,
+          pacing: 0,
+        },
+        blockingIssues: ["当前书籍暂无可用于全书评估的章节或故事材料。"],
+        evidence: [buildAssistantEvaluateFallbackEvidence(scope)],
+      };
+    }
+    const cacheKey = buildAssistantBookEvaluateCacheKey({ storySources, chapters });
+    const existingMemory = runIds.length === 0
+      ? await assistantMemoryService.readMemory("book", { bookId: scope.bookId })
+      : { memory: null };
+    const existingData = existingMemory.memory?.data;
+    const qualitySnapshots = existingData && typeof existingData === "object" && !Array.isArray(existingData)
+      ? (existingData as Record<string, unknown>)["qualitySnapshots"]
+      : null;
+    const bookSnapshot = qualitySnapshots && typeof qualitySnapshots === "object" && !Array.isArray(qualitySnapshots)
+      ? (qualitySnapshots as Record<string, unknown>)["book"]
+      : null;
+    if (runIds.length === 0 && bookSnapshot && typeof bookSnapshot === "object" && !Array.isArray(bookSnapshot)) {
+      const cachedKey = typeof (bookSnapshot as Record<string, unknown>)["cacheKey"] === "string"
+        ? (bookSnapshot as Record<string, unknown>)["cacheKey"] as string
+        : "";
+      const cachedReport = normalizeAssistantEvaluateReport((bookSnapshot as Record<string, unknown>)["report"]);
+      if (cachedKey === cacheKey && cachedReport) {
+        return { ...cachedReport, cached: true };
+      }
+    }
+    const report = deriveBookAssistantEvaluateReport(scope, chapters, storySources);
+    if (runIds.length === 0) {
+      const previousData = existingData && typeof existingData === "object" && !Array.isArray(existingData)
+        ? existingData as Record<string, unknown>
+        : {};
+      const previousSnapshots = previousData["qualitySnapshots"] && typeof previousData["qualitySnapshots"] === "object" && !Array.isArray(previousData["qualitySnapshots"])
+        ? previousData["qualitySnapshots"] as Record<string, unknown>
+        : {};
+      await assistantMemoryService.writeMemory("book", {
+        ...previousData,
+        qualitySnapshots: {
+          ...previousSnapshots,
+          book: {
+            cacheKey,
+            report,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      }, { bookId: scope.bookId });
+    }
+    return report;
+  }
+
+  async function deriveAssistantEvaluateReport(
+    runs: ReadonlyArray<ChapterRunRecord>,
+    scope: AssistantEvaluateScope,
+    runIds: ReadonlyArray<string>,
+  ): Promise<AssistantEvaluateReport> {
+    if (scope.type === "book") {
+      return await deriveAssistantBookEvaluateReport(scope, runIds);
+    }
+    return deriveChapterAssistantEvaluateReport(runs, scope);
+  }
   function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
     for (const event of [...run.events].reverse()) {
       if (event.type !== "success" && event.type !== "fail") continue;
@@ -2714,6 +3256,138 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
     }
     return null;
+  }
+
+  function clampParallelCandidates(value: number | undefined): number {
+    if (!Number.isFinite(value)) return 1;
+    return Math.max(1, Math.min(3, Math.trunc(value ?? 1)));
+  }
+
+  function buildAssistantCandidateSnapshot(
+    nodeId: string,
+    index: number,
+    run: ChapterRunRecord,
+    scope: AssistantEvaluateScope,
+  ): AssistantTaskCandidateSnapshot {
+    const report = deriveChapterAssistantEvaluateReport(
+      [run],
+      scope.type === "chapter"
+        ? scope
+        : { type: "chapter", bookId: scope.bookId, chapter: run.chapter },
+    );
+    const candidateRevision = extractCandidateRevision(run);
+    const diff = parseDiffData(run);
+    return {
+      candidateId: `${nodeId}:c${index + 1}`,
+      runId: run.runId,
+      score: report.overallScore,
+      status: run.status === "failed" ? "failed" : "succeeded",
+      ...(run.decision !== undefined ? { decision: run.decision } : {}),
+      excerpt: (candidateRevision?.content ?? diff.afterContent ?? run.unchangedReason ?? run.error ?? `${run.actionType} ${run.status}`).slice(0, 240),
+      evidence: report.evidence.slice(0, 3),
+      pendingApproval: diff.pendingApproval,
+      ...(run.error ? { error: run.error } : {}),
+      ...(candidateRevision ? { candidateRevision } : {}),
+    };
+  }
+
+  function pickWinningAssistantCandidate(
+    candidates: ReadonlyArray<AssistantTaskCandidateSnapshot>,
+  ): AssistantTaskCandidateSnapshot | null {
+    const ranked = [...candidates]
+      .filter((candidate) => candidate.status === "succeeded")
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return left.candidateId.localeCompare(right.candidateId);
+      });
+    return ranked[0] ?? null;
+  }
+
+  function updateAssistantTaskNodeCandidateDecision(
+    taskId: string,
+    nodeId: string,
+    candidateDecision: AssistantCandidateDecisionSnapshot,
+    options?: {
+      readonly nodeStatus?: TaskNodeStatus;
+      readonly awaitingApproval?: AssistantTaskAwaitingApproval | null;
+      readonly error?: string;
+    },
+  ): void {
+    const previous = assistantTaskSnapshots.get(taskId);
+    if (!previous) {
+      return;
+    }
+    const previousNode = previous.nodes?.[nodeId];
+    const nextNodes = {
+      ...(previous.nodes ?? {}),
+      [nodeId]: {
+        nodeId,
+        type: previousNode?.type ?? "task",
+        ...(previousNode?.action ? { action: previousNode.action } : {}),
+        ...(previousNode?.runId ? { runId: previousNode.runId } : {}),
+        status: options?.nodeStatus ?? previousNode?.status ?? "running",
+        parallelCandidates: candidateDecision.candidates.length,
+        attempts: previousNode?.attempts ?? 1,
+        maxRetries: previousNode?.maxRetries ?? 0,
+        ...(previousNode?.startedAt ? { startedAt: previousNode.startedAt } : {}),
+        ...(previousNode?.finishedAt ? { finishedAt: previousNode.finishedAt } : {}),
+        ...(previousNode?.error ? { error: previousNode.error } : {}),
+        ...(previousNode?.checkpoint ? { checkpoint: previousNode.checkpoint } : {}),
+        candidateDecision,
+      } satisfies AssistantTaskNodeSnapshot,
+    };
+    assistantTaskSnapshots.set(taskId, {
+      ...previous,
+      status: "running",
+      currentStepId: nodeId,
+      nodes: nextNodes,
+      lastUpdatedAt: new Date().toISOString(),
+      ...(options?.error ? { error: options.error } : previous.error ? { error: previous.error } : {}),
+      ...(options?.awaitingApproval === undefined
+        ? previous.awaitingApproval ? { awaitingApproval: previous.awaitingApproval } : {}
+        : options.awaitingApproval ? { awaitingApproval: options.awaitingApproval } : {}),
+    });
+    scheduleAssistantTaskSnapshotPersistence();
+  }
+
+  async function approveAssistantCandidateRun(
+    bookId: string,
+    runId: string,
+    message: string,
+  ): Promise<void> {
+    const run = await chapterRunStore.getRun(bookId, runId);
+    if (!run) {
+      throw new Error(`Run ${runId} not found`);
+    }
+    if (run.status !== "succeeded" || run.decision !== "unchanged") {
+      return;
+    }
+    const candidate = extractCandidateRevision(run);
+    if (!candidate) {
+      return;
+    }
+    await applyApprovedCandidateRevision({
+      bookId,
+      chapterNumber: run.chapter,
+      candidate,
+    });
+    const diff = parseDiffData(run);
+    await completeChapterRun({
+      bookId,
+      runId,
+      status: "succeeded",
+      decision: "applied",
+      unchangedReason: null,
+      message,
+      data: {
+        beforeContent: diff.beforeContent,
+        afterContent: candidate.content,
+        briefTrace: diff.briefTrace,
+        approvedFromUnchangedRun: true,
+      },
+    });
   }
 
   function shouldSkipTruthFileUpdate(value: string | undefined): boolean {
@@ -4795,6 +5469,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
 
+    assistantTaskExecutionAutopilotLevels.set(taskId, policy.autopilot.level);
     ensureAssistantTaskSnapshot(taskId, sessionId, runtimeGraph);
     const runner = assistantConductor.runGraph(runtimeGraph, {
       sessionId,
@@ -4853,7 +5528,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const scopedRuns = runIds.length > 0
       ? listedRuns.filter((run) => runIds.includes(run.runId))
       : listedRuns;
-    const report = deriveAssistantEvaluateReport(scopedRuns, scope);
+    const report = await deriveAssistantEvaluateReport(scopedRuns, scope, runIds);
     const suggestedNextActions = report.blockingIssues.length > 0 || report.overallScore < 75
       ? ["spot-fix", "re-audit"]
       : ["write-next"];
@@ -5061,7 +5736,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const optimizeRuns = (
         await Promise.all(runIds.map(async (runId) => await chapterRunStore.getRun(scope.bookId, runId)))
       ).filter((item): item is ChapterRunRecord => item !== null);
-      const report = deriveAssistantEvaluateReport(optimizeRuns, scope);
+      const report = await deriveAssistantEvaluateReport(optimizeRuns, scope, runIds);
       const score = report.overallScore;
       const reachedTarget = score >= targetScore;
       const isLastIteration = iteration === maxIterations;
@@ -5157,6 +5832,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     await assistantTaskSnapshotHydration;
     const taskId = c.req.param("taskId");
     const nodeId = c.req.param("nodeId");
+    const requestBody = await c.req.json<unknown>().catch(() => null);
     const snapshot = assistantTaskSnapshots.get(taskId);
     if (!snapshot) {
       return c.json({
@@ -5165,6 +5841,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           message: "Assistant task was not found.",
         },
       }, 404);
+    }
+    if (snapshot.awaitingApproval?.type === "candidate-selection" && snapshot.awaitingApproval.nodeId === nodeId) {
+      const candidateId = typeof (requestBody as Record<string, unknown> | null)?.["candidateId"] === "string"
+        ? ((requestBody as Record<string, unknown>).candidateId as string).trim()
+        : "";
+      const candidates = snapshot.awaitingApproval.candidates ?? [];
+      if (!candidateId || !candidates.some((candidate) => candidate.candidateId === candidateId)) {
+        return c.json({
+          error: {
+            code: "ASSISTANT_CANDIDATE_SELECTION_INVALID",
+            message: "candidateId must reference one of the pending candidates.",
+            taskId,
+            nodeId,
+          },
+        }, 422);
+      }
+      const resolveCandidate = assistantCandidateApprovalResolvers.get(`${taskId}:${nodeId}`);
+      if (!resolveCandidate) {
+        return c.json({
+          error: {
+            code: "ASSISTANT_TASK_APPROVAL_UNAVAILABLE",
+            message: "Assistant candidate selection is not waiting for approval.",
+            taskId,
+            nodeId,
+          },
+        }, 409);
+      }
+      resolveCandidate(candidateId);
+      return c.json({
+        ok: true,
+        taskId,
+        nodeId,
+        candidateId,
+        ...summarizeAssistantTaskRun(taskId),
+      });
     }
     const approved = assistantConductor.approve(taskId, nodeId, "manual");
     if (!approved) {

@@ -873,8 +873,15 @@ describe("createStudioServer daemon lifecycle", () => {
 
   it("aggregates assistant evaluate report with serializable scores and traceable evidence", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
+    const storyDir = join(root, "books", "demo-book", "story");
     await mkdir(chapterDir, { recursive: true });
+    await mkdir(storyDir, { recursive: true });
     await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    await writeFile(join(chapterDir, "0004_demo.md"), "# 第4章\n林舟回到王城调查旧案。", "utf-8");
+    await writeFile(join(storyDir, "story_bible.md"), "主线：林舟追查王城阴谋。", "utf-8");
+    await writeFile(join(storyDir, "character_matrix.md"), "角色：林舟，动机是查明真相。", "utf-8");
+    await writeFile(join(storyDir, "pending_hooks.md"), "- 黑纹戒指来历未明\n- 内鬼身份待揭露", "utf-8");
+    await writeFile(join(storyDir, "volume_outline.md"), "第一卷：王城风暴。", "utf-8");
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -906,6 +913,7 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toMatchObject({
       taskId: "asst_t_eval_001",
       report: {
+        scopeType: "chapter",
         overallScore: expect.any(Number),
         dimensions: {
           continuity: expect.any(Number),
@@ -921,6 +929,69 @@ describe("createStudioServer daemon lifecycle", () => {
       },
       suggestedNextActions: expect.any(Array),
     });
+
+    const bookResponse = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_book_001",
+        scope: { type: "book", bookId: "demo-book" },
+      }),
+    });
+    expect(bookResponse.status).toBe(200);
+    await expect(bookResponse.json()).resolves.toMatchObject({
+      taskId: "asst_t_eval_book_001",
+      report: {
+        scopeType: "book",
+        overallScore: expect.any(Number),
+        dimensions: {
+          mainline: expect.any(Number),
+          character: expect.any(Number),
+          foreshadowing: expect.any(Number),
+          repetition: expect.any(Number),
+          style: expect.any(Number),
+          pacing: expect.any(Number),
+        },
+        evidence: expect.arrayContaining([
+          expect.objectContaining({
+            source: expect.stringContaining("story_bible"),
+            excerpt: expect.any(String),
+            reason: expect.any(String),
+          }),
+        ]),
+      },
+      suggestedNextActions: expect.any(Array),
+    });
+
+    const cachedBookResponse = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_book_002",
+        scope: { type: "book", bookId: "demo-book" },
+      }),
+    });
+    expect(cachedBookResponse.status).toBe(200);
+    const cachedBookPayload = await cachedBookResponse.json() as {
+      report: {
+        cached?: boolean;
+      };
+    };
+    expect(cachedBookPayload.report.cached).toBe(true);
+    const storedBookMemory = JSON.parse(await readFile(join(root, ".inkos", "books", "demo-book", "memory.json"), "utf-8")) as {
+      data?: {
+        qualitySnapshots?: {
+          book?: {
+            cacheKey?: string;
+            report?: {
+              scopeType?: string;
+            };
+          };
+        };
+      };
+    };
+    expect(storedBookMemory.data?.qualitySnapshots?.book?.cacheKey).toEqual(expect.any(String));
+    expect(storedBookMemory.data?.qualitySnapshots?.book?.report?.scopeType).toBe("book");
 
     const emptyResponse = await app.request("http://localhost/api/assistant/evaluate", {
       method: "POST",
@@ -1796,6 +1867,227 @@ describe("createStudioServer daemon lifecycle", () => {
       expect(payload.nodes?.cp1?.status).toBe("succeeded");
     });
     expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
+  });
+
+  it("auto-selects the highest-score parallel candidate and persists winner metadata", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    await writeFile(chapterPath, "# 第3章\n原文。", "utf-8");
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "Demo",
+        status: "draft",
+        wordCount: 1200,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+    reviseDraftMock
+      .mockImplementationOnce(async () => {
+        await writeFile(chapterPath, "# 第3章\n自动胜出候选。", "utf-8");
+        return {
+          chapterNumber: 3,
+          wordCount: 1300,
+          fixedIssues: ["improved"],
+          applied: true,
+          status: "ready-for-review",
+        };
+      })
+      .mockImplementationOnce(async () => ({
+        chapterNumber: 3,
+        wordCount: 1200,
+        fixedIssues: [],
+        applied: false,
+        status: "unchanged",
+        unchangedReason: "candidate kept for review",
+        reviewRequired: true,
+        candidateRevision: {
+          content: "候选稿：人工候选。",
+          wordCount: 1222,
+          updatedState: "(状态卡未更新)",
+          updatedLedger: "(账本未更新)",
+          updatedHooks: "(伏笔池未更新)",
+          status: "audit-failed",
+          auditIssues: ["[critical] 动机承接偏弱"],
+          lengthWarnings: [],
+        },
+      }));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_parallel_auto_001",
+        sessionId: "asst_s_parallel_auto_001",
+        autopilotLevel: "L3",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3, parallelCandidates: 2 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_parallel_auto_001");
+      const payload = await task.json() as {
+        status: string;
+        nodes?: Record<string, {
+          status: string;
+          parallelCandidates?: number;
+          candidateDecision?: {
+            mode: string;
+            status: string;
+            winnerCandidateId?: string;
+            winnerRunId?: string;
+            winnerScore?: number;
+            candidates: Array<{ runId: string; score: number }>;
+          };
+        }>;
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.nodes?.s1?.parallelCandidates).toBe(2);
+      expect(payload.nodes?.s1?.candidateDecision).toMatchObject({
+        mode: "auto",
+        status: "selected",
+        winnerCandidateId: "s1:c1",
+      });
+      expect(payload.nodes?.s1?.candidateDecision?.winnerRunId).toBeTruthy();
+      expect(payload.nodes?.s1?.candidateDecision?.winnerScore).toBeGreaterThan(0);
+      expect(payload.nodes?.s1?.candidateDecision?.candidates).toHaveLength(2);
+    });
+
+    await expect(readFile(chapterPath, "utf-8")).resolves.toContain("自动胜出候选");
+  });
+
+  it("waits for manual candidate selection and applies the chosen winner", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    await writeFile(chapterPath, "# 第3章\n原文。", "utf-8");
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "Demo",
+        status: "audit-failed",
+        wordCount: 1200,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+    reviseDraftMock
+      .mockImplementationOnce(async () => ({
+        chapterNumber: 3,
+        wordCount: 1200,
+        fixedIssues: [],
+        applied: false,
+        status: "unchanged",
+        unchangedReason: "candidate A",
+        reviewRequired: true,
+        candidateRevision: {
+          content: "候选稿：方案 A。",
+          wordCount: 1210,
+          updatedState: "(状态卡未更新)",
+          updatedLedger: "(账本未更新)",
+          updatedHooks: "(伏笔池未更新)",
+          status: "audit-failed",
+          auditIssues: ["[critical] 方案 A 风险"],
+          lengthWarnings: [],
+        },
+      }))
+      .mockImplementationOnce(async () => ({
+        chapterNumber: 3,
+        wordCount: 1200,
+        fixedIssues: [],
+        applied: false,
+        status: "unchanged",
+        unchangedReason: "candidate B",
+        reviewRequired: true,
+        candidateRevision: {
+          content: "候选稿：方案 B。",
+          wordCount: 1230,
+          updatedState: "(状态卡未更新)",
+          updatedLedger: "(账本未更新)",
+          updatedHooks: "(伏笔池未更新)",
+          status: "audit-failed",
+          auditIssues: ["[critical] 方案 B 风险"],
+          lengthWarnings: [],
+        },
+      }));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_parallel_manual_001",
+        sessionId: "asst_s_parallel_manual_001",
+        autopilotLevel: "L1",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3, parallelCandidates: 2 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_parallel_manual_001");
+      const payload = await task.json() as {
+        awaitingApproval?: { nodeId: string; type: string; candidates?: Array<{ candidateId: string }> };
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.awaitingApproval).toMatchObject({
+        nodeId: "s1",
+        type: "candidate-selection",
+      });
+      expect(payload.awaitingApproval?.candidates).toHaveLength(2);
+      expect(payload.nodes?.s1?.status).toBe("waiting_approval");
+    });
+
+    const approveResponse = await app.request("http://localhost/api/assistant/tasks/asst_t_parallel_manual_001/approve/s1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidateId: "s1:c2" }),
+    });
+    expect(approveResponse.status).toBe(200);
+    await expect(approveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      taskId: "asst_t_parallel_manual_001",
+      nodeId: "s1",
+      candidateId: "s1:c2",
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_parallel_manual_001");
+      const payload = await task.json() as {
+        status: string;
+        awaitingApproval?: unknown;
+        nodes?: Record<string, {
+          status: string;
+          candidateDecision?: { winnerCandidateId?: string; status: string };
+        }>;
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.awaitingApproval).toBeUndefined();
+      expect(payload.nodes?.s1?.candidateDecision).toMatchObject({
+        status: "selected",
+        winnerCandidateId: "s1:c2",
+      });
+    });
+
+    await expect(readFile(chapterPath, "utf-8")).resolves.toContain("候选稿：方案 B。");
   });
 
   it("inserts a manual checkpoint before low-risk execution in L0 mode", async () => {
