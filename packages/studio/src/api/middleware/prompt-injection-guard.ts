@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 const REQUEST_ID_CONTEXT_KEY = "assistantSecurityRequestId";
 const DEFAULT_INPUT_TARGETS = new Set(["prompt", "input", "instruction", "content", "message", "keyword", "objective", "$raw"]);
+const AUDIT_SUMMARY_PREVIEW_LENGTH = 96;
+const AUDIT_SUMMARY_DIGEST_LENGTH = 12;
 
 interface SecurityRule {
   readonly id: string;
@@ -187,9 +189,9 @@ function normalizeRequestId(input?: string | null): string {
 
 function summarizeContent(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
-  const preview = normalized.slice(0, 96);
-  const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
-  return `${preview}${normalized.length > 96 ? "…" : ""} [len=${normalized.length} sha256=${digest}]`;
+  const preview = normalized.slice(0, AUDIT_SUMMARY_PREVIEW_LENGTH);
+  const digest = createHash("sha256").update(normalized).digest("hex").slice(0, AUDIT_SUMMARY_DIGEST_LENGTH);
+  return `${preview}${normalized.length > AUDIT_SUMMARY_PREVIEW_LENGTH ? "…" : ""} [len=${normalized.length} sha256=${digest}]`;
 }
 
 function matchesRoute(rule: SecurityRule, route: string): boolean {
