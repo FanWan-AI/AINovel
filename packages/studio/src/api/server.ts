@@ -58,6 +58,11 @@ import {
   validateSteeringPrefsInput,
 } from "./services/chapter-steering-service.js";
 import {
+  ASSISTANT_MARKET_MEMORY_TTL_MS,
+  createAssistantMemoryService,
+  type AssistantMemoryLayer,
+} from "./services/assistant-memory-service.js";
+import {
   validateRuntimeEventsQuery,
   RUNTIME_EVENTS_DEFAULT_LIMIT,
   RUNTIME_EVENTS_MAX_LIMIT,
@@ -75,6 +80,7 @@ import {
   type ChapterRunRecord,
 } from "./schemas/chapter-run-schema.js";
 import { ChapterRunStore, inferRunDecision } from "./lib/chapter-run-store.js";
+import { createPromptInjectionGuard } from "./middleware/prompt-injection-guard.js";
 import type {
   RuntimeEvent,
   RuntimeOverview,
@@ -1182,12 +1188,48 @@ function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dime
   };
 }
 
+const ASSISTANT_MEMORY_LAYERS = ["session", "book", "user", "market"] as const;
+
+function isAssistantMemoryLayer(value: string): value is AssistantMemoryLayer {
+  return (ASSISTANT_MEMORY_LAYERS as readonly string[]).includes(value);
+}
+
+function parseAssistantMemoryPayload(body: unknown): {
+  readonly data: unknown;
+  readonly summary?: string;
+  readonly bookId?: string;
+  readonly sessionId?: string;
+} | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  const payload = body as Record<string, unknown>;
+  return {
+    data: payload.data ?? null,
+    ...(typeof payload.summary === "string" ? { summary: payload.summary } : {}),
+    ...(typeof payload.bookId === "string" ? { bookId: payload.bookId } : {}),
+    ...(typeof payload.sessionId === "string" ? { sessionId: payload.sessionId } : {}),
+  };
+}
+
+function toAssistantMemoryWarning(message: string | undefined): { code: string; message: string } | undefined {
+  if (!message) {
+    return undefined;
+  }
+  return {
+    code: "ASSISTANT_MEMORY_DEGRADED",
+    message,
+  };
+}
+
 // --- Server factory ---
 
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
+  const promptInjectionGuard = createPromptInjectionGuard(root);
   const state = new StateManager(root);
   const chapterRunStore = new ChapterRunStore((bookId) => state.bookDir(bookId));
+  const assistantMemoryService = createAssistantMemoryService(root);
   let cachedConfig = initialConfig;
 
   // --- Runtime event log ---
@@ -1420,6 +1462,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   subscribers.add(runtimeLogHandler);
 
   app.use("/*", cors());
+  app.use("/api/assistant/*", promptInjectionGuard.middleware);
 
   // Structured error handler — ApiError returns typed JSON, others return 500
   app.onError((error, c) => {
@@ -1505,6 +1548,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return cleaned.slice(0, 220);
     } catch {
       return "";
+    }
+  }
+
+  async function refreshBookMemory(
+    bookId: string,
+    chapterNumber: number,
+    action: "write-next" | "revise",
+    details: Record<string, unknown>,
+    chapterSnippet?: string,
+  ): Promise<void> {
+    try {
+      await assistantMemoryService.updateBookMemory({
+        bookId,
+        chapterNumber,
+        action,
+        details,
+        chapterSnippet,
+      });
+    } catch {
+      // Memory sync failures must not interrupt the main pipeline flow.
     }
   }
 
@@ -2437,7 +2500,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     // Shared SSE callbacks used by all mode branches.
     type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
-    const onWriteComplete = (result: WriteResult): void => {
+    const onWriteComplete = async (result: WriteResult): Promise<void> => {
       emitActionEvent("compose", "success", {
         bookId: id,
         chapterNumber: result.chapterNumber,
@@ -2450,6 +2513,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         briefUsed,
         details: { status: result.status, title: result.title, wordCount: result.wordCount },
       });
+      // Returning the async chain here lets Promise.then adopt it, so memory sync stays ordered with the write result.
+      const chapterSnippet = await readLatestChapterSnippet(id, result.chapterNumber);
+      if (!chapterSnippet) {
+        return;
+      }
+      await refreshBookMemory(id, result.chapterNumber, "write-next", {
+        status: result.status,
+        title: result.title,
+        wordCount: result.wordCount,
+      }, chapterSnippet);
     };
     const onWriteError = (e: unknown): void => {
       const error = e instanceof Error ? e.message : String(e);
@@ -3163,6 +3236,93 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   });
 
+  app.get("/api/assistant/memory/:layer", async (c) => {
+    const layerParam = c.req.param("layer");
+    if (!isAssistantMemoryLayer(layerParam)) {
+      return c.json({ code: "ASSISTANT_MEMORY_LAYER_INVALID", error: `Unsupported memory layer: ${layerParam}` }, 404);
+    }
+
+    const layer = layerParam;
+    const bookId = c.req.query("bookId")?.trim();
+    const sessionId = c.req.query("sessionId")?.trim();
+    if (layer === "book" && (!bookId || !isSafeBookId(bookId))) {
+      return c.json({ code: "ASSISTANT_MEMORY_VALIDATION_FAILED", errors: [{ field: "bookId", message: "bookId must be a safe non-empty string" }] }, 422);
+    }
+    if (layer === "session" && !sessionId) {
+      return c.json({ code: "ASSISTANT_MEMORY_VALIDATION_FAILED", errors: [{ field: "sessionId", message: "sessionId is required for session memory" }] }, 422);
+    }
+
+    if (layer === "market") {
+      const market = await assistantMemoryService.ensureMarketMemory(async () => {
+        const pipeline = new PipelineRunner(await buildPipelineConfig());
+        return await pipeline.runRadar();
+      });
+      return c.json({
+        ok: true,
+        layer,
+        memory: market.memory,
+        refreshed: market.refreshed,
+        stale: market.stale,
+        ...(toAssistantMemoryWarning(market.warning) ? { warning: toAssistantMemoryWarning(market.warning) } : {}),
+      });
+    }
+
+    const result = await assistantMemoryService.readMemory(layer, {
+      ...(bookId ? { bookId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    });
+    return c.json({
+      ok: true,
+      layer,
+      memory: result.memory,
+      ...(toAssistantMemoryWarning(result.warning) ? { warning: toAssistantMemoryWarning(result.warning) } : {}),
+    });
+  });
+
+  app.put("/api/assistant/memory/:layer", async (c) => {
+    const layerParam = c.req.param("layer");
+    if (!isAssistantMemoryLayer(layerParam)) {
+      return c.json({ code: "ASSISTANT_MEMORY_LAYER_INVALID", error: `Unsupported memory layer: ${layerParam}` }, 404);
+    }
+
+    const payload = parseAssistantMemoryPayload(await c.req.json<unknown>().catch(() => null));
+    if (!payload) {
+      return c.json({ code: "ASSISTANT_MEMORY_VALIDATION_FAILED", errors: [{ field: "body", message: "Request body must be a JSON object" }] }, 422);
+    }
+    if (layerParam === "book" && (!payload.bookId || !isSafeBookId(payload.bookId))) {
+      return c.json({ code: "ASSISTANT_MEMORY_VALIDATION_FAILED", errors: [{ field: "bookId", message: "bookId must be a safe non-empty string" }] }, 422);
+    }
+    if (layerParam === "session" && !payload.sessionId) {
+      return c.json({ code: "ASSISTANT_MEMORY_VALIDATION_FAILED", errors: [{ field: "sessionId", message: "sessionId is required for session memory" }] }, 422);
+    }
+
+    const result = await assistantMemoryService.writeMemory(
+      layerParam,
+      payload.data,
+      {
+        ...(payload.bookId ? { bookId: payload.bookId } : {}),
+        ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+      },
+      {
+        ...(payload.summary ? { summary: payload.summary } : {}),
+        ...(layerParam === "market"
+          ? { expiresAt: new Date(Date.now() + ASSISTANT_MARKET_MEMORY_TTL_MS).toISOString() }
+          : {}),
+      },
+    );
+
+    if (!result.memory && result.warning) {
+      return c.json({ code: "ASSISTANT_MEMORY_WRITE_FAILED", error: result.warning }, 500);
+    }
+
+    return c.json({
+      ok: true,
+      layer: layerParam,
+      memory: result.memory,
+      ...(toAssistantMemoryWarning(result.warning) ? { warning: toAssistantMemoryWarning(result.warning) } : {}),
+    });
+  });
+
   app.post("/api/assistant/chat", async (c) => {
     const body = await c.req.json<unknown>().catch(() => null);
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -3175,6 +3335,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
     const scopeBookTitles = Array.isArray(payload.scopeBookTitles)
       ? (payload.scopeBookTitles as unknown[]).filter((t): t is string => typeof t === "string")
+      : [];
+    const scopeBookIds = Array.isArray(payload.scopeBookIds)
+      ? (payload.scopeBookIds as unknown[]).filter((value): value is string => typeof value === "string" && isSafeBookId(value))
       : [];
     if (!prompt) {
       return c.json({
@@ -3205,7 +3368,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const scopeHint = scopeBookTitles.length > 0
       ? `\n\n当前对话聚焦的书籍：${scopeBookTitles.join("、")}。若用户未明确切换书籍，优先基于这些书籍回答并执行。`
       : "";
-    const agentPrompt = `${prompt}${scopeHint}`;
+    const memoryContext = await assistantMemoryService.buildAgentContext(scopeBookIds);
+    const memoryPrompt = memoryContext.promptBlock.trim();
+    const agentPrompt = [
+      memoryPrompt ? `【记忆上下文】\n${memoryPrompt}` : "",
+      `${prompt}${scopeHint}`,
+    ]
+      .filter((section) => section.length > 0)
+      .join("\n\n");
 
     return streamSSE(c, async (stream) => {
       let clientAborted = false;
@@ -3263,8 +3433,25 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           },
         );
 
-  const rawResponse = result || lastResponse || "处理完成。";
-  const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        const rawResponse = result || lastResponse || "处理完成。";
+        const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        const outputDecision = await promptInjectionGuard.inspectOutput({
+          route: c.req.path,
+          requestId: promptInjectionGuard.getRequestId(c),
+          content: finalResponse,
+        });
+        if (outputDecision) {
+          await queueSSE("assistant:done", {
+            ok: false,
+            error: outputDecision.message,
+            code: outputDecision.code,
+            reason: outputDecision.reason,
+            requestId: outputDecision.requestId,
+            rule: outputDecision.ruleId,
+          });
+          broadcast("agent:error", { instruction: prompt, error: outputDecision.message, requestId: outputDecision.requestId });
+          return;
+        }
         await queueSSE("assistant:done", { ok: true, response: finalResponse });
         broadcast("agent:complete", { instruction: prompt, response: finalResponse });
       } catch (e) {
@@ -4441,6 +4628,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               ...(candidateRevision ? { candidateRevision } : {}),
             },
           });
+          if (typeof afterContent === "string" && afterContent.trim().length > 0) {
+            await refreshBookMemory(id, chapterNum, "revise", {
+              mode: reviseMode,
+              decision,
+              fixedCount: result.fixedIssues.length,
+              status: result.status,
+            }, afterContent);
+          }
         },
         async (e) => {
           const error = e instanceof Error ? e.message : String(e);
@@ -5281,6 +5476,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
       const result = await pipeline.runRadar();
+      await assistantMemoryService.writeMemory(
+        "market",
+        result,
+        {},
+        { expiresAt: new Date(Date.now() + ASSISTANT_MARKET_MEMORY_TTL_MS).toISOString() },
+      );
       broadcast("radar:complete", { result });
       return c.json(result);
     } catch (e) {
