@@ -10,7 +10,11 @@ import {
   type AssistantOperatorParseResult,
 } from "../api/services/assistant-command-parser";
 import { TaskPlanCard } from "../components/assistant/TaskPlanCard";
-import { QualityReportCard, type QualityReportPayload } from "../components/assistant/QualityReportCard";
+import {
+  QualityReportCard,
+  type QualityReportBundle,
+  type QualityReportPayload,
+} from "../components/assistant/QualityReportCard";
 import {
   WorldConsistencyMarketCard,
   type AssistantWorldConsistencyMarketReport,
@@ -39,7 +43,7 @@ export interface AssistantComposerState {
   readonly nextMessageId: number;
   readonly taskPlan: AssistantTaskPlan | null;
   readonly taskExecution: AssistantTaskExecution | null;
-  readonly qualityReport: QualityReportPayload | null;
+  readonly qualityReport: QualityReportBundle | null;
   readonly worldConsistencyReport: AssistantWorldConsistencyMarketReport | null;
   readonly suggestedNextActions: ReadonlyArray<string>;
   readonly operatorSession: AssistantOperatorSession;
@@ -1789,6 +1793,19 @@ export function collectAssistantStepRunIds(stepRunIds: Record<string, string> | 
   }, []);
 }
 
+function mergeAssistantSuggestedNextActions(
+  ...groups: ReadonlyArray<ReadonlyArray<string>>
+): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  groups.flat().forEach((action) => {
+    if (!action || seen.has(action)) return;
+    seen.add(action);
+    merged.push(action);
+  });
+  return merged;
+}
+
 function buildAssistantAgentInstruction(
   prompt: string,
   selectedBookTitles: ReadonlyArray<string>,
@@ -2359,19 +2376,11 @@ export function AssistantView({
     }
     evaluatedTaskIdRef.current = state.taskExecution.taskId;
 
-    const scope = state.taskPlan.chapterNumber !== undefined
-      ? {
-          type: "chapter" as const,
-          bookId: state.taskPlan.targetBookIds[0] ?? "",
-          chapter: state.taskPlan.chapterNumber,
-        }
-      : {
-          type: "book" as const,
-          bookId: state.taskPlan.targetBookIds[0] ?? "",
-        };
-    if (!scope.bookId) {
+    const bookId = state.taskPlan.targetBookIds[0] ?? "";
+    if (!bookId) {
       return;
     }
+    const chapterNumber = state.taskPlan.chapterNumber;
     const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
     const taskId = state.taskExecution.taskId;
     const applySuggestedNextActions = (
@@ -2383,14 +2392,38 @@ export function AssistantView({
     });
     void (async () => {
       try {
-        const result = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-          taskId,
-          scope,
-          ...(runIds.length > 0 ? { runIds } : {}),
-        });
+        const [chapterResult, bookResult] = await Promise.all([
+          chapterNumber !== undefined
+            ? postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+                taskId,
+                scope: {
+                  type: "chapter" as const,
+                  bookId,
+                  chapter: chapterNumber,
+                },
+                ...(runIds.length > 0 ? { runIds } : {}),
+              })
+            : Promise.resolve(null),
+          postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+            taskId,
+            scope: {
+              type: "book" as const,
+              bookId,
+            },
+          }),
+        ]);
+        const bookReport = bookResult.report;
+        const qualityReport: QualityReportBundle = {
+          ...(chapterResult?.report ? { chapter: chapterResult.report } : {}),
+          book: bookReport,
+        };
+        const suggestedNextActions = mergeAssistantSuggestedNextActions(
+          chapterResult?.suggestedNextActions ?? [],
+          bookResult.suggestedNextActions,
+        );
         setState((prev) => ({
-          ...applySuggestedNextActions(prev, result.suggestedNextActions),
-          qualityReport: result.report,
+          ...applySuggestedNextActions(prev, suggestedNextActions),
+          qualityReport,
         }));
       } catch {
         setState((prev) => {

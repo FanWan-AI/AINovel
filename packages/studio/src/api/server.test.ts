@@ -849,8 +849,15 @@ describe("createStudioServer daemon lifecycle", () => {
 
   it("aggregates assistant evaluate report with serializable scores and traceable evidence", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
+    const storyDir = join(root, "books", "demo-book", "story");
     await mkdir(chapterDir, { recursive: true });
+    await mkdir(storyDir, { recursive: true });
     await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n原文。", "utf-8");
+    await writeFile(join(chapterDir, "0004_demo.md"), "# 第4章\n林舟回到王城调查旧案。", "utf-8");
+    await writeFile(join(storyDir, "story_bible.md"), "主线：林舟追查王城阴谋。", "utf-8");
+    await writeFile(join(storyDir, "character_matrix.md"), "角色：林舟，动机是查明真相。", "utf-8");
+    await writeFile(join(storyDir, "pending_hooks.md"), "- 黑纹戒指来历未明\n- 内鬼身份待揭露", "utf-8");
+    await writeFile(join(storyDir, "volume_outline.md"), "第一卷：王城风暴。", "utf-8");
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -882,6 +889,7 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toMatchObject({
       taskId: "asst_t_eval_001",
       report: {
+        scopeType: "chapter",
         overallScore: expect.any(Number),
         dimensions: {
           continuity: expect.any(Number),
@@ -897,6 +905,69 @@ describe("createStudioServer daemon lifecycle", () => {
       },
       suggestedNextActions: expect.any(Array),
     });
+
+    const bookResponse = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_book_001",
+        scope: { type: "book", bookId: "demo-book" },
+      }),
+    });
+    expect(bookResponse.status).toBe(200);
+    await expect(bookResponse.json()).resolves.toMatchObject({
+      taskId: "asst_t_eval_book_001",
+      report: {
+        scopeType: "book",
+        overallScore: expect.any(Number),
+        dimensions: {
+          mainline: expect.any(Number),
+          character: expect.any(Number),
+          foreshadowing: expect.any(Number),
+          repetition: expect.any(Number),
+          style: expect.any(Number),
+          pacing: expect.any(Number),
+        },
+        evidence: expect.arrayContaining([
+          expect.objectContaining({
+            source: expect.stringContaining("story_bible"),
+            excerpt: expect.any(String),
+            reason: expect.any(String),
+          }),
+        ]),
+      },
+      suggestedNextActions: expect.any(Array),
+    });
+
+    const cachedBookResponse = await app.request("http://localhost/api/assistant/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_eval_book_002",
+        scope: { type: "book", bookId: "demo-book" },
+      }),
+    });
+    expect(cachedBookResponse.status).toBe(200);
+    const cachedBookPayload = await cachedBookResponse.json() as {
+      report: {
+        cached?: boolean;
+      };
+    };
+    expect(cachedBookPayload.report.cached).toBe(true);
+    const storedBookMemory = JSON.parse(await readFile(join(root, ".inkos", "books", "demo-book", "memory.json"), "utf-8")) as {
+      data?: {
+        qualitySnapshots?: {
+          book?: {
+            cacheKey?: string;
+            report?: {
+              scopeType?: string;
+            };
+          };
+        };
+      };
+    };
+    expect(storedBookMemory.data?.qualitySnapshots?.book?.cacheKey).toEqual(expect.any(String));
+    expect(storedBookMemory.data?.qualitySnapshots?.book?.report?.scopeType).toBe("book");
 
     const emptyResponse = await app.request("http://localhost/api/assistant/evaluate", {
       method: "POST",
