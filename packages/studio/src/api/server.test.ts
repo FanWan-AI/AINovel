@@ -819,7 +819,7 @@ describe("createStudioServer daemon lifecycle", () => {
     }
   });
 
-  it("routes assistant general chat through agent loop with conversational system prompt", async () => {
+  it("routes assistant general chat through agent loop with scoped prompt suffix", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -842,15 +842,10 @@ describe("createStudioServer daemon lifecycle", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(runAgentLoopMock).toHaveBeenCalledTimes(1);
-    // Verify it passes the custom system prompt with conversational rules
+    // Verify prompt carries scoped-book hint and callbacks are wired.
     const callArgs = runAgentLoopMock.mock.calls[0];
-    expect(callArgs[1]).toBe("帮我查看书籍状态");
-    expect(callArgs[2]).toHaveProperty("systemPrompt");
-    expect(callArgs[2].systemPrompt).toContain("禁止列出工具清单或能力清单");
-    expect(callArgs[2].systemPrompt).toContain("先理解，再行动");
-    expect(callArgs[2].systemPrompt).toContain("读与写严格分离");
-    expect(callArgs[2].systemPrompt).toContain("测试书");
-    // Verify streaming callbacks are passed
+    expect(callArgs[1]).toContain("帮我查看书籍状态");
+    expect(callArgs[1]).toContain("当前对话聚焦的书籍：测试书");
     expect(callArgs[2]).toHaveProperty("onToolCall");
     expect(callArgs[2]).toHaveProperty("onToolResult");
     expect(callArgs[2]).toHaveProperty("onMessage");

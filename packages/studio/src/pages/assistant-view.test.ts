@@ -232,7 +232,7 @@ describe("AssistantView", () => {
   });
 
   it("completes running task plans with succeeded/failed results", () => {
-    const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("请写下一章", ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 6000);
     const running = confirmAssistantPendingAction(pending, 6001);
 
@@ -252,7 +252,7 @@ describe("AssistantView", () => {
   });
 
   it("applies assistant step/done events into timeline and closes loading on completion", () => {
-    const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("请写下一章", ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 8000);
     const running = confirmAssistantPendingAction(pending, 8001);
     const withTask = { ...running, taskExecution: { taskId: "asst_t_01", sessionId: "asst_s_01", status: "running" as const, timeline: [], lastSyncedAt: 8001, nextSequence: 0 } };
@@ -276,7 +276,7 @@ describe("AssistantView", () => {
   });
 
   it("reconciles timeline from task snapshot when sse events are missing", () => {
-    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("审计第3章", ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9000);
     const running = confirmAssistantPendingAction(pending, 9001);
     const withTask = { ...running, taskExecution: { taskId: "asst_t_02", sessionId: "asst_s_02", status: "running" as const, timeline: [], lastSyncedAt: 9001, nextSequence: 0 } };
@@ -317,7 +317,7 @@ describe("AssistantView", () => {
   });
 
   it("maps suggested next actions to executable prompts", () => {
-    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("审计第3章", ["book-1"]);
     const state = requestAssistantConfirmation(createAssistantInitialState(), draft!, 10_000);
     expect(buildAssistantNextActionPrompt("spot-fix", state.taskPlan)).toContain("spot-fix");
     expect(buildAssistantNextActionPrompt("re-audit", state.taskPlan)).toContain("第3章");
@@ -326,7 +326,7 @@ describe("AssistantView", () => {
 
   it("returns template flywheel fallback action and renders one-click suggestion card", () => {
     const template = ASSISTANT_PROMPT_TEMPLATES[1]!;
-    const templateDraft = buildAssistantTemplateConfirmationDraft(template, "single", ["book-1"], ["book-1"]);
+    const templateDraft = buildAssistantTemplateConfirmationDraft(template, ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), templateDraft!, 10_100);
     const resolved = resolveAssistantTemplateSuggestedActions(pending.taskPlan, []);
     expect(resolved).toEqual([template.defaultNextAction]);
@@ -381,7 +381,7 @@ describe("AssistantView", () => {
   });
 
   it("recovers running task state from persisted payload and latest snapshot", () => {
-    const draft = buildAssistantConfirmationDraft("审计第3章", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("审计第3章", ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9100);
     const running = confirmAssistantPendingAction(pending, 9101);
     const recovered = recoverAssistantStateFromSnapshot(

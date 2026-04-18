@@ -2298,22 +2298,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const daemonError = (code: string, message: string) =>
     ({ error: { code, message } }) as const;
 
-  const buildSchedulerConfig = async (plan?: RunPlan) => {
+  const buildSchedulerConfig = async (_plan?: RunPlan) => {
     const currentConfig = await loadCurrentProjectConfig();
-    const schedule = plan?.schedule;
-    const writeCron = schedule?.everyMinutes ? `*/${Math.max(1, schedule.everyMinutes)} * * * *` : currentConfig.daemon.schedule.writeCron;
-    const cooldownAfterChapterMs = schedule?.cooldownSeconds !== undefined
-      ? Math.max(0, schedule.cooldownSeconds) * 1000
-      : currentConfig.daemon.cooldownAfterChapterMs;
-    const maxConcurrentBooks = plan?.maxConcurrentBooks ?? currentConfig.daemon.maxConcurrentBooks;
     return {
       ...(await buildPipelineConfig()),
       radarCron: currentConfig.daemon.schedule.radarCron,
-      writeCron,
-      maxConcurrentBooks,
+      writeCron: currentConfig.daemon.schedule.writeCron,
+      maxConcurrentBooks: currentConfig.daemon.maxConcurrentBooks,
       chaptersPerCycle: currentConfig.daemon.chaptersPerCycle,
       retryDelayMs: currentConfig.daemon.retryDelayMs,
-      cooldownAfterChapterMs,
+      cooldownAfterChapterMs: currentConfig.daemon.cooldownAfterChapterMs,
       maxChaptersPerDay: currentConfig.daemon.maxChaptersPerDay,
       onChapterComplete: (bookId: string, chapter: number, status: string) => {
         updateDaemonSession("running", {
@@ -2747,46 +2741,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     broadcast("agent:start", { instruction: prompt });
 
     const scopeHint = scopeBookTitles.length > 0
-      ? `\n当前对话聚焦的书籍：${scopeBookTitles.join("、")}。优先针对这些书籍回答和操作。`
+      ? `\n\n当前对话聚焦的书籍：${scopeBookTitles.join("、")}。若用户未明确切换书籍，优先基于这些书籍回答并执行。`
       : "";
-
-    const assistantSystemPrompt = `你是 InkOS Studio 的 AI 助手，正在和一位小说作者实时聊天。
-
-## 核心原则
-
-1. **先理解，再行动**。分析用户真实意图后才决定是否调用工具。
-2. **读与写严格分离**：
-   - "看看 / 怎么样 / 写的如何 / 评价一下" → **只读操作**。用 read_truth_files 或 get_book_status 获取信息，然后用自己的判断回答。绝对不要修改任何内容。
-   - "改一下 / 修一下 / 润色 / 重写 / 修订" → 写操作。调用 revise_chapter，但先告知用户你将修改内容。
-   - "审计 / 审一下 / 检查质量" → 调用 audit_chapter（只评不改）。
-   - "写下一章 / 继续写 / 续写" → 调用 write_draft。
-3. **回答简洁自然**。1-3 句为主，除非用户要求展开。
-4. **禁止连锁操作**。不要自动把 audit 的结果接上 revise，不要审完一章自动审下一章。每次只执行用户明确要求的那一个动作。
-5. **闲聊简短回应**。"你好"→回个问候，不要介绍功能列表。
-6. **不编造内容**。不确定就先调工具查，不要猜测章节内容或审计结果。
-7. **上下文不失忆**。如果对话中已明确“当前聚焦书籍”，除非用户明确要求切换书籍，否则禁止再次追问“你想操作哪本书”。
-
-## 意图判断指南
-
-| 用户说 | 意图 | 正确操作 |
-|--------|------|----------|
-| "看看第X章" / "第X章写的如何" / "评价一下" | 阅读+评价 | read_truth_files 获取章节摘要，结合自身判断给出评价。不调 audit，不调 revise |
-| "审计第X章" / "审一下" / "检查" | 质量审计 | audit_chapter（只评不改） |
-| "修一下" / "改改第X章" / "润色" | 修订 | revise_chapter |
-| "写下一章" / "继续写" | 续写 | write_draft |
-| "状态" / "进度" | 查询 | get_book_status |
-| "大纲" / "规划" | 生成/查看 | 视上下文：查看用 read_truth_files，生成用 plan_chapter |
-
-## 禁止事项
-
-- 用户说"看看"或"怎么样"时，禁止调用 audit_chapter 或 revise_chapter
-- 禁止自动连锁：审计完不要自动修订，修订完不要自动再审
-- write_draft 只能写最新章之后的下一章
-- 不要用 write_truth_file 改 current_state.md 的章节进度
-- 不要用 import_chapters 补单章
-- 禁止列出工具清单或能力清单
-- 若系统已提供“当前对话聚焦的书籍”，不要再要求用户重复确认书名（仅在用户主动切书或指令冲突时允许澄清）
-${scopeHint}`;
+    const agentPrompt = `${prompt}${scopeHint}`;
 
     return streamSSE(c, async (stream) => {
       let clientAborted = false;
@@ -2824,9 +2781,8 @@ ${scopeHint}`;
 
         const result = await runAgentLoop(
           await buildPipelineConfig(),
-          prompt,
+          agentPrompt,
           {
-            systemPrompt: assistantSystemPrompt,
             onToolCall: (name, args) => {
               const toolEvent = { type: "tool_call" as const, tool: name, args };
               void queueSSE("assistant:progress", toolEvent);
@@ -2869,12 +2825,15 @@ ${scopeHint}`;
       }, 422);
     }
     const payload = body as Record<string, unknown>;
-    const target = payload.target === "chapter" || payload.target === "run" ? payload.target : "";
+    const targetValue = payload.target;
+    const target: "chapter" | "run" | null = targetValue === "chapter" || targetValue === "run"
+      ? targetValue
+      : null;
     const bookId = typeof payload.bookId === "string" ? payload.bookId.trim() : "";
     const chapter = typeof payload.chapter === "number" ? payload.chapter : Number.NaN;
     const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
     const errors: Array<{ field: string; message: string }> = [];
-    if (target !== "chapter" && target !== "run") errors.push({ field: "target", message: "target must be chapter or run" });
+    if (!target) errors.push({ field: "target", message: "target must be chapter or run" });
     if (!bookId) errors.push({ field: "bookId", message: "bookId must be a non-empty string" });
     if (target === "chapter" && (!Number.isInteger(chapter) || chapter < 1)) {
       errors.push({ field: "chapter", message: "chapter must be a positive integer when target is chapter" });
@@ -2884,6 +2843,9 @@ ${scopeHint}`;
     }
     if (errors.length > 0) {
       return c.json({ code: "ASSISTANT_DELETE_PREVIEW_VALIDATION_FAILED", errors }, 422);
+    }
+    if (!target) {
+      return c.json({ code: "ASSISTANT_DELETE_PREVIEW_VALIDATION_FAILED", errors: [{ field: "target", message: "target must be chapter or run" }] }, 422);
     }
 
     let preview: AssistantCrudDeletePreview;
@@ -3671,7 +3633,13 @@ ${scopeHint}`;
     }
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
-      const report = await pipeline.inspectWorldConsistencyAndMarket(parsed.value.bookId);
+      const inspector = pipeline as unknown as {
+        inspectWorldConsistencyAndMarket?: (bookId: string) => Promise<unknown>;
+      };
+      if (typeof inspector.inspectWorldConsistencyAndMarket !== "function") {
+        return c.json({ error: "World report capability is unavailable in the current core runtime." }, 501);
+      }
+      const report = await inspector.inspectWorldConsistencyAndMarket(parsed.value.bookId);
       return c.json({
         bookId: parsed.value.bookId,
         report,
@@ -4071,7 +4039,9 @@ ${scopeHint}`;
       ).then(
         async (result) => {
           const decision = inferRunDecision("succeeded", result.applied);
-          const candidateRevision = result.candidateRevision;
+          const candidateRevision = (result as unknown as {
+            candidateRevision?: { content: string; status?: string };
+          }).candidateRevision;
           const afterContent = decision === "unchanged" && candidateRevision
             ? candidateRevision.content
             : await readChapterContentSnapshot(id, chapterNum);

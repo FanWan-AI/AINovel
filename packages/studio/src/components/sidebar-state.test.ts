@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildSystemSidebarItems } from "./Sidebar";
+import type { TFunction } from "../hooks/use-i18n";
 
 describe("buildSystemSidebarItems", () => {
-  const t = ((key: string) => key) as (key: "nav.assistant" | "nav.runtimeCenter" | "nav.running") => string;
+  const t = ((key: string) => key) as TFunction;
 
   it("only keeps assistant and runtime center in system section", () => {
     const items = buildSystemSidebarItems({
