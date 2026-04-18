@@ -17,6 +17,7 @@ import { ImportManager } from "./pages/ImportManager";
 import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
 import { AssistantView } from "./pages/AssistantView";
+import { ObservabilityDashboard } from "./pages/ObservabilityDashboard";
 import {
   SettingsView,
   type SettingsTab,
@@ -29,7 +30,7 @@ import { useTheme } from "./hooks/use-theme";
 import { useI18n } from "./hooks/use-i18n";
 import { postApi, useApi } from "./hooks/use-api";
 import { useCreateFlow } from "./hooks/use-create-flow";
-import { Sun, Moon, Bell, MessageSquare, Settings as SettingsIcon } from "lucide-react";
+import { Sun, Moon, Bell, MessageSquare, Settings as SettingsIcon, BarChart3 } from "lucide-react";
 import type { SSEMessage } from "./hooks/use-sse";
 
 export type Route =
@@ -48,6 +49,7 @@ export type Route =
   | { page: "daemon" }
   | { page: "logs" }
   | { page: "runtime-center" }
+  | { page: "observability" }
   | { page: "settings"; tab?: SettingsTab }
   | { page: "genres" }
   | { page: "style" }
@@ -129,6 +131,10 @@ export function mapRouteToActivePage(route: Route, activeBookId?: string): strin
 
   if (route.page === "settings" && route.tab === "genre") {
     return "genres";
+  }
+
+  if (route.page === "observability") {
+    return "runtime-center";
   }
 
   return route.page;
@@ -262,6 +268,7 @@ export function App() {
     toDaemon: () => setRoute(routeToRuntimeCenterFromLegacy("daemon")),
     toLogs: () => setRoute(routeToRuntimeCenterFromLegacy("logs")),
     toRuntimeCenter: () => setRoute({ page: "runtime-center" }),
+    toObservability: () => setRoute({ page: "observability" }),
     toSettings: () => setRoute({ page: "settings", tab: DEFAULT_SETTINGS_TAB }),
     toGenres: () => setRoute(routeToSettingsFromLegacy("genres")),
     toStyle: () => setRoute({ page: "style" }),
@@ -275,7 +282,7 @@ export function App() {
   const activeBookId = deriveActiveBookId(currentRoute);
   const activePage = mapRouteToActivePage(currentRoute, activeBookId);
   const contentContainerClass =
-    currentRoute.page === "truth"
+    currentRoute.page === "truth" || currentRoute.page === "observability"
       ? "max-w-[1400px] mx-auto px-4 py-8 md:px-6 lg:px-8 lg:py-10 fade-in"
       : "max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in";
   const notifications = useMemo(
@@ -441,20 +448,31 @@ export function App() {
               )}
             </div>
 
-            {headerQuickActions.map((action) => (
-              <button
+             {headerQuickActions.map((action) => (
+               <button
                 key={action.key}
                 onClick={action.onClick}
                 className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shadow-sm ${
                   action.active
                     ? "bg-primary text-primary-foreground shadow-primary/20"
-                    : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
+                 : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
                 }`}
                 title={action.key === "assistant" ? "Open AI Assistant" : "Open Settings"}
               >
                 {action.key === "assistant" ? <MessageSquare size={16} /> : <SettingsIcon size={16} />}
               </button>
             ))}
+            <button
+              onClick={nav.toObservability}
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shadow-sm ${
+                currentRoute.page === "observability"
+                  ? "bg-primary text-primary-foreground shadow-primary/20"
+                  : "bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10"
+              }`}
+              title="Open Observability Dashboard"
+            >
+              <BarChart3 size={16} />
+            </button>
           </div>
         </header>
 
@@ -490,6 +508,7 @@ export function App() {
             )}
             {currentRoute.page === "truth" && <TruthFiles bookId={currentRoute.bookId} nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "runtime-center" && <RuntimeCenter nav={nav} theme={theme} t={t} sse={sse} />}
+            {currentRoute.page === "observability" && <ObservabilityDashboard nav={nav} />}
             {currentRoute.page === "style" && <StyleManager nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "import" && <ImportManager nav={nav} theme={theme} t={t} />}
             {currentRoute.page === "radar" && <RadarView nav={nav} theme={theme} t={t} />}

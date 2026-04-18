@@ -812,6 +812,43 @@ interface AssistantOptimizeIteration {
   readonly reason?: string;
 }
 
+interface AssistantMetricsPoint {
+  readonly date: string;
+  readonly firstSuccessRate: number;
+  readonly autoFixSuccessRate: number;
+  readonly manualInterventionRate: number;
+  readonly averageChapterScore: number;
+  readonly tokenConsumption: number;
+  readonly activeTasks: number;
+}
+
+interface AssistantMetricsSummary {
+  readonly firstSuccessRate: number;
+  readonly autoFixSuccessRate: number;
+  readonly manualInterventionRate: number;
+  readonly averageChapterScore: number;
+  readonly tokenConsumption: number;
+  readonly activeTasks: number;
+}
+
+interface AssistantMetricsMeta {
+  readonly generatedAt: string;
+  readonly rangeDays: 7 | 30;
+  readonly taskSnapshotLimit: number;
+  readonly runLimitPerBook: number;
+  readonly totalRunLimit: number;
+  readonly booksScanned: number;
+  readonly tasksConsidered: number;
+  readonly runsConsidered: number;
+  readonly truncated: boolean;
+}
+
+interface AssistantMetricsResponse {
+  readonly series: ReadonlyArray<AssistantMetricsPoint>;
+  readonly summary: AssistantMetricsSummary;
+  readonly meta: AssistantMetricsMeta;
+}
+
 const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
@@ -831,6 +868,12 @@ const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
 const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
 const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|rewrite|revise|spot-fix|polish|rework|anti-detect/iu;
+const ASSISTANT_METRICS_DAY_RANGE_VALUES = [7, 30] as const;
+const ASSISTANT_METRICS_DEFAULT_DAY_RANGE = 7;
+const ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT = 400;
+const ASSISTANT_METRICS_BOOK_LIMIT = 40;
+const ASSISTANT_METRICS_RUN_LIMIT_PER_BOOK = 120;
+const ASSISTANT_METRICS_TOTAL_RUN_LIMIT = 1200;
 
 interface AssistantToolOutcome {
   readonly name: string;
@@ -2338,6 +2381,325 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       dimensions,
       blockingIssues,
       evidence,
+    };
+  }
+
+  function clampAssistantMetricsPercentage(numerator: number, denominator: number): number {
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round((numerator / denominator) * 1000) / 10));
+  }
+
+  function roundAssistantMetricsValue(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.round(value * 10) / 10;
+  }
+
+  function normalizeAssistantMetricsRange(
+    rawRange: string | undefined,
+  ): (typeof ASSISTANT_METRICS_DAY_RANGE_VALUES)[number] {
+    const parsed = Number.parseInt(rawRange ?? "", 10);
+    return parsed === 30 ? 30 : ASSISTANT_METRICS_DEFAULT_DAY_RANGE;
+  }
+
+  function buildAssistantMetricsDayKeys(
+    rangeDays: (typeof ASSISTANT_METRICS_DAY_RANGE_VALUES)[number],
+    now = Date.now(),
+  ): string[] {
+    const keys: string[] = [];
+    const end = new Date(now);
+    end.setUTCHours(0, 0, 0, 0);
+    for (let offset = rangeDays - 1; offset >= 0; offset -= 1) {
+      const day = new Date(end);
+      day.setUTCDate(end.getUTCDate() - offset);
+      keys.push(day.toISOString().slice(0, 10));
+    }
+    return keys;
+  }
+
+  function parseAssistantMetricsDayKey(timestamp: string | undefined | null): string | null {
+    if (!timestamp) {
+      return null;
+    }
+    const parsed = new Date(timestamp);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  function hasAssistantTaskManualIntervention(snapshot: AssistantTaskSnapshot): boolean {
+    if (snapshot.retryContext) {
+      const nextAction = snapshot.retryContext["nextAction"];
+      if (typeof nextAction === "string" && nextAction.toLowerCase().includes("manual")) {
+        return true;
+      }
+    }
+    return Object.values(snapshot.nodes ?? {}).some((node) =>
+      node.status === "waiting_approval" || node.type === "checkpoint");
+  }
+
+  function isAssistantTaskFirstSuccess(snapshot: AssistantTaskSnapshot): boolean {
+    if (snapshot.status !== "succeeded") {
+      return false;
+    }
+    const completedIterations = typeof snapshot.retryContext?.["completedIterations"] === "number"
+      ? snapshot.retryContext["completedIterations"]
+      : undefined;
+    if (completedIterations !== undefined && completedIterations > 1) {
+      return false;
+    }
+    const runIds = Array.isArray(snapshot.retryContext?.["runIds"])
+      ? snapshot.retryContext?.["runIds"].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    if (runIds.length > 1) {
+      return false;
+    }
+    return Object.values(snapshot.nodes ?? {}).every((node) => node.attempts <= 1);
+  }
+
+  function extractAssistantTokenConsumption(input: unknown, depth = 0): number {
+    if (!input || typeof input !== "object" || Array.isArray(input) || depth > 3) {
+      return 0;
+    }
+    const record = input as Record<string, unknown>;
+    const directFields = ["totalTokens", "tokenConsumption", "tokensConsumed", "spentTokens"] as const;
+    for (const field of directFields) {
+      const value = record[field];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        return value;
+      }
+    }
+    if (typeof record["spent"] === "number"
+      && Number.isFinite(record["spent"])
+      && record["spent"] >= 0
+      && record["currency"] === "tokens") {
+      return record["spent"];
+    }
+    const nestedKeys = ["usage", "tokenUsage", "budget", "metrics", "telemetry"] as const;
+    for (const key of nestedKeys) {
+      const nested = extractAssistantTokenConsumption(record[key], depth + 1);
+      if (nested > 0) {
+        return nested;
+      }
+    }
+    if (Array.isArray(record["iterations"])) {
+      const total = record["iterations"].reduce((sum, item) => sum + extractAssistantTokenConsumption(item, depth + 1), 0);
+      if (total > 0) {
+        return total;
+      }
+    }
+    return 0;
+  }
+
+  function buildAssistantMetricsSummary(
+    series: ReadonlyArray<AssistantMetricsPoint>,
+  ): AssistantMetricsSummary {
+    if (series.length === 0) {
+      return {
+        firstSuccessRate: 0,
+        autoFixSuccessRate: 0,
+        manualInterventionRate: 0,
+        averageChapterScore: 0,
+        tokenConsumption: 0,
+        activeTasks: 0,
+      };
+    }
+    const totals = series.reduce((acc, point) => ({
+      firstSuccessRate: acc.firstSuccessRate + point.firstSuccessRate,
+      autoFixSuccessRate: acc.autoFixSuccessRate + point.autoFixSuccessRate,
+      manualInterventionRate: acc.manualInterventionRate + point.manualInterventionRate,
+      averageChapterScore: acc.averageChapterScore + point.averageChapterScore,
+      tokenConsumption: acc.tokenConsumption + point.tokenConsumption,
+    }), {
+      firstSuccessRate: 0,
+      autoFixSuccessRate: 0,
+      manualInterventionRate: 0,
+      averageChapterScore: 0,
+      tokenConsumption: 0,
+    });
+    const latest = series[series.length - 1];
+    return {
+      firstSuccessRate: roundAssistantMetricsValue(totals.firstSuccessRate / series.length),
+      autoFixSuccessRate: roundAssistantMetricsValue(totals.autoFixSuccessRate / series.length),
+      manualInterventionRate: roundAssistantMetricsValue(totals.manualInterventionRate / series.length),
+      averageChapterScore: roundAssistantMetricsValue(totals.averageChapterScore / series.length),
+      tokenConsumption: roundAssistantMetricsValue(totals.tokenConsumption),
+      activeTasks: latest?.activeTasks ?? 0,
+    };
+  }
+
+  async function listAssistantMetricsBookIds(): Promise<string[]> {
+    try {
+      const entries = await readdir(join(root, "books"), { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort((left, right) => left.localeCompare(right, "zh-CN"))
+        .slice(0, ASSISTANT_METRICS_BOOK_LIMIT);
+    } catch {
+      return [];
+    }
+  }
+
+  async function buildAssistantMetricsResponse(
+    rangeDays: (typeof ASSISTANT_METRICS_DAY_RANGE_VALUES)[number],
+  ): Promise<AssistantMetricsResponse> {
+    const dayKeys = buildAssistantMetricsDayKeys(rangeDays);
+    const daySet = new Set(dayKeys);
+    const dayBuckets = new Map(dayKeys.map((dayKey) => [dayKey, {
+      firstSuccessNumerator: 0,
+      firstSuccessDenominator: 0,
+      autoFixNumerator: 0,
+      autoFixDenominator: 0,
+      manualInterventionCount: 0,
+      manualInterventionDenominator: 0,
+      chapterScoreTotal: 0,
+      chapterScoreCount: 0,
+      tokenConsumption: 0,
+      activeTasks: new Set<string>(),
+    }]));
+
+    await assistantTaskSnapshotHydration;
+
+    const recentSnapshots = [...assistantTaskSnapshots.values()]
+      .sort((left, right) => right.lastUpdatedAt.localeCompare(left.lastUpdatedAt))
+      .filter((snapshot) => {
+        const dayKey = parseAssistantMetricsDayKey(snapshot.lastUpdatedAt);
+        return dayKey !== null && daySet.has(dayKey);
+      })
+      .slice(0, ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT);
+
+    recentSnapshots.forEach((snapshot) => {
+      const dayKey = parseAssistantMetricsDayKey(snapshot.lastUpdatedAt);
+      if (!dayKey) {
+        return;
+      }
+      const bucket = dayBuckets.get(dayKey);
+      if (!bucket) {
+        return;
+      }
+      bucket.activeTasks.add(snapshot.taskId);
+      const tokenConsumption = extractAssistantTokenConsumption(snapshot.retryContext);
+      if (tokenConsumption > 0) {
+        bucket.tokenConsumption += tokenConsumption;
+      }
+      if (snapshot.status === "succeeded" || snapshot.status === "failed") {
+        bucket.firstSuccessDenominator += 1;
+        bucket.manualInterventionDenominator += 1;
+        if (isAssistantTaskFirstSuccess(snapshot)) {
+          bucket.firstSuccessNumerator += 1;
+        }
+        if (hasAssistantTaskManualIntervention(snapshot)) {
+          bucket.manualInterventionCount += 1;
+        }
+      }
+    });
+
+    const bookIds = await listAssistantMetricsBookIds();
+    let totalRunsConsidered = 0;
+    let runsTruncated = false;
+    for (const bookId of bookIds) {
+      if (totalRunsConsidered >= ASSISTANT_METRICS_TOTAL_RUN_LIMIT) {
+        runsTruncated = true;
+        break;
+      }
+      const runs = await chapterRunStore.listRuns(bookId, { limit: ASSISTANT_METRICS_RUN_LIMIT_PER_BOOK });
+      if (runs.length === ASSISTANT_METRICS_RUN_LIMIT_PER_BOOK) {
+        runsTruncated = true;
+      }
+      const dailyChapterRuns = new Map<string, Map<string, ChapterRunRecord[]>>();
+      for (const run of runs) {
+        if (totalRunsConsidered >= ASSISTANT_METRICS_TOTAL_RUN_LIMIT) {
+          runsTruncated = true;
+          break;
+        }
+        const dayKey = parseAssistantMetricsDayKey(run.finishedAt ?? run.startedAt);
+        if (!dayKey || !daySet.has(dayKey)) {
+          continue;
+        }
+        totalRunsConsidered += 1;
+        const bucket = dayBuckets.get(dayKey);
+        if (!bucket) {
+          continue;
+        }
+        bucket.autoFixDenominator += 1;
+        if (run.status === "succeeded" && run.decision === "applied") {
+          bucket.autoFixNumerator += 1;
+        }
+        const chaptersForDay = dailyChapterRuns.get(dayKey) ?? new Map<string, ChapterRunRecord[]>();
+        const chapterKey = `${run.bookId}:${run.chapter}`;
+        const chapterRuns = chaptersForDay.get(chapterKey) ?? [];
+        chapterRuns.push(run);
+        chaptersForDay.set(chapterKey, chapterRuns);
+        dailyChapterRuns.set(dayKey, chaptersForDay);
+      }
+      dailyChapterRuns.forEach((chaptersForDay, dayKey) => {
+        const bucket = dayBuckets.get(dayKey);
+        if (!bucket) {
+          return;
+        }
+        chaptersForDay.forEach((chapterRuns) => {
+          const score = deriveAssistantEvaluateReport(chapterRuns, {
+            type: "chapter",
+            bookId,
+            chapter: chapterRuns[0]?.chapter ?? 1,
+          }).overallScore;
+          bucket.chapterScoreTotal += score;
+          bucket.chapterScoreCount += 1;
+        });
+      });
+    }
+
+    const series = dayKeys.map((dayKey) => {
+      const bucket = dayBuckets.get(dayKey);
+      return {
+        date: dayKey,
+        firstSuccessRate: clampAssistantMetricsPercentage(
+          bucket?.firstSuccessNumerator ?? 0,
+          bucket?.firstSuccessDenominator ?? 0,
+        ),
+        autoFixSuccessRate: clampAssistantMetricsPercentage(
+          bucket?.autoFixNumerator ?? 0,
+          bucket?.autoFixDenominator ?? 0,
+        ),
+        manualInterventionRate: clampAssistantMetricsPercentage(
+          bucket?.manualInterventionCount ?? 0,
+          bucket?.manualInterventionDenominator ?? 0,
+        ),
+        averageChapterScore: roundAssistantMetricsValue(
+          (bucket?.chapterScoreCount ?? 0) > 0
+            ? (bucket?.chapterScoreTotal ?? 0) / (bucket?.chapterScoreCount ?? 1)
+            : 0,
+        ),
+        tokenConsumption: roundAssistantMetricsValue(bucket?.tokenConsumption ?? 0),
+        activeTasks: bucket?.activeTasks.size ?? 0,
+      } satisfies AssistantMetricsPoint;
+    }).filter((point) =>
+      point.firstSuccessRate > 0
+      || point.autoFixSuccessRate > 0
+      || point.manualInterventionRate > 0
+      || point.averageChapterScore > 0
+      || point.tokenConsumption > 0
+      || point.activeTasks > 0);
+
+    return {
+      series,
+      summary: buildAssistantMetricsSummary(series),
+      meta: {
+        generatedAt: new Date().toISOString(),
+        rangeDays,
+        taskSnapshotLimit: ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT,
+        runLimitPerBook: ASSISTANT_METRICS_RUN_LIMIT_PER_BOOK,
+        totalRunLimit: ASSISTANT_METRICS_TOTAL_RUN_LIMIT,
+        booksScanned: bookIds.length,
+        tasksConsidered: recentSnapshots.length,
+        runsConsidered: totalRunsConsidered,
+        truncated: recentSnapshots.length >= ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT || runsTruncated,
+      },
     };
   }
 
@@ -4837,8 +5199,38 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...(snapshot.currentStepId ? { currentStepId: snapshot.currentStepId } : {}),
         lastUpdatedAt: snapshot.lastUpdatedAt,
         ...(snapshot.error ? { error: snapshot.error } : {}),
-      }));
+    }));
     return c.json({ tasks });
+  });
+
+  app.get("/api/assistant/metrics", async (c) => {
+    try {
+      const rangeDays = normalizeAssistantMetricsRange(c.req.query("range"));
+      return c.json(await buildAssistantMetricsResponse(rangeDays));
+    } catch {
+      return c.json({
+        series: [],
+        summary: {
+          firstSuccessRate: 0,
+          autoFixSuccessRate: 0,
+          manualInterventionRate: 0,
+          averageChapterScore: 0,
+          tokenConsumption: 0,
+          activeTasks: 0,
+        },
+        meta: {
+          generatedAt: new Date().toISOString(),
+          rangeDays: normalizeAssistantMetricsRange(c.req.query("range")),
+          taskSnapshotLimit: ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT,
+          runLimitPerBook: ASSISTANT_METRICS_RUN_LIMIT_PER_BOOK,
+          totalRunLimit: ASSISTANT_METRICS_TOTAL_RUN_LIMIT,
+          booksScanned: 0,
+          tasksConsidered: 0,
+          runsConsidered: 0,
+          truncated: false,
+        },
+      } satisfies AssistantMetricsResponse);
+    }
   });
 
   app.get("/api/assistant/tasks/:taskId", async (c) => {
