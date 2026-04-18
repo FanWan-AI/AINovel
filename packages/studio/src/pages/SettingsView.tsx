@@ -15,7 +15,12 @@ export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writ
 
 interface SettingsTabDefinition {
   readonly key: SettingsTab;
-  readonly labelKey?: string;
+  readonly labelKey?:
+    | "settings.tab.locale"
+    | "settings.tab.provider"
+    | "settings.tab.genre"
+    | "settings.tab.appearance"
+    | "settings.tab.writing";
   readonly label?: string;
   readonly placeholderTitleKey:
     | "settings.placeholder.locale.title"
@@ -89,7 +94,7 @@ export function buildSettingsTabItems({
   const activeTab = normalizeSettingsTab(tab);
   return SETTINGS_TAB_DEFINITIONS.map((item) => ({
     key: item.key,
-    label: item.label ?? t(item.labelKey ?? ""),
+    label: item.label ?? t(item.labelKey!),
     active: item.key === activeTab,
     onClick: () => onTabChange(item.key),
   }));

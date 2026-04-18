@@ -295,10 +295,11 @@ function validateAssistantStrategyInput(raw: unknown): { ok: true; value: Assist
   }
 
   if (body.maxAutoFixIterations !== undefined) {
-    if (!Number.isInteger(body.maxAutoFixIterations) || body.maxAutoFixIterations < 1 || body.maxAutoFixIterations > 20) {
+    const maxAutoFixIterations = body.maxAutoFixIterations;
+    if (typeof maxAutoFixIterations !== "number" || !Number.isInteger(maxAutoFixIterations) || maxAutoFixIterations < 1 || maxAutoFixIterations > 20) {
       errors.push({ field: "maxAutoFixIterations", message: "maxAutoFixIterations must be an integer between 1 and 20." });
     } else {
-      result.maxAutoFixIterations = body.maxAutoFixIterations as number;
+      result.maxAutoFixIterations = maxAutoFixIterations;
     }
   }
 
