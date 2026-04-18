@@ -432,7 +432,11 @@ export class AssistantConductor {
       } catch (error) {
         const finishedAt = this.now();
         const message = toErrorMessage(error);
-        state.attempts += state.status === "running" ? 0 : 1;
+        // prepareNode failures happen before the attempt is counted, while execute()
+        // failures happen after we have already incremented attempts for this run.
+        if (state.status !== "running") {
+          state.attempts += 1;
+        }
         state.error = message;
         state.finishedAt = finishedAt;
         const hasRetryRemaining = state.attempts <= state.maxRetries;

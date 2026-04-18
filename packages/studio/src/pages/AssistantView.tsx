@@ -869,6 +869,9 @@ export function formatAssistantTimelineMessage(
     if (event === "assistant:step:success") {
       return `审批节点 ${payload.stepId ?? ""} 已批准`;
     }
+    if (event === "assistant:step:fail") {
+      return `审批节点 ${payload.stepId ?? ""} 失败${payload.error ? `：${payload.error}` : ""}`;
+    }
     return `审批节点 ${payload.stepId ?? ""} 失败${payload.error ? `：${payload.error}` : ""}`;
   }
   const stepText = payload.stepId ? `步骤 ${payload.stepId}` : "步骤";

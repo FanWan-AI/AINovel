@@ -1325,15 +1325,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const stepId = currentStepId;
-    const nodeStatus = parseAssistantTaskNodeStatus(payload.nodeStatus)
-      ?? (event === "assistant:step:start" ? "running" : event === "assistant:step:success" ? "succeeded" : "failed");
-    const stepStatus = event === "assistant:step:start"
-      ? "running"
-      : event === "assistant:step:success"
-        ? "succeeded"
-        : nodeStatus === "failed"
-          ? "failed"
-          : "running";
+    let nodeStatus = parseAssistantTaskNodeStatus(payload.nodeStatus);
+    if (!nodeStatus) {
+      if (event === "assistant:step:start") {
+        nodeStatus = "running";
+      } else if (event === "assistant:step:success") {
+        nodeStatus = "succeeded";
+      } else {
+        nodeStatus = "failed";
+      }
+    }
+    let stepStatus: AssistantTaskStepSnapshot["status"] = "running";
+    if (event === "assistant:step:success") {
+      stepStatus = "succeeded";
+    } else if (event === "assistant:step:fail" && nodeStatus === "failed") {
+      stepStatus = "failed";
+    }
     const previousStep = stepId ? previous?.steps?.[stepId] : undefined;
     const nextSteps = {
       ...(previous?.steps ?? {}),
