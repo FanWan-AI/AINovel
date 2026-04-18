@@ -15,7 +15,7 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative } from "node:path";
 import { isSafeBookId } from "./safety.js";
@@ -111,6 +111,7 @@ const NO_REVISIONS_APPLIED_MESSAGE = "No revisions were applied.";
 const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates.";
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
+const ASSISTANT_BOOK_EVALUATE_BATCH_SIZE = 12;
 const ASSISTANT_HIGH_RISK_APPROVAL_REASON = "High-risk actions require manual approval before execution.";
 const ASSISTANT_AUTOPILOT_BUDGET_PAUSED_CODE = "ASSISTANT_AUTOPILOT_BUDGET_PAUSED";
 const ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED_CODE = "ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED";
@@ -841,18 +842,27 @@ interface AssistantCrudDeleteRecoveryStore {
   readonly entries: AssistantCrudDeleteRecoveryEntry[];
 }
 
-interface AssistantEvaluateDimensions {
-  readonly continuity: number;
-  readonly readability: number;
-  readonly styleConsistency: number;
-  readonly aiTraceRisk: number;
-}
+type AssistantEvaluateDimensionKey =
+  | "continuity"
+  | "readability"
+  | "styleConsistency"
+  | "aiTraceRisk"
+  | "mainline"
+  | "character"
+  | "foreshadowing"
+  | "repetition"
+  | "style"
+  | "pacing";
+
+type AssistantEvaluateDimensions = Partial<Record<AssistantEvaluateDimensionKey, number>>;
 
 interface AssistantEvaluateReport {
+  readonly scopeType: "chapter" | "book";
   readonly overallScore: number;
   readonly dimensions: AssistantEvaluateDimensions;
   readonly blockingIssues: ReadonlyArray<string>;
   readonly evidence: ReadonlyArray<AssistantEvaluateEvidence>;
+  readonly cached?: boolean;
 }
 
 interface AssistantOptimizeIteration {
@@ -2443,21 +2453,74 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return Math.max(0, Math.min(100, Math.round(value)));
   }
 
-  function deriveAssistantEvaluateReport(
+  interface AssistantBookEvaluateChapterSample {
+    readonly chapter: number;
+    readonly fileName: string;
+    readonly snippet: string;
+    readonly wordCount: number;
+    readonly normalizedSnippet: string;
+    readonly latestRun: ChapterRunRecord | null;
+  }
+
+  interface AssistantBookEvaluateSourceText {
+    readonly fileName: string;
+    readonly content: string;
+    readonly size: number;
+    readonly updatedAtMs: number;
+  }
+
+  interface AssistantBookEvaluateInput {
+    readonly bookId: string;
+    readonly runIds?: ReadonlyArray<string>;
+  }
+
+  function normalizeEvaluateText(value: string | null | undefined, maxLength = 160): string {
+    return (value ?? "").replace(/\s+/gu, " ").trim().slice(0, maxLength);
+  }
+
+  function mean(values: ReadonlyArray<number>): number {
+    if (values.length === 0) return 0;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  function coefficientOfVariation(values: ReadonlyArray<number>): number {
+    if (values.length < 2) return 0;
+    const average = mean(values);
+    if (average <= 0) return 0;
+    const variance = values.reduce((sum, value) => sum + ((value - average) ** 2), 0) / values.length;
+    return Math.sqrt(variance) / average;
+  }
+
+  function buildAssistantEvaluateFallbackEvidence(scope: AssistantEvaluateScope): AssistantEvaluateEvidence {
+    const fallbackSource = scope.type === "chapter"
+      ? `chapter:${scope.bookId}:${scope.chapter}`
+      : `book:${scope.bookId}`;
+    return {
+      source: fallbackSource,
+      excerpt: "暂无运行证据，使用范围级摘要作为最小可追溯证据。",
+      reason: "当前评估未检索到可用 run 数据",
+    };
+  }
+
+  function deriveChapterAssistantEvaluateReport(
     runs: ReadonlyArray<ChapterRunRecord>,
     scope: AssistantEvaluateScope,
   ): AssistantEvaluateReport {
     const failedRuns = runs.filter((run) => run.status === "failed");
     const unchangedRuns = runs.filter((run) => run.decision === "unchanged");
     const appliedRuns = runs.filter((run) => run.decision === "applied");
+    const continuity = clampSerializableScore(85 - failedRuns.length * 25 - unchangedRuns.length * 8 + appliedRuns.length * 2);
+    const readability = clampSerializableScore(82 - failedRuns.length * 18 - unchangedRuns.length * 5 + appliedRuns.length * 2);
+    const styleConsistency = clampSerializableScore(80 - failedRuns.length * 15 - unchangedRuns.length * 6 + appliedRuns.length * 2);
+    const aiTraceRisk = clampSerializableScore(78 - failedRuns.length * 20 - unchangedRuns.length * 7 + appliedRuns.length);
     const dimensions: AssistantEvaluateDimensions = {
-      continuity: clampSerializableScore(85 - failedRuns.length * 25 - unchangedRuns.length * 8 + appliedRuns.length * 2),
-      readability: clampSerializableScore(82 - failedRuns.length * 18 - unchangedRuns.length * 5 + appliedRuns.length * 2),
-      styleConsistency: clampSerializableScore(80 - failedRuns.length * 15 - unchangedRuns.length * 6 + appliedRuns.length * 2),
-      aiTraceRisk: clampSerializableScore(78 - failedRuns.length * 20 - unchangedRuns.length * 7 + appliedRuns.length),
+      continuity,
+      readability,
+      styleConsistency,
+      aiTraceRisk,
     };
     const overallScore = clampSerializableScore(
-      (dimensions.continuity + dimensions.readability + dimensions.styleConsistency + dimensions.aiTraceRisk) / 4,
+      (continuity + readability + styleConsistency + aiTraceRisk) / 4,
     );
 
     const blockingIssues = [
@@ -2484,24 +2547,324 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         source: `chapter-run:${run.runId}:book:${run.bookId}:chapter:${run.chapter}`,
         excerpt,
         reason,
-      };
+        };
     });
-    const fallbackSource = scope.type === "chapter"
-      ? `chapter:${scope.bookId}:${scope.chapter}`
-      : `book:${scope.bookId}`;
-    const fallbackEvidence: AssistantEvaluateEvidence = {
-      source: fallbackSource,
-      excerpt: "暂无运行证据，使用范围级摘要作为最小可追溯证据。",
-      reason: "当前评估未检索到可用 run 数据",
-    };
-
-    const evidence = evidenceFromRuns.length > 0 ? evidenceFromRuns : [fallbackEvidence];
+    const evidence = evidenceFromRuns.length > 0 ? evidenceFromRuns : [buildAssistantEvaluateFallbackEvidence(scope)];
     return {
+      scopeType: "chapter",
       overallScore,
       dimensions,
       blockingIssues,
       evidence,
     };
+  }
+
+  function normalizeAssistantEvaluateReport(raw: unknown): AssistantEvaluateReport | null {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const source = raw as Record<string, unknown>;
+    const scopeType = source["scopeType"] === "chapter" || source["scopeType"] === "book"
+      ? source["scopeType"]
+      : null;
+    if (!scopeType) return null;
+    const dimensionsSource = source["dimensions"];
+    const dimensions = typeof dimensionsSource === "object" && dimensionsSource !== null && !Array.isArray(dimensionsSource)
+      ? Object.fromEntries(Object.entries(dimensionsSource).flatMap(([key, value]) =>
+        typeof value === "number" && Number.isFinite(value)
+          ? [[key, clampSerializableScore(value)]]
+          : []))
+      : {};
+    const blockingIssues = Array.isArray(source["blockingIssues"])
+      ? source["blockingIssues"].flatMap((issue) => typeof issue === "string" && issue.trim().length > 0 ? [issue.trim()] : [])
+      : [];
+    const evidence = Array.isArray(source["evidence"])
+      ? source["evidence"].flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const evidenceItem = item as Record<string, unknown>;
+        const sourceText = typeof evidenceItem["source"] === "string" ? evidenceItem["source"].trim() : "";
+        const excerpt = normalizeEvaluateText(typeof evidenceItem["excerpt"] === "string" ? evidenceItem["excerpt"] : "");
+        const reason = normalizeEvaluateText(typeof evidenceItem["reason"] === "string" ? evidenceItem["reason"] : "");
+        if (!sourceText || !excerpt || !reason) return [];
+        return [{ source: sourceText, excerpt, reason }];
+      })
+      : [];
+    return {
+      scopeType,
+      overallScore: clampSerializableScore(typeof source["overallScore"] === "number" ? source["overallScore"] : Number.NaN),
+      dimensions,
+      blockingIssues,
+      evidence: evidence.length > 0 ? evidence : [buildAssistantEvaluateFallbackEvidence({ type: scopeType, bookId: "unknown", ...(scopeType === "chapter" ? { chapter: 1 } : {}) } as AssistantEvaluateScope)],
+      ...(source["cached"] === true ? { cached: true } : {}),
+    };
+  }
+
+  async function loadAssistantBookEvaluateSource(
+    bookId: string,
+    fileName: string,
+  ): Promise<AssistantBookEvaluateSourceText | null> {
+    const filePath = join(state.bookDir(bookId), "story", fileName);
+    try {
+      const [content, info] = await Promise.all([
+        readFile(filePath, "utf-8"),
+        stat(filePath),
+      ]);
+      return {
+        fileName,
+        content,
+        size: info.size,
+        updatedAtMs: info.mtimeMs,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function loadAssistantBookEvaluateChapterSamples(
+    input: AssistantBookEvaluateInput,
+  ): Promise<ReadonlyArray<AssistantBookEvaluateChapterSample>> {
+    const chaptersDir = join(state.bookDir(input.bookId), "chapters");
+    let files: string[] = [];
+    try {
+      files = (await readdir(chaptersDir))
+        .filter((file) => /^\d+_.+\.md$/u.test(file))
+        .sort((left, right) => left.localeCompare(right));
+    } catch {
+      return [];
+    }
+    const results: AssistantBookEvaluateChapterSample[] = [];
+    const requestedRunIds = input.runIds ?? [];
+    for (let index = 0; index < files.length; index += ASSISTANT_BOOK_EVALUATE_BATCH_SIZE) {
+      const batch = files.slice(index, index + ASSISTANT_BOOK_EVALUATE_BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(async (fileName) => {
+        const chapter = Number.parseInt(fileName.slice(0, fileName.indexOf("_")), 10);
+        if (!Number.isInteger(chapter) || chapter < 1) return null;
+        const filePath = join(chaptersDir, fileName);
+        let content = "";
+        try {
+          content = await readFile(filePath, "utf-8");
+        } catch {
+          content = "";
+        }
+        const normalizedSnippet = normalizeEvaluateText(
+          content
+            .replace(/^#.*$/gmu, "")
+            .replace(/\s+/gu, " "),
+          220,
+        );
+        const wordCount = content.trim().length;
+        const chapterRuns = await chapterRunStore.listRuns(input.bookId, { chapter, limit: 8 });
+        const latestRun = requestedRunIds.length > 0
+          ? chapterRuns.find((run) => requestedRunIds.includes(run.runId)) ?? null
+          : chapterRuns[0] ?? null;
+        return {
+          chapter,
+          fileName,
+          snippet: normalizedSnippet || `第${chapter}章暂无可提取正文片段。`,
+          wordCount,
+          normalizedSnippet,
+          latestRun,
+        } satisfies AssistantBookEvaluateChapterSample;
+      }));
+      results.push(...batchResults.flatMap((item) => item ? [item] : []));
+    }
+    return results.sort((left, right) => left.chapter - right.chapter);
+  }
+
+  function buildAssistantBookEvaluateCacheKey(input: {
+    readonly storySources: ReadonlyArray<AssistantBookEvaluateSourceText>;
+    readonly chapters: ReadonlyArray<AssistantBookEvaluateChapterSample>;
+  }): string {
+    return JSON.stringify({
+      story: input.storySources.map((source) => [source.fileName, source.size, Math.round(source.updatedAtMs)]),
+      chapters: input.chapters.map((chapter) => [
+        chapter.chapter,
+        chapter.wordCount,
+        chapter.latestRun?.runId ?? null,
+        chapter.latestRun?.status ?? null,
+        chapter.latestRun?.decision ?? null,
+      ]),
+    });
+  }
+
+  function deriveBookAssistantEvaluateReport(
+    scope: AssistantEvaluateScopeBook,
+    chapters: ReadonlyArray<AssistantBookEvaluateChapterSample>,
+    storySources: ReadonlyArray<AssistantBookEvaluateSourceText>,
+  ): AssistantEvaluateReport {
+    const storyBible = storySources.find((item) => item.fileName === "story_bible.md") ?? null;
+    const characterMatrix = storySources.find((item) => item.fileName === "character_matrix.md") ?? null;
+    const pendingHooks = storySources.find((item) => item.fileName === "pending_hooks.md") ?? null;
+    const volumeOutline = storySources.find((item) => item.fileName === "volume_outline.md") ?? null;
+    const runs = chapters.flatMap((chapter) => chapter.latestRun ? [chapter.latestRun] : []);
+    const failedRuns = runs.filter((run) => run.status === "failed").length;
+    const unchangedRuns = runs.filter((run) => run.decision === "unchanged").length;
+    const appliedRuns = runs.filter((run) => run.decision === "applied").length;
+    const chapterWordCounts = chapters.map((chapter) => chapter.wordCount).filter((value) => value > 0);
+    const coverage = chapters.length > 0 ? runs.length / chapters.length : 0;
+    const duplicateCount = Math.max(0, chapters.length - new Set(
+      chapters
+        .map((chapter) => chapter.normalizedSnippet)
+        .filter((snippet) => snippet.length > 0),
+    ).size);
+    const duplicateRatio = chapters.length > 0 ? duplicateCount / chapters.length : 0;
+    const variation = coefficientOfVariation(chapterWordCounts);
+    const hookCount = normalizeEvaluateText(pendingHooks?.content, 1000)
+      .split(/[\n•\-]/u)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 3)
+      .length;
+    const dimensions: AssistantEvaluateDimensions = {
+      mainline: clampSerializableScore(58 + (storyBible ? 18 : -10) + (volumeOutline ? 10 : 0) + coverage * 12 - failedRuns * 8),
+      character: clampSerializableScore(56 + (characterMatrix ? 18 : -10) + Math.min(12, chapters.length * 2) - failedRuns * 5),
+      foreshadowing: clampSerializableScore(52 + (pendingHooks ? 24 : -6) + Math.min(10, hookCount * 2) - Math.max(0, hookCount - 5) * 4),
+      repetition: clampSerializableScore(88 - duplicateRatio * 55 - unchangedRuns * 4),
+      style: clampSerializableScore(72 + Math.max(0, 10 - Math.abs(variation - 0.22) * 60) - failedRuns * 4),
+      pacing: clampSerializableScore(70 + coverage * 12 - Math.max(0, variation - 0.45) * 30 - unchangedRuns * 3),
+    };
+    const overallScore = clampSerializableScore(
+      Object.values(dimensions).reduce((sum, value) => sum + (value ?? 0), 0) / 6,
+    );
+    const repeatedChapter = duplicateCount > 0
+      ? chapters.find((chapter, index) =>
+        chapters.findIndex((candidate) => candidate.normalizedSnippet === chapter.normalizedSnippet && candidate.normalizedSnippet.length > 0) !== index)
+      : null;
+    const evidence: AssistantEvaluateEvidence[] = [
+      {
+        source: storyBible ? `book-story:${scope.bookId}:story_bible.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(storyBible?.content ?? chapters[0]?.snippet ?? "暂无主线材料。"),
+        reason: storyBible
+          ? `主线评估基于 story_bible.md，并结合 ${chapters.length} 章的章节覆盖率 ${Math.round(coverage * 100)}%。`
+          : "缺少 story_bible.md，主线分数退回到章节片段估算。",
+      },
+      {
+        source: characterMatrix ? `book-story:${scope.bookId}:character_matrix.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(characterMatrix?.content ?? chapters.at(-1)?.snippet ?? "暂无角色矩阵材料。"),
+        reason: characterMatrix
+          ? "角色评分优先依据 character_matrix.md，并用章节样本校验人物行动是否持续出现。"
+          : "缺少角色矩阵，仅能从章节正文推断角色连贯性。",
+      },
+      {
+        source: pendingHooks ? `book-story:${scope.bookId}:pending_hooks.md` : `book:${scope.bookId}:chapters`,
+        excerpt: normalizeEvaluateText(pendingHooks?.content ?? chapters[Math.max(0, Math.floor(chapters.length / 2))]?.snippet ?? "暂无伏笔材料。"),
+        reason: pendingHooks
+          ? `伏笔评分依据 pending_hooks.md 中识别出的 ${hookCount} 条钩子项。`
+          : "缺少 pending_hooks.md，伏笔分数按正文估算。",
+      },
+      {
+        source: repeatedChapter ? `book-chapter:${scope.bookId}:${repeatedChapter.chapter}` : `book:${scope.bookId}:chapters`,
+        excerpt: repeatedChapter?.snippet ?? "章节片段重复率较低。",
+        reason: duplicateCount > 0
+          ? `检测到 ${duplicateCount} 章存在高重复片段，重复度评分已下调。`
+          : "章节片段重复率较低，重复度评分保持稳定。",
+      },
+      {
+        source: chapters[0] ? `book-chapter:${scope.bookId}:${chapters[0].chapter}` : `book:${scope.bookId}`,
+        excerpt: chapters[0]?.snippet ?? "暂无章节风格样本。",
+        reason: `风格评分结合章节字数波动系数 ${variation.toFixed(2)} 与 ${appliedRuns} 次已应用修订结果。`,
+      },
+      {
+        source: chapters.at(-1) ? `book-chapter:${scope.bookId}:${chapters.at(-1)!.chapter}` : `book:${scope.bookId}`,
+        excerpt: chapters.at(-1)?.snippet ?? "暂无节奏样本。",
+        reason: `节奏评分结合 ${chapters.length} 章样本、${runs.length} 条最新运行记录与章节长度离散度。`,
+      },
+    ];
+    const blockingIssues = [
+      ...(!storyBible ? ["缺少全书主线基线（story_bible.md），全书评估可信度受限。"] : []),
+      ...(!characterMatrix ? ["缺少角色矩阵（character_matrix.md），角色线难以校验。"] : []),
+      ...(hookCount > 6 ? [`待回收伏笔较多（${hookCount} 条），建议先梳理 pending_hooks.md。`] : []),
+      ...(duplicateRatio >= 0.25 ? [`章节片段重复率约 ${Math.round(duplicateRatio * 100)}%，建议去重并拉开桥段差异。`] : []),
+      ...(failedRuns > 0 ? [`最新章节运行中有 ${failedRuns} 条失败记录，需先处理阻断问题。`] : []),
+    ];
+    return {
+      scopeType: "book",
+      overallScore,
+      dimensions,
+      blockingIssues,
+      evidence: evidence.slice(0, 6),
+    };
+  }
+
+  async function deriveAssistantBookEvaluateReport(
+    scope: AssistantEvaluateScopeBook,
+    runIds: ReadonlyArray<string>,
+  ): Promise<AssistantEvaluateReport> {
+    const storySources = (await Promise.all([
+      loadAssistantBookEvaluateSource(scope.bookId, "story_bible.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "volume_outline.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "character_matrix.md"),
+      loadAssistantBookEvaluateSource(scope.bookId, "pending_hooks.md"),
+    ])).flatMap((item) => item ? [item] : []);
+    const chapters = await loadAssistantBookEvaluateChapterSamples({
+      bookId: scope.bookId,
+      ...(runIds.length > 0 ? { runIds } : {}),
+    });
+    if (chapters.length === 0 && storySources.length === 0) {
+      return {
+        scopeType: "book",
+        overallScore: 0,
+        dimensions: {
+          mainline: 0,
+          character: 0,
+          foreshadowing: 0,
+          repetition: 0,
+          style: 0,
+          pacing: 0,
+        },
+        blockingIssues: ["当前书籍暂无可用于全书评估的章节或故事材料。"],
+        evidence: [buildAssistantEvaluateFallbackEvidence(scope)],
+      };
+    }
+    const cacheKey = buildAssistantBookEvaluateCacheKey({ storySources, chapters });
+    const existingMemory = runIds.length === 0
+      ? await assistantMemoryService.readMemory("book", { bookId: scope.bookId })
+      : { memory: null };
+    const existingData = existingMemory.memory?.data;
+    const qualitySnapshots = existingData && typeof existingData === "object" && !Array.isArray(existingData)
+      ? (existingData as Record<string, unknown>)["qualitySnapshots"]
+      : null;
+    const bookSnapshot = qualitySnapshots && typeof qualitySnapshots === "object" && !Array.isArray(qualitySnapshots)
+      ? (qualitySnapshots as Record<string, unknown>)["book"]
+      : null;
+    if (runIds.length === 0 && bookSnapshot && typeof bookSnapshot === "object" && !Array.isArray(bookSnapshot)) {
+      const cachedKey = typeof (bookSnapshot as Record<string, unknown>)["cacheKey"] === "string"
+        ? (bookSnapshot as Record<string, unknown>)["cacheKey"] as string
+        : "";
+      const cachedReport = normalizeAssistantEvaluateReport((bookSnapshot as Record<string, unknown>)["report"]);
+      if (cachedKey === cacheKey && cachedReport) {
+        return { ...cachedReport, cached: true };
+      }
+    }
+    const report = deriveBookAssistantEvaluateReport(scope, chapters, storySources);
+    if (runIds.length === 0) {
+      const previousData = existingData && typeof existingData === "object" && !Array.isArray(existingData)
+        ? existingData as Record<string, unknown>
+        : {};
+      const previousSnapshots = previousData["qualitySnapshots"] && typeof previousData["qualitySnapshots"] === "object" && !Array.isArray(previousData["qualitySnapshots"])
+        ? previousData["qualitySnapshots"] as Record<string, unknown>
+        : {};
+      await assistantMemoryService.writeMemory("book", {
+        ...previousData,
+        qualitySnapshots: {
+          ...previousSnapshots,
+          book: {
+            cacheKey,
+            report,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      }, { bookId: scope.bookId });
+    }
+    return report;
+  }
+
+  async function deriveAssistantEvaluateReport(
+    runs: ReadonlyArray<ChapterRunRecord>,
+    scope: AssistantEvaluateScope,
+    runIds: ReadonlyArray<string>,
+  ): Promise<AssistantEvaluateReport> {
+    if (scope.type === "book") {
+      return await deriveAssistantBookEvaluateReport(scope, runIds);
+    }
+    return deriveChapterAssistantEvaluateReport(runs, scope);
   }
 
   function extractCandidateRevision(run: ChapterRunRecord): ManualCandidateRevision | null {
@@ -2528,7 +2891,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     run: ChapterRunRecord,
     scope: AssistantEvaluateScope,
   ): AssistantTaskCandidateSnapshot {
-    const report = deriveAssistantEvaluateReport([run], scope);
+    const report = deriveChapterAssistantEvaluateReport(
+      [run],
+      scope.type === "chapter"
+        ? scope
+        : { type: "chapter", bookId: scope.bookId, chapter: run.chapter },
+    );
     const candidateRevision = extractCandidateRevision(run);
     const diff = parseDiffData(run);
     return {
@@ -4782,7 +5150,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const scopedRuns = runIds.length > 0
       ? listedRuns.filter((run) => runIds.includes(run.runId))
       : listedRuns;
-    const report = deriveAssistantEvaluateReport(scopedRuns, scope);
+    const report = await deriveAssistantEvaluateReport(scopedRuns, scope, runIds);
     const suggestedNextActions = report.blockingIssues.length > 0 || report.overallScore < 75
       ? ["spot-fix", "re-audit"]
       : ["write-next"];
@@ -4990,7 +5358,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const optimizeRuns = (
         await Promise.all(runIds.map(async (runId) => await chapterRunStore.getRun(scope.bookId, runId)))
       ).filter((item): item is ChapterRunRecord => item !== null);
-      const report = deriveAssistantEvaluateReport(optimizeRuns, scope);
+      const report = await deriveAssistantEvaluateReport(optimizeRuns, scope, runIds);
       const score = report.overallScore;
       const reachedTarget = score >= targetScore;
       const isLastIteration = iteration === maxIterations;
