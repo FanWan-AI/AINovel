@@ -63,6 +63,7 @@ import {
   type ChapterRunRecord,
 } from "./schemas/chapter-run-schema.js";
 import { ChapterRunStore, inferRunDecision } from "./lib/chapter-run-store.js";
+import { createPromptInjectionGuard } from "./middleware/prompt-injection-guard.js";
 import type {
   RuntimeEvent,
   RuntimeOverview,
@@ -929,6 +930,7 @@ function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dime
 
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
+  const promptInjectionGuard = createPromptInjectionGuard(root);
   const state = new StateManager(root);
   const chapterRunStore = new ChapterRunStore((bookId) => state.bookDir(bookId));
   let cachedConfig = initialConfig;
@@ -1100,6 +1102,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   subscribers.add(runtimeLogHandler);
 
   app.use("/*", cors());
+  app.use("/api/assistant/*", promptInjectionGuard.middleware);
 
   // Structured error handler — ApiError returns typed JSON, others return 500
   app.onError((error, c) => {
@@ -2801,8 +2804,25 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           },
         );
 
-  const rawResponse = result || lastResponse || "处理完成。";
-  const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        const rawResponse = result || lastResponse || "处理完成。";
+        const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        const outputDecision = await promptInjectionGuard.inspectOutput({
+          route: c.req.path,
+          requestId: promptInjectionGuard.getRequestId(c),
+          content: finalResponse,
+        });
+        if (outputDecision) {
+          await queueSSE("assistant:done", {
+            ok: false,
+            error: outputDecision.message,
+            code: outputDecision.code,
+            reason: outputDecision.reason,
+            requestId: outputDecision.requestId,
+            rule: outputDecision.ruleId,
+          });
+          broadcast("agent:error", { instruction: prompt, error: outputDecision.message, requestId: outputDecision.requestId });
+          return;
+        }
         await queueSSE("assistant:done", { ok: true, response: finalResponse });
         broadcast("agent:complete", { instruction: prompt, response: finalResponse });
       } catch (e) {
