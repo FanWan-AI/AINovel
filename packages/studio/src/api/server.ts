@@ -169,6 +169,41 @@ interface ManualCandidateRevision {
   readonly lengthTelemetry?: unknown;
 }
 
+interface AssistantCandidateScoreEvidence {
+  readonly source: string;
+  readonly excerpt: string;
+  readonly reason: string;
+}
+
+interface AssistantTaskCandidateSnapshot {
+  readonly candidateId: string;
+  readonly runId: string;
+  readonly score: number;
+  readonly status: "succeeded" | "failed";
+  readonly decision?: "applied" | "unchanged" | "failed" | null;
+  readonly excerpt: string;
+  readonly evidence: ReadonlyArray<AssistantCandidateScoreEvidence>;
+  readonly pendingApproval: boolean;
+  readonly error?: string;
+  readonly candidateRevision?: ManualCandidateRevision;
+}
+
+interface AssistantCandidateDecisionSnapshot {
+  readonly mode: "auto" | "manual";
+  readonly status: "pending" | "selected";
+  readonly candidates: ReadonlyArray<AssistantTaskCandidateSnapshot>;
+  readonly winnerCandidateId?: string;
+  readonly winnerRunId?: string;
+  readonly winnerScore?: number;
+  readonly winnerReason?: string;
+}
+
+interface AssistantTaskAwaitingApproval {
+  readonly nodeId: string;
+  readonly type: "checkpoint" | "candidate-selection";
+  readonly candidates?: ReadonlyArray<AssistantTaskCandidateSnapshot>;
+}
+
 function normalizeWritingGovernanceSettings(raw: unknown, fallbackUpdatedAt = ""): WritingGovernanceSettings {
   const source = typeof raw === "object" && raw !== null && !Array.isArray(raw)
     ? raw as Record<string, unknown>
@@ -442,6 +477,7 @@ interface AssistantPlanStep {
   readonly bookIds?: ReadonlyArray<string>;
   readonly chapter?: number;
   readonly mode?: string;
+  readonly parallelCandidates?: number;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly maxRetries?: number;
 }
@@ -452,6 +488,7 @@ interface AssistantExecuteStepRef {
   readonly bookId: string;
   readonly chapter: number;
   readonly mode?: string;
+  readonly parallelCandidates?: number;
 }
 
 interface AssistantTaskStepSnapshot {
@@ -470,12 +507,14 @@ interface AssistantTaskNodeSnapshot {
   readonly action?: string;
   readonly runId?: string;
   readonly status: TaskNodeStatus;
+  readonly parallelCandidates?: number;
   readonly attempts: number;
   readonly maxRetries: number;
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly error?: string;
   readonly checkpoint?: CheckpointState;
+  readonly candidateDecision?: AssistantCandidateDecisionSnapshot;
 }
 
 interface AssistantTaskSnapshot {
@@ -489,6 +528,7 @@ interface AssistantTaskSnapshot {
   readonly lastUpdatedAt: string;
   readonly error?: string;
   readonly retryContext?: Record<string, unknown>;
+  readonly awaitingApproval?: AssistantTaskAwaitingApproval;
 }
 
 interface AssistantTaskSnapshotStore {
@@ -552,6 +592,9 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
   const status = parseAssistantTaskNodeStatus(payload.status);
   const attempts = typeof payload.attempts === "number" && Number.isFinite(payload.attempts) ? payload.attempts : Number.NaN;
   const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries) ? payload.maxRetries : Number.NaN;
+  const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+    ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+    : undefined;
   if (!nodeId || !type || !status || !Number.isFinite(attempts) || !Number.isFinite(maxRetries)) {
     return null;
   }
@@ -564,6 +607,7 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
     status,
     attempts,
     maxRetries,
+    ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(typeof payload.action === "string" ? { action: payload.action } : {}),
     ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
     ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
@@ -593,6 +637,9 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
   const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
     ? Math.max(payload.maxRetries, 0)
     : undefined;
+  const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+    ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+    : undefined;
   const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
     ? payload.checkpoint as CheckpointState
     : undefined;
@@ -604,6 +651,7 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
     ...(bookIds.length > 0 ? { bookIds } : {}),
     ...(typeof payload.chapter === "number" && Number.isInteger(payload.chapter) && payload.chapter > 0 ? { chapter: payload.chapter } : {}),
     ...(typeof payload.mode === "string" ? { mode: payload.mode } : {}),
+    ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(dependsOn.length > 0 ? { dependsOn } : {}),
     ...(maxRetries !== undefined ? { maxRetries } : {}),
     ...(checkpoint ? { checkpoint } : {}),
@@ -688,6 +736,9 @@ function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string)
   const retryContext = typeof payload.retryContext === "object" && payload.retryContext !== null && !Array.isArray(payload.retryContext)
     ? payload.retryContext as Record<string, unknown>
     : undefined;
+  const awaitingApproval = typeof payload.awaitingApproval === "object" && payload.awaitingApproval !== null && !Array.isArray(payload.awaitingApproval)
+    ? payload.awaitingApproval as AssistantTaskAwaitingApproval
+    : undefined;
   const graph = normalizeAssistantTaskGraph(payload.graph, taskId);
   return {
     taskId,
@@ -700,6 +751,7 @@ function normalizeAssistantTaskSnapshot(input: unknown, fallbackTaskId?: string)
     lastUpdatedAt,
     ...(typeof payload.error === "string" ? { error: payload.error } : {}),
     ...(retryContext ? { retryContext } : {}),
+    ...(awaitingApproval ? { awaitingApproval } : {}),
   };
 }
 
@@ -1209,6 +1261,7 @@ function buildAssistantTaskGraphFromPlan(
       ...(Array.isArray(step.bookIds) ? { bookIds: [...step.bookIds] } : {}),
       ...(typeof step.chapter === "number" ? { chapter: step.chapter } : {}),
       ...(typeof step.mode === "string" ? { mode: step.mode } : {}),
+      ...(typeof step.parallelCandidates === "number" ? { parallelCandidates: Math.max(1, Math.min(3, Math.trunc(step.parallelCandidates))) } : {}),
       ...(Array.isArray(step.dependsOn) && step.dependsOn.length > 0 ? { dependsOn: [...step.dependsOn] } : {}),
       maxRetries: Math.max(step.maxRetries ?? 0, 0),
     });
@@ -1380,6 +1433,7 @@ function collectAssistantExecutableNodes(graph: TaskGraph): AssistantExecuteStep
         bookId: stepBookId,
         chapter: stepChapter,
         ...(node.mode !== undefined ? { mode: node.mode } : {}),
+        ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
       } satisfies AssistantExecuteStepRef;
     })
     .filter((node): node is AssistantExecuteStepRef => node !== null);
@@ -1486,6 +1540,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   let sseClientCount = 0;
   const assistantTaskSnapshots = new Map<string, AssistantTaskSnapshot>();
   const assistantTaskGraphs = new Map<string, TaskGraph>();
+  const assistantCandidateApprovalResolvers = new Map<string, (candidateId: string) => void>();
+  const assistantTaskExecutionAutopilotLevels = new Map<string, AssistantAutopilotLevel>();
   const assistantDeletePreviews = new Map<string, { readonly body: { target: "chapter" | "run"; bookId: string; chapter?: number; runId?: string }; readonly expiresAt: number }>();
   const assistantDeleteRecoveryStorePath = join(root, ".inkos", "assistant-delete-recovery.v1.json");
   const assistantTaskSnapshotStorePath = join(root, ASSISTANT_TASK_SNAPSHOT_STORE_FILE);
@@ -1661,6 +1717,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const maxRetries = typeof payload.maxRetries === "number" && Number.isFinite(payload.maxRetries)
       ? payload.maxRetries
       : previousNode?.maxRetries ?? 0;
+    const parallelCandidates = typeof payload.parallelCandidates === "number" && Number.isFinite(payload.parallelCandidates)
+      ? Math.max(1, Math.min(3, Math.trunc(payload.parallelCandidates)))
+      : previousNode?.parallelCandidates;
     const nextNodes = {
       ...(previous?.nodes ?? {}),
       ...(currentNodeId
@@ -1671,6 +1730,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             ...(typeof payload.action === "string" ? { action: payload.action } : previousNode?.action ? { action: previousNode.action } : {}),
             ...(typeof payload.runId === "string" ? { runId: payload.runId } : previousNode?.runId ? { runId: previousNode.runId } : {}),
             status: nodeStatus,
+            ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
             attempts,
             maxRetries,
             ...(nodeStatus === "running" || nodeStatus === "waiting_approval"
@@ -1681,6 +1741,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 }),
             ...(typeof payload.error === "string" ? { error: payload.error } : previousNode?.error ? { error: previousNode.error } : {}),
             ...(checkpoint ? { checkpoint } : {}),
+            ...(previousNode?.candidateDecision ? { candidateDecision: previousNode.candidateDecision } : {}),
           } satisfies AssistantTaskNodeSnapshot,
         }
         : {}),
@@ -1697,6 +1758,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       lastUpdatedAt: timestamp,
       ...(typeof payload.error === "string" ? { error: payload.error } : {}),
       ...(mergedRetryContext ? { retryContext: mergedRetryContext } : {}),
+      ...(Object.values(nextNodes).some((node) => node.status === "waiting_approval") && previous?.awaitingApproval
+        ? { awaitingApproval: previous.awaitingApproval }
+        : {}),
     });
     scheduleAssistantTaskSnapshotPersistence();
 
@@ -1971,6 +2035,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       bookId: stepBookId,
       chapter: stepChapter,
       ...(step.mode !== undefined ? { mode: step.mode } : {}),
+      ...(step.parallelCandidates !== undefined ? { parallelCandidates: clampParallelCandidates(step.parallelCandidates) } : {}),
     };
   }
 
@@ -2019,6 +2084,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         status: "pending",
         attempts: 0,
         maxRetries: Math.max(node.maxRetries ?? 0, 0),
+        ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
         ...(node.checkpoint ? { checkpoint: node.checkpoint } : {}),
       } satisfies AssistantTaskNodeSnapshot,
     ]));
@@ -2052,8 +2118,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return {};
     }
     const responseStatus = runtime?.status ?? (snapshot?.status ?? "running");
-    const status = responseStatus === "pending" ? "running" : responseStatus;
+    const status = snapshot?.awaitingApproval
+      ? "waiting_approval"
+      : responseStatus === "pending" ? "running" : responseStatus;
     const stepRunIds = runtime?.stepRunIds ?? {};
+    const candidateDecisions = snapshot?.nodes
+      ? Object.fromEntries(
+          Object.entries(snapshot.nodes)
+            .filter(([, node]) => node.candidateDecision)
+            .map(([nodeId, node]) => [nodeId, node.candidateDecision]),
+        )
+      : {};
     return {
       taskId,
       sessionId: runtime?.sessionId ?? snapshot?.sessionId ?? "",
@@ -2061,14 +2136,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(runtime?.currentNodeId ? { currentNodeId: runtime.currentNodeId } : {}),
       ...(snapshot?.currentStepId ? { currentStepId: snapshot.currentStepId } : {}),
       ...(Object.keys(stepRunIds).length > 0 ? { stepRunIds } : {}),
-      ...(runtime?.status === "waiting_approval" && runtime.currentNodeId ? {
-        awaitingApproval: { nodeId: runtime.currentNodeId },
-      } : {}),
+      ...(Object.keys(candidateDecisions).length > 0 ? { candidateDecisions } : {}),
+      ...(snapshot?.awaitingApproval
+        ? { awaitingApproval: snapshot.awaitingApproval }
+        : runtime?.status === "waiting_approval" && runtime.currentNodeId
+          ? { awaitingApproval: { nodeId: runtime.currentNodeId, type: "checkpoint" } }
+          : {}),
     };
   }
 
   function applyAssistantConductorEvent(event: AssistantConductorEvent): void {
     if (event.type === "graph") {
+      assistantTaskExecutionAutopilotLevels.delete(event.taskId);
+      assistantCandidateApprovalResolvers.delete(`${event.taskId}:${assistantTaskSnapshots.get(event.taskId)?.awaitingApproval?.nodeId ?? ""}`);
       if (event.reasonCode || event.errorCode) {
         broadcast("assistant:policy:blocked", {
           taskId: event.taskId,
@@ -2138,25 +2218,108 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       if (node.action === "revise") {
-        const response = await app.request(
-          `http://localhost/api/books/${node.bookId}/revise/${node.chapter}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...(node.mode !== undefined ? { mode: node.mode } : {}) }),
-          },
-        );
-        const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
-        if (!response.ok || typeof payload?.["runId"] !== "string") {
-          throw new Error(!response.ok ? await parseApiErrorMessage(response) : "revise step did not return runId");
-        }
-        const runId = payload["runId"];
+        const parallelCandidates = clampParallelCandidates(node.parallelCandidates);
+        const startReviseRun = async (): Promise<string> => {
+          const response = await app.request(
+            `http://localhost/api/books/${node.bookId}/revise/${node.chapter}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...(node.mode !== undefined ? { mode: node.mode } : {}) }),
+            },
+          );
+          const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+          if (!response.ok || typeof payload?.["runId"] !== "string") {
+            throw new Error(!response.ok ? await parseApiErrorMessage(response) : "revise step did not return runId");
+          }
+          return payload["runId"];
+        };
+        const runIds = parallelCandidates > 1
+          ? await Promise.all(Array.from({ length: parallelCandidates }, async () => await startReviseRun()))
+          : [await startReviseRun()];
+        const runId = runIds[0]!;
         return {
           runId,
           execute: async () => {
-            const reviseRun = await waitForChapterRunCompletion(node.bookId!, runId);
-            if (reviseRun.status !== "succeeded") {
-              throw new Error(reviseRun.error ?? "revise step failed");
+            const reviseRuns = await Promise.all(
+              runIds.map(async (currentRunId) => await waitForChapterRunCompletion(node.bookId!, currentRunId)),
+            );
+            if (parallelCandidates === 1) {
+              const reviseRun = reviseRuns[0]!;
+              if (reviseRun.status !== "succeeded") {
+                throw new Error(reviseRun.error ?? "revise step failed");
+              }
+              return;
+            }
+            const scope: AssistantEvaluateScope = {
+              type: "chapter",
+              bookId: node.bookId!,
+              chapter: node.chapter!,
+            };
+            const candidates = reviseRuns.map((reviseRun, index) =>
+              buildAssistantCandidateSnapshot(node.nodeId, index, reviseRun, scope));
+            const winner = pickWinningAssistantCandidate(candidates);
+            if (!winner) {
+              throw new Error(reviseRuns[0]?.error ?? "parallel candidate generation failed");
+            }
+            const autopilotLevel = assistantTaskExecutionAutopilotLevels.get(context.taskId) ?? DEFAULT_ASSISTANT_AUTOPILOT_LEVEL;
+            const requiresManualVote = autopilotLevel === "L1" || autopilotLevel === "L2" || autopilotLevel === "guarded";
+            if (requiresManualVote) {
+              updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+                mode: "manual",
+                status: "pending",
+                candidates,
+              }, {
+                nodeStatus: "waiting_approval",
+                awaitingApproval: {
+                  nodeId: node.nodeId,
+                  type: "candidate-selection",
+                  candidates,
+                },
+              });
+              const approvalKey = `${context.taskId}:${node.nodeId}`;
+              const selectedCandidateId = await new Promise<string>((resolve) => {
+                assistantCandidateApprovalResolvers.set(approvalKey, resolve);
+              });
+              assistantCandidateApprovalResolvers.delete(approvalKey);
+              const selected = candidates.find((candidate) => candidate.candidateId === selectedCandidateId) ?? winner;
+              updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+                mode: "manual",
+                status: "selected",
+                candidates,
+                winnerCandidateId: selected.candidateId,
+                winnerRunId: selected.runId,
+                winnerScore: selected.score,
+                winnerReason: selected.evidence[0]?.reason ?? "人工投票已选择候选",
+              }, {
+                nodeStatus: "running",
+                awaitingApproval: null,
+              });
+              if (selected.pendingApproval) {
+                await approveAssistantCandidateRun(node.bookId!, selected.runId, "Candidate revision approved by assistant manual vote.");
+              }
+              if (selected.status !== "succeeded") {
+                throw new Error(selected.error ?? "selected candidate failed");
+              }
+              return;
+            }
+            updateAssistantTaskNodeCandidateDecision(context.taskId, node.nodeId, {
+              mode: "auto",
+              status: "selected",
+              candidates,
+              winnerCandidateId: winner.candidateId,
+              winnerRunId: winner.runId,
+              winnerScore: winner.score,
+              winnerReason: winner.evidence[0]?.reason ?? "自动投票选择最高分候选",
+            }, {
+              nodeStatus: "running",
+              awaitingApproval: null,
+            });
+            if (winner.pendingApproval) {
+              await approveAssistantCandidateRun(node.bookId!, winner.runId, "Candidate revision approved by assistant auto vote.");
+            }
+            if (winner.status !== "succeeded") {
+              throw new Error(winner.error ?? "winning candidate failed");
             }
           },
         };
@@ -2352,6 +2515,133 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
     }
     return null;
+  }
+
+  function clampParallelCandidates(value: number | undefined): number {
+    if (!Number.isFinite(value)) return 1;
+    return Math.max(1, Math.min(3, Math.trunc(value ?? 1)));
+  }
+
+  function buildAssistantCandidateSnapshot(
+    nodeId: string,
+    index: number,
+    run: ChapterRunRecord,
+    scope: AssistantEvaluateScope,
+  ): AssistantTaskCandidateSnapshot {
+    const report = deriveAssistantEvaluateReport([run], scope);
+    const candidateRevision = extractCandidateRevision(run);
+    const diff = parseDiffData(run);
+    return {
+      candidateId: `${nodeId}:c${index + 1}`,
+      runId: run.runId,
+      score: report.overallScore,
+      status: run.status === "failed" ? "failed" : "succeeded",
+      ...(run.decision !== undefined ? { decision: run.decision } : {}),
+      excerpt: (candidateRevision?.content ?? diff.afterContent ?? run.unchangedReason ?? run.error ?? `${run.actionType} ${run.status}`).slice(0, 240),
+      evidence: report.evidence.slice(0, 3),
+      pendingApproval: diff.pendingApproval,
+      ...(run.error ? { error: run.error } : {}),
+      ...(candidateRevision ? { candidateRevision } : {}),
+    };
+  }
+
+  function pickWinningAssistantCandidate(
+    candidates: ReadonlyArray<AssistantTaskCandidateSnapshot>,
+  ): AssistantTaskCandidateSnapshot | null {
+    const ranked = [...candidates]
+      .filter((candidate) => candidate.status === "succeeded")
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return left.candidateId.localeCompare(right.candidateId);
+      });
+    return ranked[0] ?? null;
+  }
+
+  function updateAssistantTaskNodeCandidateDecision(
+    taskId: string,
+    nodeId: string,
+    candidateDecision: AssistantCandidateDecisionSnapshot,
+    options?: {
+      readonly nodeStatus?: TaskNodeStatus;
+      readonly awaitingApproval?: AssistantTaskAwaitingApproval | null;
+      readonly error?: string;
+    },
+  ): void {
+    const previous = assistantTaskSnapshots.get(taskId);
+    if (!previous) {
+      return;
+    }
+    const previousNode = previous.nodes?.[nodeId];
+    const nextNodes = {
+      ...(previous.nodes ?? {}),
+      [nodeId]: {
+        nodeId,
+        type: previousNode?.type ?? "task",
+        ...(previousNode?.action ? { action: previousNode.action } : {}),
+        ...(previousNode?.runId ? { runId: previousNode.runId } : {}),
+        status: options?.nodeStatus ?? previousNode?.status ?? "running",
+        parallelCandidates: candidateDecision.candidates.length,
+        attempts: previousNode?.attempts ?? 1,
+        maxRetries: previousNode?.maxRetries ?? 0,
+        ...(previousNode?.startedAt ? { startedAt: previousNode.startedAt } : {}),
+        ...(previousNode?.finishedAt ? { finishedAt: previousNode.finishedAt } : {}),
+        ...(previousNode?.error ? { error: previousNode.error } : {}),
+        ...(previousNode?.checkpoint ? { checkpoint: previousNode.checkpoint } : {}),
+        candidateDecision,
+      } satisfies AssistantTaskNodeSnapshot,
+    };
+    assistantTaskSnapshots.set(taskId, {
+      ...previous,
+      status: "running",
+      currentStepId: nodeId,
+      nodes: nextNodes,
+      lastUpdatedAt: new Date().toISOString(),
+      ...(options?.error ? { error: options.error } : previous.error ? { error: previous.error } : {}),
+      ...(options?.awaitingApproval === undefined
+        ? previous.awaitingApproval ? { awaitingApproval: previous.awaitingApproval } : {}
+        : options.awaitingApproval ? { awaitingApproval: options.awaitingApproval } : {}),
+    });
+    scheduleAssistantTaskSnapshotPersistence();
+  }
+
+  async function approveAssistantCandidateRun(
+    bookId: string,
+    runId: string,
+    message: string,
+  ): Promise<void> {
+    const run = await chapterRunStore.getRun(bookId, runId);
+    if (!run) {
+      throw new Error(`Run ${runId} not found`);
+    }
+    if (run.status !== "succeeded" || run.decision !== "unchanged") {
+      return;
+    }
+    const candidate = extractCandidateRevision(run);
+    if (!candidate) {
+      return;
+    }
+    await applyApprovedCandidateRevision({
+      bookId,
+      chapterNumber: run.chapter,
+      candidate,
+    });
+    const diff = parseDiffData(run);
+    await completeChapterRun({
+      bookId,
+      runId,
+      status: "succeeded",
+      decision: "applied",
+      unchangedReason: null,
+      message,
+      data: {
+        beforeContent: diff.beforeContent,
+        afterContent: candidate.content,
+        briefTrace: diff.briefTrace,
+        approvedFromUnchangedRun: true,
+      },
+    });
   }
 
   function shouldSkipTruthFileUpdate(value: string | undefined): boolean {
@@ -4433,6 +4723,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
 
+    assistantTaskExecutionAutopilotLevels.set(taskId, policy.autopilot.level);
     ensureAssistantTaskSnapshot(taskId, sessionId, runtimeGraph);
     const runner = assistantConductor.runGraph(runtimeGraph, {
       sessionId,
@@ -4795,6 +5086,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     await assistantTaskSnapshotHydration;
     const taskId = c.req.param("taskId");
     const nodeId = c.req.param("nodeId");
+    const requestBody = await c.req.json<unknown>().catch(() => null);
     const snapshot = assistantTaskSnapshots.get(taskId);
     if (!snapshot) {
       return c.json({
@@ -4803,6 +5095,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           message: "Assistant task was not found.",
         },
       }, 404);
+    }
+    if (snapshot.awaitingApproval?.type === "candidate-selection" && snapshot.awaitingApproval.nodeId === nodeId) {
+      const candidateId = typeof (requestBody as Record<string, unknown> | null)?.["candidateId"] === "string"
+        ? ((requestBody as Record<string, unknown>).candidateId as string).trim()
+        : "";
+      const candidates = snapshot.awaitingApproval.candidates ?? [];
+      if (!candidateId || !candidates.some((candidate) => candidate.candidateId === candidateId)) {
+        return c.json({
+          error: {
+            code: "ASSISTANT_CANDIDATE_SELECTION_INVALID",
+            message: "candidateId must reference one of the pending candidates.",
+            taskId,
+            nodeId,
+          },
+        }, 422);
+      }
+      const resolveCandidate = assistantCandidateApprovalResolvers.get(`${taskId}:${nodeId}`);
+      if (!resolveCandidate) {
+        return c.json({
+          error: {
+            code: "ASSISTANT_TASK_APPROVAL_UNAVAILABLE",
+            message: "Assistant candidate selection is not waiting for approval.",
+            taskId,
+            nodeId,
+          },
+        }, 409);
+      }
+      resolveCandidate(candidateId);
+      return c.json({
+        ok: true,
+        taskId,
+        nodeId,
+        candidateId,
+        ...summarizeAssistantTaskRun(taskId),
+      });
     }
     const approved = assistantConductor.approve(taskId, nodeId, "manual");
     if (!approved) {

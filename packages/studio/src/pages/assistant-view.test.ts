@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { parseAssistantOperatorCommand } from "../api/services/assistant-command-parser";
+import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
 import type { TFunction } from "../hooks/use-i18n";
 import {
   ASSISTANT_PROMPT_TEMPLATES,
@@ -33,6 +34,7 @@ import {
   parseAssistantCrudRestoreId,
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
+  resolveAssistantCandidateSelection,
   resolveAssistantScopeBookIds,
   resolveAssistantAgentOutcomeFromRuntimeEvents,
   resolveBookFromPrompt,
@@ -58,6 +60,93 @@ describe("AssistantView", () => {
     expect(html).toContain("assistant-template-panel");
     expect(html).toContain("assistant-empty-state");
     expect(html).toContain("生成大纲");
+  });
+
+  it("resolves candidate selection state from task snapshots", () => {
+    const selection = resolveAssistantCandidateSelection({
+      taskId: "asst_t_01",
+      sessionId: "asst_s_01",
+      status: "running",
+      currentStepId: "s1",
+      steps: {},
+      nodes: {
+        s1: {
+          nodeId: "s1",
+          type: "task",
+          action: "revise",
+          status: "waiting_approval",
+          parallelCandidates: 2,
+          attempts: 1,
+          maxRetries: 0,
+          candidateDecision: {
+            mode: "manual",
+            status: "pending",
+            candidates: [
+              {
+                candidateId: "s1:c1",
+                runId: "run-1",
+                score: 75,
+                status: "succeeded",
+                decision: "unchanged",
+                excerpt: "候选 A",
+                evidence: [{ source: "chapter-run:run-1", excerpt: "A", reason: "reason-a" }],
+                pendingApproval: true,
+              },
+              {
+                candidateId: "s1:c2",
+                runId: "run-2",
+                score: 80,
+                status: "succeeded",
+                decision: "unchanged",
+                excerpt: "候选 B",
+                evidence: [{ source: "chapter-run:run-2", excerpt: "B", reason: "reason-b" }],
+                pendingApproval: true,
+              },
+            ],
+          },
+        },
+      },
+      awaitingApproval: {
+        nodeId: "s1",
+        type: "candidate-selection",
+      },
+      lastUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(selection).toMatchObject({
+      nodeId: "s1",
+      mode: "manual",
+      status: "pending",
+    });
+    expect(selection?.candidates).toHaveLength(2);
+  });
+
+  it("renders candidate comparison card with score evidence and selection action", () => {
+    const html = renderToStaticMarkup(createElement(CandidateComparisonCard, {
+      selection: {
+        nodeId: "s1",
+        mode: "manual",
+        status: "pending",
+        candidates: [
+          {
+            candidateId: "s1:c1",
+            runId: "run-1",
+            score: 78,
+            status: "succeeded",
+            decision: "unchanged",
+            excerpt: "候选稿 A",
+            evidence: [{ source: "chapter-run:run-1", excerpt: "证据 A", reason: "依据 A" }],
+            pendingApproval: true,
+          },
+        ],
+      },
+      onSelectCandidate: vi.fn(),
+    }));
+
+    expect(html).toContain("候选对比");
+    expect(html).toContain("分数 78");
+    expect(html).toContain("证据 A");
+    expect(html).toContain("选择此候选");
   });
 
   it("updates input, submits message and appends assistant response", () => {
