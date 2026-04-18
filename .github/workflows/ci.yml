@@ -17,6 +17,9 @@ on:
           - full
           - chaos
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'all' || inputs.suite == 'full'
