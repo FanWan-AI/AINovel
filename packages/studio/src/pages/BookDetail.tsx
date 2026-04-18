@@ -52,9 +52,35 @@ interface BookData {
     readonly targetChapters?: number;
     readonly language?: string;
     readonly fanficMode?: string;
+    readonly is_release_candidate?: boolean;
   };
   readonly chapters: ReadonlyArray<ChapterMeta>;
   readonly nextChapter: number;
+}
+
+interface ReleaseGateItem {
+  readonly gateId: "quality" | "consistency" | "security" | "manual_confirmation";
+  readonly label: string;
+  readonly passed: boolean;
+  readonly blocking: boolean;
+  readonly reason: string | null;
+}
+
+interface ReleaseCandidateEvaluationData {
+  readonly bookId: string;
+  readonly isReleaseCandidate: boolean;
+  readonly eligible: boolean;
+  readonly publishQualityGate: number;
+  readonly overallScore: number;
+  readonly autopilotLevel: string;
+  readonly gates: ReadonlyArray<ReleaseGateItem>;
+  readonly blockingReasons: ReadonlyArray<string>;
+  readonly checkpoint: {
+    readonly stage: "release-candidate";
+    readonly requiredApproval: boolean;
+    readonly status: "pending" | "approved";
+    readonly reason: string;
+  };
 }
 
 interface BookCreateStatusData {
@@ -144,6 +170,28 @@ export function getTopActionIds(): ReadonlyArray<"planNextAndWrite" | "quickWrit
   return ["planNextAndWrite", "quickWrite"];
 }
 
+export function resolveReleaseCandidateBadge(
+  isReleaseCandidate: boolean,
+  eligible: boolean,
+): { label: string; className: string } {
+  if (isReleaseCandidate) {
+    return {
+      label: "已标记发布候选",
+      className: "border-purple-500/30 bg-purple-500/10 text-purple-600",
+    };
+  }
+  if (eligible) {
+    return {
+      label: "门禁已通过",
+      className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
+    };
+  }
+  return {
+    label: "未达发布门禁",
+    className: "border-amber-500/30 bg-amber-500/10 text-amber-600",
+  };
+}
+
 export function resolveChapterTaskActionType(kind: ChapterActionKind, mode?: ReviseMode): ChapterRunActionType {
   if (kind === "rewrite") return "rewrite";
   if (kind === "resync") return "resync";
@@ -158,6 +206,126 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   "needs-revision": { color: "text-destructive bg-destructive/10", icon: <RotateCcw size={12} /> },
   imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
 };
+
+export function ReleaseCandidatePanel({
+  fallbackIsReleaseCandidate,
+  evaluation,
+  loading,
+  error,
+  manualConfirmed,
+  pendingAction,
+  onToggleManualConfirmed,
+  onRefresh,
+  onMark,
+  onCancel,
+}: {
+  readonly fallbackIsReleaseCandidate: boolean;
+  readonly evaluation: ReleaseCandidateEvaluationData | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly manualConfirmed: boolean;
+  readonly pendingAction: "mark" | "cancel" | null;
+  readonly onToggleManualConfirmed: (next: boolean) => void;
+  readonly onRefresh: () => void;
+  readonly onMark: () => void;
+  readonly onCancel: () => void;
+}) {
+  const badge = resolveReleaseCandidateBadge(
+    evaluation?.isReleaseCandidate ?? fallbackIsReleaseCandidate,
+    evaluation?.eligible === true,
+  );
+  const skipsManualConfirmation = evaluation?.autopilotLevel === "autopilot" || evaluation?.autopilotLevel === "L3";
+
+  return (
+    <section data-release-candidate-panel className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">发布候选</h2>
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-bold ${badge.className}`}>
+              {badge.label}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            质量分 {evaluation?.overallScore ?? "--"} / 门槛 {evaluation?.publishQualityGate ?? "--"}
+          </p>
+          {evaluation?.checkpoint && (
+            <p className="text-xs text-muted-foreground">{evaluation.checkpoint.reason}</p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={onRefresh}
+            className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border border-border/50 bg-secondary/30 hover:bg-secondary/60 transition-colors"
+          >
+            <RefreshCw size={14} />
+            刷新评估
+          </button>
+          <button
+            onClick={onMark}
+            disabled={loading || pendingAction !== null || evaluation?.eligible !== true}
+            className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500 hover:text-white transition-colors disabled:opacity-50"
+          >
+            <Check size={14} />
+            {pendingAction === "mark" ? "标记中…" : "标记候选"}
+          </button>
+          <button
+            onClick={onCancel}
+            disabled={loading || pendingAction !== null || (evaluation?.isReleaseCandidate ?? fallbackIsReleaseCandidate) !== true}
+            className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive hover:text-white transition-colors disabled:opacity-50"
+          >
+            <X size={14} />
+            {pendingAction === "cancel" ? "取消中…" : "取消候选"}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <label className={`flex items-center gap-2 text-sm ${skipsManualConfirmation ? "text-muted-foreground" : "text-foreground"}`}>
+        <input
+          type="checkbox"
+          checked={manualConfirmed || skipsManualConfirmation}
+          disabled={skipsManualConfirmation}
+          onChange={(e) => onToggleManualConfirmed(e.target.checked)}
+          className="rounded border-border/50"
+        />
+        {skipsManualConfirmation
+          ? "当前 autopilot/L3 策略可跳过人工通读确认"
+          : "我已完成人工通读确认，可进入发布候选阶段"}
+      </label>
+
+      <div className="grid gap-2 md:grid-cols-2">
+        {(evaluation?.gates ?? []).map((gate) => (
+          <div key={gate.gateId} className={`rounded-xl border px-4 py-3 ${gate.passed ? "border-emerald-500/20 bg-emerald-500/[0.05]" : "border-amber-500/20 bg-amber-500/[0.05]"}`}>
+            <div className="flex items-center justify-between gap-2 text-sm font-semibold">
+              <span>{gate.label}</span>
+              <span className={gate.passed ? "text-emerald-600" : "text-amber-600"}>{gate.passed ? "通过" : "阻断"}</span>
+            </div>
+            {gate.reason && (
+              <p className="mt-1 text-xs text-muted-foreground">{gate.reason}</p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {evaluation && evaluation.blockingReasons.length > 0 && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-4 py-3">
+          <div className="text-sm font-semibold text-amber-700">当前阻断原因</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+            {evaluation.blockingReasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function BookDetail({
   bookId,
@@ -183,6 +351,14 @@ export function BookDetail({
     loading: chapterRunSummaryLoading,
     refetch: refetchChapterRunSummary,
   } = useApi<{ runs: ReadonlyArray<ChapterRunSummaryData> }>(`/books/${bookId}/chapter-runs?limit=30`);
+  const [releaseCandidateManualConfirmed, setReleaseCandidateManualConfirmed] = useState(false);
+  const [releaseCandidatePendingAction, setReleaseCandidatePendingAction] = useState<"mark" | "cancel" | null>(null);
+  const {
+    data: releaseCandidateEvaluation,
+    loading: releaseCandidateLoading,
+    error: releaseCandidateError,
+    refetch: refetchReleaseCandidateEvaluation,
+  } = useApi<ReleaseCandidateEvaluationData>(`/books/${bookId}/release-candidate/evaluate?manualConfirmed=${releaseCandidateManualConfirmed ? "true" : "false"}`);
   const [writeRequestPending, setWriteRequestPending] = useState(false);
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -525,6 +701,35 @@ export function BookDetail({
     refetch();
   };
 
+  const handleMarkReleaseCandidate = async () => {
+    setReleaseCandidatePendingAction("mark");
+    try {
+      await fetchJson(`/books/${bookId}/release-candidate/mark`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ manualConfirmed: releaseCandidateManualConfirmed }),
+      });
+      await Promise.all([refetch(), refetchReleaseCandidateEvaluation()]);
+    } catch (e) {
+      await refetchReleaseCandidateEvaluation();
+      alert(e instanceof Error ? e.message : "发布候选标记失败");
+    } finally {
+      setReleaseCandidatePendingAction(null);
+    }
+  };
+
+  const handleCancelReleaseCandidate = async () => {
+    setReleaseCandidatePendingAction("cancel");
+    try {
+      await fetchJson(`/books/${bookId}/release-candidate/cancel`, { method: "POST" });
+      await Promise.all([refetch(), refetchReleaseCandidateEvaluation()]);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "取消发布候选失败");
+    } finally {
+      setReleaseCandidatePendingAction(null);
+    }
+  };
+
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-32 space-y-4">
       <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
@@ -569,6 +774,10 @@ export function BookDetail({
   const currentStatus = settingsStatus ?? (book.status as BookStatus);
 
   const exportHref = `/api/books/${bookId}/export?format=${exportFormat}${exportApprovedOnly ? "&approvedOnly=true" : ""}`;
+  const releaseCandidateBadge = resolveReleaseCandidateBadge(
+    book.is_release_candidate === true,
+    releaseCandidateEvaluation?.eligible === true,
+  );
 
   return (
     <div className="space-y-8 fade-in">
@@ -593,6 +802,9 @@ export function BookDetail({
             {book.language === "en" && (
               <span className="px-1.5 py-0.5 rounded border border-primary/20 text-primary text-[10px] font-bold">EN</span>
             )}
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-bold ${releaseCandidateBadge.className}`}>
+              {releaseCandidateBadge.label}
+            </span>
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground font-medium">
             <span className="px-2 py-0.5 rounded bg-secondary/50 text-foreground/70 uppercase tracking-wider text-xs">{book.genre}</span>
@@ -652,6 +864,19 @@ export function BookDetail({
           )}
         </div>
       )}
+
+      <ReleaseCandidatePanel
+        fallbackIsReleaseCandidate={book.is_release_candidate === true}
+        evaluation={releaseCandidateEvaluation}
+        loading={releaseCandidateLoading}
+        error={releaseCandidateError}
+        manualConfirmed={releaseCandidateManualConfirmed}
+        pendingAction={releaseCandidatePendingAction}
+        onToggleManualConfirmed={setReleaseCandidateManualConfirmed}
+        onRefresh={() => { void refetchReleaseCandidateEvaluation(); }}
+        onMark={() => { void handleMarkReleaseCandidate(); }}
+        onCancel={() => { void handleCancelReleaseCandidate(); }}
+      />
 
       {/* Tool Strip */}
       <div className="flex flex-wrap items-center gap-2 py-1">

@@ -47,6 +47,12 @@ import {
   listAssistantSkills,
 } from "./services/assistant-skill-registry-service.js";
 import {
+  evaluateReleaseCandidate,
+  scanReleaseGateSecuritySources,
+  type ReleaseCandidateEvaluation,
+  type ReleaseGateTextSource,
+} from "./services/release-gate-service.js";
+import {
   AssistantConductor,
   type AssistantConductorEvent,
   type CheckpointState,
@@ -916,6 +922,7 @@ const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
 const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
+const ASSISTANT_RELEASE_CANDIDATE_PATTERN = /发布候选|release\s*candidate|可发布|候选确认/iu;
 const ASSISTANT_CRUD_READ_PATTERN = /查询|查看|检索|read|search/iu;
 const ASSISTANT_CRUD_DELETE_PATTERN = /删除|delete/iu;
 const ASSISTANT_CRUD_RESTORE_PATTERN = /恢复|restore/iu;
@@ -1048,6 +1055,34 @@ function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
     return "generate_structure";
   }
   return null;
+}
+
+function appendAssistantCheckpointAfterLeafTasks(graph: TaskGraph): TaskGraph {
+  const leafTaskNodeIds = graph.nodes
+    .filter((node) => node.type === "task")
+    .filter((node) => !graph.edges.some((edge) => edge.from === node.nodeId))
+    .map((node) => node.nodeId);
+  if (leafTaskNodeIds.length === 0) {
+    return graph;
+  }
+  const checkpointNodeId = nextAssistantCheckpointNodeId(graph);
+  const checkpointNode: TaskNode = {
+    nodeId: checkpointNodeId,
+    type: "checkpoint",
+    action: "checkpoint",
+    checkpoint: {
+      nodeId: checkpointNodeId,
+      requiredApproval: true,
+    },
+  };
+  return {
+    ...graph,
+    nodes: [...graph.nodes, checkpointNode],
+    edges: dedupeAssistantTaskEdges([
+      ...graph.edges,
+      ...leafTaskNodeIds.map((nodeId) => ({ from: nodeId, to: checkpointNodeId })),
+    ]),
+  };
 }
 
 function parseAssistantPlanScope(rawScope: unknown): { ok: true; scope: AssistantPlanScope } | { ok: false; errors: Array<{ field: string; message: string }> } {
@@ -1881,6 +1916,100 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch {
       return normalizeAssistantStrategySettings(undefined);
     }
+  }
+
+  async function readPersistedBookConfigRecord(bookId: string): Promise<Record<string, unknown> | null> {
+    try {
+      const raw = JSON.parse(await readFile(join(state.bookDir(bookId), "book.json"), "utf-8"));
+      return typeof raw === "object" && raw !== null && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function loadBookConfigWithReleaseCandidateState(
+    bookId: string,
+  ): Promise<Record<string, unknown> & { is_release_candidate: boolean }> {
+    const book = await state.loadBookConfig(bookId) as Record<string, unknown>;
+    const persisted = await readPersistedBookConfigRecord(bookId);
+    return {
+      ...book,
+      is_release_candidate: persisted?.is_release_candidate === true,
+    };
+  }
+
+  async function writeBookReleaseCandidateState(
+    bookId: string,
+    isReleaseCandidate: boolean,
+  ): Promise<Record<string, unknown> & { is_release_candidate: boolean }> {
+    const persisted = await readPersistedBookConfigRecord(bookId);
+    const book = await state.loadBookConfig(bookId) as Record<string, unknown>;
+    const nextBook = {
+      ...(persisted ?? {}),
+      ...book,
+      is_release_candidate: isReleaseCandidate,
+      updatedAt: new Date().toISOString(),
+    };
+    const bookPath = join(state.bookDir(bookId), "book.json");
+    await mkdir(dirname(bookPath), { recursive: true });
+    await writeFile(bookPath, JSON.stringify(nextBook, null, 2), "utf-8");
+    return nextBook;
+  }
+
+  async function collectReleaseGateSecuritySources(bookId: string): Promise<ReadonlyArray<ReleaseGateTextSource>> {
+    const sources: ReleaseGateTextSource[] = [];
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    for (const fileName of ["story_bible.md", "volume_outline.md", "character_matrix.md", "pending_hooks.md"]) {
+      try {
+        const content = await readFile(join(storyDir, fileName), "utf-8");
+        sources.push({ source: `story/${fileName}`, content });
+      } catch {
+        // ignore missing story sources
+      }
+    }
+    try {
+      const chapterFiles = (await readdir(chaptersDir))
+        .filter((fileName) => /^\d+_.+\.md$/u.test(fileName))
+        .sort((left, right) => left.localeCompare(right, "zh-CN"));
+      for (const fileName of chapterFiles) {
+        try {
+          const content = await readFile(join(chaptersDir, fileName), "utf-8");
+          sources.push({ source: `chapters/${fileName}`, content });
+        } catch {
+          // ignore unreadable chapter sources
+        }
+      }
+    } catch {
+      // ignore missing chapters directory
+    }
+    return sources;
+  }
+
+  async function buildReleaseCandidateEvaluation(
+    bookId: string,
+    manualConfirmed: boolean,
+  ): Promise<ReleaseCandidateEvaluation> {
+    const book = await loadBookConfigWithReleaseCandidateState(bookId);
+    const strategy = await readAssistantStrategySettings();
+    const report = await deriveAssistantEvaluateReport(
+      await chapterRunStore.listRuns(bookId, { limit: 100 }),
+      { type: "book", bookId },
+      [],
+    );
+    const securityFindings = scanReleaseGateSecuritySources(await collectReleaseGateSecuritySources(bookId));
+    return evaluateReleaseCandidate({
+      bookId,
+      isReleaseCandidate: book.is_release_candidate,
+      publishQualityGate: strategy.publishQualityGate,
+      overallScore: report.overallScore,
+      consistencyBlockingIssues: report.blockingIssues,
+      securityFindings,
+      manualConfirmed,
+      autopilotLevel: strategy.autopilotLevel,
+    });
   }
 
   async function buildPipelineConfig(
@@ -3524,10 +3653,62 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.get("/api/books/:id", async (c) => {
     const id = c.req.param("id");
     try {
-      const book = await state.loadBookConfig(id);
+      const book = await loadBookConfigWithReleaseCandidateState(id);
       const chapters = await state.loadChapterIndex(id);
       const nextChapter = await state.getNextChapterNumber(id);
       return c.json({ book, chapters, nextChapter });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.get("/api/books/:id/release-candidate/evaluate", async (c) => {
+    const id = c.req.param("id");
+    try {
+      return c.json(await buildReleaseCandidateEvaluation(id, c.req.query("manualConfirmed") === "true"));
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.post("/api/books/:id/release-candidate/mark", async (c) => {
+    const id = c.req.param("id");
+    const requestBody = await c.req.json<unknown>().catch(() => null);
+    const manualConfirmed = typeof requestBody === "object" && requestBody !== null && !Array.isArray(requestBody)
+      ? (requestBody as Record<string, unknown>).manualConfirmed === true
+      : false;
+    try {
+      const evaluation = await buildReleaseCandidateEvaluation(id, manualConfirmed);
+      if (!evaluation.eligible) {
+        return c.json({
+          error: {
+            code: "RELEASE_CANDIDATE_GATE_BLOCKED",
+            message: "Release candidate gates are not satisfied.",
+            evaluation,
+          },
+        }, 409);
+      }
+      const book = await writeBookReleaseCandidateState(id, true);
+      return c.json({
+        ok: true,
+        book,
+        evaluation: {
+          ...evaluation,
+          isReleaseCandidate: true,
+        },
+      });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.post("/api/books/:id/release-candidate/cancel", async (c) => {
+    const id = c.req.param("id");
+    try {
+      return c.json({
+        ok: true,
+        book: await writeBookReleaseCandidateState(id, false),
+      });
     } catch {
       return c.json({ error: `Book "${id}" not found` }, 404);
     }
@@ -5202,7 +5383,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
-    const graph = buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level);
+    const requiresReleaseCandidateCheckpoint = ASSISTANT_RELEASE_CANDIDATE_PATTERN.test(input);
+    const graph = requiresReleaseCandidateCheckpoint
+      ? appendAssistantCheckpointAfterLeafTasks(buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level))
+      : buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level);
     assistantTaskGraphs.set(taskId, graph);
     return c.json({
       taskId,
@@ -5210,7 +5394,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       plan: drafted.plan,
       graph,
       requiresConfirmation: true,
-      risk: drafted.risk,
+      risk: {
+        ...drafted.risk,
+        reasons: requiresReleaseCandidateCheckpoint
+          ? [...drafted.risk.reasons, "包含发布候选阶段 checkpoint，需人工确认后才能完成候选确认。"]
+          : drafted.risk.reasons,
+      },
     });
   });
 
@@ -6433,8 +6622,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }>();
     try {
       const book = await state.loadBookConfig(id);
+      const isReleaseCandidate = (await readPersistedBookConfigRecord(id))?.is_release_candidate === true;
       const updated = {
         ...book,
+        is_release_candidate: isReleaseCandidate,
         ...(updates.chapterWordCount !== undefined ? { chapterWordCount: Number(updates.chapterWordCount) } : {}),
         ...(updates.targetChapters !== undefined ? { targetChapters: Number(updates.targetChapters) } : {}),
         ...(updates.status !== undefined ? { status: updates.status as typeof book.status } : {}),
@@ -6442,6 +6633,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         updatedAt: new Date().toISOString(),
       };
       await state.saveBookConfig(id, updated);
+      await writeBookReleaseCandidateState(id, updated.is_release_candidate === true);
       return c.json({ ok: true, book: updated });
     } catch (e) {
       return c.json({ error: String(e) }, 500);

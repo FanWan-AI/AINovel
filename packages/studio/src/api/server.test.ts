@@ -204,6 +204,44 @@ async function writeChapterRunLedger(root: string, bookId: string, runs: Readonl
   }, null, 2), "utf-8");
 }
 
+async function seedReleaseGateBook(root: string, options?: {
+  readonly publishQualityGate?: number;
+  readonly unsafeContent?: string;
+  readonly pendingHooks?: string;
+}): Promise<void> {
+  const chapterDir = join(root, "books", "demo-book", "chapters");
+  const storyDir = join(root, "books", "demo-book", "story");
+  await mkdir(chapterDir, { recursive: true });
+  await mkdir(storyDir, { recursive: true });
+  await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({
+    id: "demo-book",
+    title: "演示书",
+    genre: "都市",
+    status: "active",
+    chapterWordCount: 1800,
+    targetChapters: 12,
+    language: "zh",
+  }, null, 2), "utf-8");
+  await writeFile(join(chapterDir, "0003_demo.md"), "# 第3章\n林舟回到王城调查旧案。", "utf-8");
+  await writeFile(
+    join(chapterDir, "0004_demo.md"),
+    `# 第4章\n林舟发现戒指线索，并确认内鬼身份。${options?.unsafeContent ? `\n${options.unsafeContent}` : ""}`,
+    "utf-8",
+  );
+  await writeFile(join(storyDir, "story_bible.md"), "主线：林舟追查王城阴谋。", "utf-8");
+  await writeFile(join(storyDir, "character_matrix.md"), "角色：林舟，动机是查明真相。", "utf-8");
+  await writeFile(join(storyDir, "pending_hooks.md"), options?.pendingHooks ?? "- 黑纹戒指来历未明\n- 内鬼身份待揭露", "utf-8");
+  await writeFile(join(storyDir, "volume_outline.md"), "第一卷：王城风暴。", "utf-8");
+  if (typeof options?.publishQualityGate === "number") {
+    const config = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8")) as Record<string, unknown>;
+    config.assistantStrategy = {
+      publishQualityGate: options.publishQualityGate,
+      autopilotLevel: "guarded",
+    };
+    await writeFile(join(root, "inkos.json"), JSON.stringify(config, null, 2), "utf-8");
+  }
+}
+
 function parseAssistantDonePayload(body: string): Record<string, unknown> {
   const events = body
     .split("\n\n")
@@ -636,6 +674,38 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("appends a release-candidate checkpoint when the assistant input requests candidate confirmation", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_release_cp_001",
+        input: "审计第14章并自动修复主要问题，最后进入发布候选确认",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      graph: {
+        nodes: expect.arrayContaining([
+          expect.objectContaining({ nodeId: "cp2", type: "checkpoint", action: "checkpoint" }),
+        ]),
+        edges: expect.arrayContaining([
+          expect.objectContaining({ from: "s3", to: "cp2" }),
+        ]),
+      },
+      risk: {
+        reasons: expect.arrayContaining([
+          "包含发布候选阶段 checkpoint，需人工确认后才能完成候选确认。",
+        ]),
+      },
+    });
+  });
+
   it("returns assistant policy check result with required approvals for high-risk actions", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1009,6 +1079,101 @@ describe("createStudioServer daemon lifecycle", () => {
     };
     expect(emptyPayload.report.evidence).toHaveLength(1);
     expect(emptyPayload.report.evidence[0]?.source).toContain("chapter:demo-book:99");
+  });
+
+  it("returns release-candidate gate results and blocks marking until gates pass", async () => {
+    await seedReleaseGateBook(root, { publishQualityGate: 70 });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const evaluateResponse = await app.request("http://localhost/api/books/demo-book/release-candidate/evaluate?manualConfirmed=false");
+    expect(evaluateResponse.status).toBe(200);
+    await expect(evaluateResponse.json()).resolves.toMatchObject({
+      bookId: "demo-book",
+      eligible: false,
+      publishQualityGate: 70,
+      gates: expect.arrayContaining([
+        expect.objectContaining({ gateId: "quality" }),
+        expect.objectContaining({ gateId: "consistency", passed: true }),
+        expect.objectContaining({ gateId: "security", passed: true }),
+        expect.objectContaining({
+          gateId: "manual_confirmation",
+          passed: false,
+          reason: "尚未确认已完成人工通读。",
+        }),
+      ]),
+      blockingReasons: expect.arrayContaining(["尚未确认已完成人工通读。"]),
+    });
+
+    const markBlockedResponse = await app.request("http://localhost/api/books/demo-book/release-candidate/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manualConfirmed: false }),
+    });
+    expect(markBlockedResponse.status).toBe(409);
+    await expect(markBlockedResponse.json()).resolves.toMatchObject({
+      error: {
+        code: "RELEASE_CANDIDATE_GATE_BLOCKED",
+        evaluation: expect.objectContaining({
+          eligible: false,
+          blockingReasons: expect.arrayContaining(["尚未确认已完成人工通读。"]),
+        }),
+      },
+    });
+  });
+
+  it("marks and cancels release candidates while persisting is_release_candidate", async () => {
+    await seedReleaseGateBook(root, { publishQualityGate: 70 });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const markResponse = await app.request("http://localhost/api/books/demo-book/release-candidate/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manualConfirmed: true }),
+    });
+    expect(markResponse.status).toBe(200);
+    await expect(markResponse.json()).resolves.toMatchObject({
+      ok: true,
+      book: expect.objectContaining({ is_release_candidate: true }),
+      evaluation: expect.objectContaining({ eligible: true, isReleaseCandidate: true }),
+    });
+
+    const detailResponse = await app.request("http://localhost/api/books/demo-book");
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toMatchObject({
+      book: expect.objectContaining({ is_release_candidate: true }),
+    });
+
+    const cancelResponse = await app.request("http://localhost/api/books/demo-book/release-candidate/cancel", {
+      method: "POST",
+    });
+    expect(cancelResponse.status).toBe(200);
+    await expect(cancelResponse.json()).resolves.toMatchObject({
+      ok: true,
+      book: expect.objectContaining({ is_release_candidate: false }),
+    });
+  });
+
+  it("fails the release-candidate security gate when unsafe content is detected", async () => {
+    await seedReleaseGateBook(root, {
+      publishQualityGate: 70,
+      unsafeContent: "附录：炸药制作教程与引爆步骤。",
+    });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/release-candidate/evaluate?manualConfirmed=true");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      eligible: false,
+      gates: expect.arrayContaining([
+        expect.objectContaining({ gateId: "security", passed: false }),
+      ]),
+      blockingReasons: expect.arrayContaining([
+        expect.stringContaining("安全审计"),
+      ]),
+    });
   });
 
   it("aggregates assistant world consistency report with market signals source+timestamp", async () => {
