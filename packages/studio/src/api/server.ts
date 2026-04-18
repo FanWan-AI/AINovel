@@ -30,10 +30,14 @@ import { previewNextPlan, PlanLowConfidenceError } from "./services/next-plan-se
 import { validateWriteNextInput } from "./schemas/write-next-schema.js";
 import { buildWriteNextExternalContext, buildWriteNextContextFromPlan } from "./services/write-next-service.js";
 import {
+  ASSISTANT_AUTOPILOT_LEVEL_VALUES,
   evaluateAssistantPolicy,
+  normalizeAssistantStrategySettings,
   requiresAssistantCheckpoint,
+  type AssistantAutopilotLevel,
   type AssistantPolicyBudgetInput,
   type AssistantPolicyPlanStep,
+  type AssistantStrategySettings,
 } from "./services/assistant-policy-service.js";
 import {
   authorizeAssistantSkillPlan,
@@ -131,6 +135,11 @@ interface WritingGovernanceValidationError {
   readonly message: string;
 }
 
+interface AssistantStrategyValidationError {
+  readonly field: string;
+  readonly message: string;
+}
+
 interface BriefTraceEntry {
   readonly text: string;
   readonly matched: boolean;
@@ -191,6 +200,19 @@ type WritingGovernanceInput = {
   extensions?: Record<string, unknown>;
 };
 
+type AssistantStrategyInput = {
+  autopilotLevel?: AssistantAutopilotLevel;
+  autoFixThreshold?: number;
+  maxAutoFixIterations?: number;
+  budget?: {
+    limit: number;
+    currency: string;
+  };
+  approvalSkills?: string[];
+  publishQualityGate?: number;
+  extensions?: Record<string, unknown>;
+};
+
 function validateWritingGovernanceInput(raw: unknown): { ok: true; value: WritingGovernanceInput } | { ok: false; errors: WritingGovernanceValidationError[] } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, errors: [{ field: "body", message: "Request body must be a JSON object." }] };
@@ -226,6 +248,106 @@ function validateWritingGovernanceInput(raw: unknown): { ok: true; value: Writin
       });
     } else {
       result.antiAiTraceStrength = body.antiAiTraceStrength as AntiAiTraceStrength;
+    }
+  }
+
+  if (body.extensions !== undefined) {
+    if (typeof body.extensions !== "object" || body.extensions === null || Array.isArray(body.extensions)) {
+      errors.push({ field: "extensions", message: "extensions must be an object." });
+    } else {
+      result.extensions = body.extensions as Record<string, unknown>;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return { ok: true, value: result };
+}
+
+function validateAssistantStrategyInput(raw: unknown): { ok: true; value: AssistantStrategyInput } | { ok: false; errors: AssistantStrategyValidationError[] } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, errors: [{ field: "body", message: "Request body must be a JSON object." }] };
+  }
+  const body = raw as Record<string, unknown>;
+  const errors: AssistantStrategyValidationError[] = [];
+  const result: AssistantStrategyInput = {};
+  const knownSkillIds = new Set(listAssistantSkills().map((skill) => skill.skillId));
+
+  if (body.autopilotLevel !== undefined) {
+    if (!ASSISTANT_AUTOPILOT_LEVEL_VALUES.includes(body.autopilotLevel as AssistantAutopilotLevel)) {
+      errors.push({
+        field: "autopilotLevel",
+        message: `autopilotLevel must be one of ${ASSISTANT_AUTOPILOT_LEVEL_VALUES.join(", ")}.`,
+      });
+    } else {
+      result.autopilotLevel = body.autopilotLevel as AssistantAutopilotLevel;
+    }
+  }
+
+  if (body.autoFixThreshold !== undefined) {
+    if (typeof body.autoFixThreshold !== "number" || !Number.isFinite(body.autoFixThreshold) || body.autoFixThreshold < 0 || body.autoFixThreshold > 100) {
+      errors.push({ field: "autoFixThreshold", message: "autoFixThreshold must be a number between 0 and 100." });
+    } else {
+      result.autoFixThreshold = body.autoFixThreshold;
+    }
+  }
+
+  if (body.maxAutoFixIterations !== undefined) {
+    const maxAutoFixIterations = body.maxAutoFixIterations;
+    if (typeof maxAutoFixIterations !== "number" || !Number.isInteger(maxAutoFixIterations) || maxAutoFixIterations < 1 || maxAutoFixIterations > 20) {
+      errors.push({ field: "maxAutoFixIterations", message: "maxAutoFixIterations must be an integer between 1 and 20." });
+    } else {
+      result.maxAutoFixIterations = maxAutoFixIterations;
+    }
+  }
+
+  if (body.budget !== undefined) {
+    if (typeof body.budget !== "object" || body.budget === null || Array.isArray(body.budget)) {
+      errors.push({ field: "budget", message: "budget must be an object." });
+    } else {
+      const budget = body.budget as Record<string, unknown>;
+      const limit = budget.limit;
+      const currency = typeof budget.currency === "string" ? budget.currency.trim() : "";
+      if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0) {
+        errors.push({ field: "budget.limit", message: "budget.limit must be a number greater than or equal to 0." });
+      }
+      if (!currency) {
+        errors.push({ field: "budget.currency", message: "budget.currency must be a non-empty string." });
+      }
+      if (typeof limit === "number" && Number.isFinite(limit) && limit >= 0 && currency) {
+        result.budget = { limit, currency };
+      }
+    }
+  }
+
+  if (body.approvalSkills !== undefined) {
+    if (!Array.isArray(body.approvalSkills)) {
+      errors.push({ field: "approvalSkills", message: "approvalSkills must be an array of skill ids." });
+    } else {
+      const approvalSkills: string[] = [];
+      body.approvalSkills.forEach((value, index) => {
+        const skillId = typeof value === "string" ? value.trim() : "";
+        if (!skillId) {
+          errors.push({ field: `approvalSkills[${index}]`, message: "approval skill must be a non-empty string." });
+          return;
+        }
+        if (!knownSkillIds.has(skillId)) {
+          errors.push({ field: `approvalSkills[${index}]`, message: `unknown approval skill: ${skillId}.` });
+          return;
+        }
+        approvalSkills.push(skillId);
+      });
+      result.approvalSkills = [...new Set(approvalSkills)];
+    }
+  }
+
+  if (body.publishQualityGate !== undefined) {
+    if (typeof body.publishQualityGate !== "number" || !Number.isFinite(body.publishQualityGate) || body.publishQualityGate < 0 || body.publishQualityGate > 100) {
+      errors.push({ field: "publishQualityGate", message: "publishQualityGate must be a number between 0 and 100." });
+    } else {
+      result.publishQualityGate = body.publishQualityGate;
     }
   }
 
@@ -1507,6 +1629,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return freshConfig;
   }
 
+  async function readAssistantStrategySettings(): Promise<AssistantStrategySettings> {
+    try {
+      const configPath = join(root, "inkos.json");
+      const raw = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+      return normalizeAssistantStrategySettings(raw.assistantStrategy);
+    } catch {
+      return normalizeAssistantStrategySettings(undefined);
+    }
+  }
+
   async function buildPipelineConfig(
     overrides?: Partial<Pick<PipelineConfig, "externalContext">>,
   ): Promise<PipelineConfig> {
@@ -2770,6 +2902,39 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  app.get("/api/project/assistant-strategy", async (c) => {
+    try {
+      return c.json({ settings: await readAssistantStrategySettings() });
+    } catch (e) {
+      return c.json({ error: `Failed to read assistant strategy settings: ${String(e)}` }, 500);
+    }
+  });
+
+  app.put("/api/project/assistant-strategy", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const validation = validateAssistantStrategyInput(body);
+    if (!validation.ok) {
+      return c.json({ code: "ASSISTANT_STRATEGY_VALIDATION_FAILED", errors: validation.errors }, 422);
+    }
+    try {
+      const configPath = join(root, "inkos.json");
+      const existing = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+      const baseSettings = normalizeAssistantStrategySettings(existing.assistantStrategy);
+      const nextSettings = {
+        ...baseSettings,
+        ...validation.value,
+        ...(validation.value.budget ? { budget: validation.value.budget } : {}),
+        ...(validation.value.approvalSkills ? { approvalSkills: validation.value.approvalSkills } : {}),
+        updatedAt: new Date().toISOString(),
+      };
+      existing.assistantStrategy = nextSettings;
+      await writeFile(configPath, JSON.stringify(existing, null, 2), "utf-8");
+      return c.json({ ok: true, settings: nextSettings });
+    } catch (e) {
+      return c.json({ error: `Failed to save assistant strategy settings: ${String(e)}` }, 500);
+    }
+  });
+
   // --- Truth files browser ---
 
   app.get("/api/books/:id/truth", async (c) => {
@@ -3902,10 +4067,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
     const planInput = (planParsed as { ok: true; value: AssistantPolicyPlanStep[] }).value;
+    const strategy = await readAssistantStrategySettings();
 
     const policy = evaluateAssistantPolicy({
       plan: planInput,
       approved: body.approved === true,
+      strategy,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
@@ -3982,6 +4149,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const budgetInput = budgetParsed.ok ? budgetParsed.value : undefined;
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
     const policyPlan = flattenAssistantPolicyPlanFromGraph(graph);
+    const strategy = await readAssistantStrategySettings();
 
     const skillAuthorization = authorizeAssistantSkillPlan(executableNodes, permissionsInput);
     if (!skillAuthorization.allow) {
@@ -4021,6 +4189,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const policy = evaluateAssistantPolicy({
       plan: policyPlan,
       approved,
+      strategy,
       ...(permissionsInput ? { permissions: permissionsInput } : {}),
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
@@ -4080,7 +4249,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     ensureAssistantTaskSnapshot(taskId, sessionId, graph);
     const runner = assistantConductor.runGraph(graph, {
       sessionId,
-      autoApproveCheckpoints: approved,
+      autoApproveCheckpoints: approved || strategy.autopilotLevel === "autopilot",
     });
     const firstEvent = await runner.next();
     if (!firstEvent.done && firstEvent.value) {
