@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
 import {
   getTopActionIds,
   parseChapterLifecycleEvent,
+  ReleaseCandidatePanel,
   resolveChapterTaskActionType,
+  resolveReleaseCandidateBadge,
   resolveRunUnchangedReason,
   supportsRunDiff,
   translateChapterStatus,
@@ -96,6 +100,100 @@ describe("getTopActionIds — dual-button contract", () => {
     const actions = getTopActionIds() as ReadonlyArray<string>;
     expect(actions).not.toContain("draftOnly");
     expect(actions).not.toContain("writeNext");
+  });
+});
+
+describe("resolveReleaseCandidateBadge", () => {
+  it("prioritizes persisted release-candidate status over transient eligibility", () => {
+    expect(resolveReleaseCandidateBadge(true, false)).toMatchObject({
+      label: "已标记发布候选",
+    });
+  });
+
+  it("shows pass/fail states for eligible and blocked books", () => {
+    expect(resolveReleaseCandidateBadge(false, true)).toMatchObject({
+      label: "门禁已通过",
+    });
+    expect(resolveReleaseCandidateBadge(false, false)).toMatchObject({
+      label: "未达发布门禁",
+    });
+  });
+});
+
+describe("ReleaseCandidatePanel", () => {
+  it("renders blocking reasons when a book is not yet eligible", () => {
+    const html = renderToStaticMarkup(createElement(ReleaseCandidatePanel, {
+      fallbackIsReleaseCandidate: false,
+      evaluation: {
+        bookId: "demo-book",
+        isReleaseCandidate: false,
+        eligible: false,
+        publishQualityGate: 80,
+        overallScore: 76,
+        autopilotLevel: "guarded",
+        gates: [
+          { gateId: "quality", label: "质量分", passed: false, blocking: true, reason: "全书质量分 76 未达到发布阈值 80。" },
+          { gateId: "manual_confirmation", label: "人工确认", passed: false, blocking: true, reason: "尚未确认已完成人工通读。" },
+        ],
+        blockingReasons: ["全书质量分 76 未达到发布阈值 80。", "尚未确认已完成人工通读。"],
+        checkpoint: {
+          stage: "release-candidate",
+          requiredApproval: true,
+          status: "pending",
+          reason: "发布候选阶段 checkpoint 等待人工确认。",
+        },
+      },
+      loading: false,
+      error: null,
+      manualConfirmed: false,
+      pendingAction: null,
+      onToggleManualConfirmed: vi.fn(),
+      onRefresh: vi.fn(),
+      onMark: vi.fn(),
+      onCancel: vi.fn(),
+    }));
+
+    expect(html).toContain("发布候选");
+    expect(html).toContain("未达发布门禁");
+    expect(html).toContain("尚未确认已完成人工通读。");
+    expect(html).toContain("当前阻断原因");
+  });
+
+  it("renders marked candidate state and skip-manual hint for autopilot", () => {
+    const html = renderToStaticMarkup(createElement(ReleaseCandidatePanel, {
+      fallbackIsReleaseCandidate: true,
+      evaluation: {
+        bookId: "demo-book",
+        isReleaseCandidate: true,
+        eligible: true,
+        publishQualityGate: 70,
+        overallScore: 84,
+        autopilotLevel: "autopilot",
+        gates: [
+          { gateId: "quality", label: "质量分", passed: true, blocking: true, reason: "全书质量分 84 已达到发布阈值 70。" },
+          { gateId: "manual_confirmation", label: "人工确认", passed: true, blocking: true, reason: "当前策略为 autopilot/L3，发布候选阶段允许跳过人工通读确认。" },
+        ],
+        blockingReasons: [],
+        checkpoint: {
+          stage: "release-candidate",
+          requiredApproval: true,
+          status: "approved",
+          reason: "发布候选阶段 checkpoint 已满足人工确认门禁。",
+        },
+      },
+      loading: false,
+      error: null,
+      manualConfirmed: false,
+      pendingAction: null,
+      onToggleManualConfirmed: vi.fn(),
+      onRefresh: vi.fn(),
+      onMark: vi.fn(),
+      onCancel: vi.fn(),
+    }));
+
+    expect(html).toContain("已标记发布候选");
+    expect(html).toContain("当前 autopilot/L3 策略可跳过人工通读确认");
+    expect(html).toContain("取消候选");
   });
 });
 
