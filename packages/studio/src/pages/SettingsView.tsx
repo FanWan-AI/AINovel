@@ -2,19 +2,21 @@ import { useEffect, useMemo, useState } from "react";
 import { putApi, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
+import {
+  DEFAULT_ASSISTANT_STRATEGY_SETTINGS,
+  normalizeAssistantStrategySettings,
+  type AssistantAutopilotLevel,
+  type AssistantStrategySettings,
+} from "../api/services/assistant-policy-service";
 import { ConfigView } from "./ConfigView";
 import { GenreManager } from "./GenreManager";
 
-export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writing";
+export type SettingsTab = "locale" | "provider" | "genre" | "appearance" | "writing" | "assistant";
 
 interface SettingsTabDefinition {
   readonly key: SettingsTab;
-  readonly labelKey:
-    | "settings.tab.locale"
-    | "settings.tab.provider"
-    | "settings.tab.genre"
-    | "settings.tab.appearance"
-    | "settings.tab.writing";
+  readonly labelKey?: string;
+  readonly label?: string;
   readonly placeholderTitleKey:
     | "settings.placeholder.locale.title"
     | "settings.placeholder.provider.title"
@@ -60,6 +62,12 @@ export const SETTINGS_TAB_DEFINITIONS: ReadonlyArray<SettingsTabDefinition> = [
     placeholderTitleKey: "settings.placeholder.writing.title",
     placeholderDescKey: "settings.placeholder.writing.desc",
   },
+  {
+    key: "assistant",
+    label: "助手策略",
+    placeholderTitleKey: "settings.placeholder.writing.title",
+    placeholderDescKey: "settings.placeholder.writing.desc",
+  },
 ] as const;
 
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "provider";
@@ -81,17 +89,17 @@ export function buildSettingsTabItems({
   const activeTab = normalizeSettingsTab(tab);
   return SETTINGS_TAB_DEFINITIONS.map((item) => ({
     key: item.key,
-    label: t(item.labelKey),
+    label: item.label ?? t(item.labelKey ?? ""),
     active: item.key === activeTab,
     onClick: () => onTabChange(item.key),
   }));
 }
 
-export type SettingsTabContent = "provider" | "genre" | "writing" | "placeholder";
+export type SettingsTabContent = "provider" | "genre" | "writing" | "assistant" | "placeholder";
 
 export function resolveSettingsTabContent(tab?: SettingsTab): SettingsTabContent {
   const activeTab = normalizeSettingsTab(tab);
-  if (activeTab === "provider" || activeTab === "genre" || activeTab === "writing") {
+  if (activeTab === "provider" || activeTab === "genre" || activeTab === "writing" || activeTab === "assistant") {
     return activeTab;
   }
   return "placeholder";
@@ -141,6 +149,35 @@ export const WRITING_GOVERNANCE_KEYS = [
   "anti-ai-trace-strength",
 ] as const;
 
+export interface AssistantStrategyForm {
+  readonly autopilotLevel: AssistantAutopilotLevel;
+  readonly autoFixThreshold: number;
+  readonly maxAutoFixIterations: number;
+  readonly budgetLimit: number;
+  readonly budgetCurrency: string;
+  readonly approvalSkills: ReadonlyArray<string>;
+  readonly publishQualityGate: number;
+}
+
+export const DEFAULT_ASSISTANT_STRATEGY_FORM: AssistantStrategyForm = {
+  autopilotLevel: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.autopilotLevel,
+  autoFixThreshold: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.autoFixThreshold,
+  maxAutoFixIterations: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.maxAutoFixIterations,
+  budgetLimit: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.budget.limit,
+  budgetCurrency: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.budget.currency,
+  approvalSkills: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.approvalSkills,
+  publishQualityGate: DEFAULT_ASSISTANT_STRATEGY_SETTINGS.publishQualityGate,
+};
+
+const ASSISTANT_APPROVAL_SKILL_OPTIONS = [
+  { skillId: "builtin.audit", label: "审核 / 复审" },
+  { skillId: "builtin.revise", label: "章节修订" },
+  { skillId: "builtin.rewrite", label: "重写" },
+  { skillId: "builtin.write-next", label: "写下一章" },
+  { skillId: "project.style-governance", label: "项目风格治理" },
+  { skillId: "trusted.anti-detect", label: "anti-detect" },
+] as const;
+
 export function normalizeWritingGovernanceForm(
   settings?: Partial<WritingGovernanceSettings> | null,
 ): WritingGovernanceForm {
@@ -160,7 +197,26 @@ export function normalizeWritingGovernanceForm(
   };
 }
 
+export function normalizeAssistantStrategyForm(
+  settings?: Partial<AssistantStrategySettings> | null,
+): AssistantStrategyForm {
+  const normalized = normalizeAssistantStrategySettings(settings);
+  return {
+    autopilotLevel: normalized.autopilotLevel,
+    autoFixThreshold: normalized.autoFixThreshold,
+    maxAutoFixIterations: normalized.maxAutoFixIterations,
+    budgetLimit: normalized.budget.limit,
+    budgetCurrency: normalized.budget.currency,
+    approvalSkills: normalized.approvalSkills,
+    publishQualityGate: normalized.publishQualityGate,
+  };
+}
+
 interface SaveWritingGovernanceOptions {
+  readonly putApiImpl?: typeof putApi;
+}
+
+interface SaveAssistantStrategyOptions {
   readonly putApiImpl?: typeof putApi;
 }
 
@@ -170,6 +226,24 @@ export async function saveWritingGovernance(
 ): Promise<void> {
   const putApiImpl = options.putApiImpl ?? putApi;
   await putApiImpl("/project/writing-governance", form);
+}
+
+export async function saveAssistantStrategy(
+  form: AssistantStrategyForm,
+  options: SaveAssistantStrategyOptions = {},
+): Promise<void> {
+  const putApiImpl = options.putApiImpl ?? putApi;
+  await putApiImpl("/project/assistant-strategy", {
+    autopilotLevel: form.autopilotLevel,
+    autoFixThreshold: form.autoFixThreshold,
+    maxAutoFixIterations: form.maxAutoFixIterations,
+    budget: {
+      limit: form.budgetLimit,
+      currency: form.budgetCurrency,
+    },
+    approvalSkills: form.approvalSkills,
+    publishQualityGate: form.publishQualityGate,
+  });
 }
 
 export function collectWritingDuplicateKeys({
@@ -202,13 +276,23 @@ export function SettingsView({
   const { data: writingGovernanceData, loading: writingGovernanceLoading, error: writingGovernanceError, refetch: refetchWritingGovernance } = useApi<{
     readonly settings: WritingGovernanceSettings;
   }>("/project/writing-governance");
+  const { data: assistantStrategyData, loading: assistantStrategyLoading, error: assistantStrategyError, refetch: refetchAssistantStrategy } = useApi<{
+    readonly settings: AssistantStrategySettings;
+  }>("/project/assistant-strategy");
   const [writingForm, setWritingForm] = useState<WritingGovernanceForm>(DEFAULT_WRITING_GOVERNANCE_FORM);
   const [savingWritingGovernance, setSavingWritingGovernance] = useState(false);
+  const [assistantStrategyForm, setAssistantStrategyForm] = useState<AssistantStrategyForm>(DEFAULT_ASSISTANT_STRATEGY_FORM);
+  const [savingAssistantStrategy, setSavingAssistantStrategy] = useState(false);
+  const [assistantStrategySaveError, setAssistantStrategySaveError] = useState<string | null>(null);
   const duplicateKeys = useMemo(() => collectWritingDuplicateKeys(), []);
 
   useEffect(() => {
     setWritingForm(normalizeWritingGovernanceForm(writingGovernanceData?.settings));
   }, [writingGovernanceData?.settings]);
+
+  useEffect(() => {
+    setAssistantStrategyForm(normalizeAssistantStrategyForm(assistantStrategyData?.settings));
+  }, [assistantStrategyData?.settings]);
 
   const renderWritingGovernancePanel = () => {
     if (writingGovernanceLoading) {
@@ -326,6 +410,155 @@ export function SettingsView({
       </div>
     );
   };
+  const renderAssistantStrategyPanel = () => {
+    if (assistantStrategyLoading) {
+      return <p className="text-sm text-muted-foreground">加载助手策略中...</p>;
+    }
+    if (assistantStrategyError) {
+      return <p className="text-sm text-destructive">助手策略加载失败：{assistantStrategyError}</p>;
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <h2 className="text-base font-semibold text-foreground">助手策略中心</h2>
+          <p className="text-sm text-muted-foreground">统一控制 autopilot、预算、审批名单与发布质量门槛，保存后立即作用到 policy/check 与 execute。</p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">Autopilot 级别</span>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              value={assistantStrategyForm.autopilotLevel}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, autopilotLevel: e.target.value as AssistantAutopilotLevel }))}
+            >
+              <option value="manual">manual（所有写入需审批）</option>
+              <option value="guarded">guarded（仅高风险需审批）</option>
+              <option value="autopilot">autopilot（自动通过 checkpoint）</option>
+            </select>
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">发布质量门槛</span>
+            <input
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              type="number"
+              min={0}
+              max={100}
+              value={assistantStrategyForm.publishQualityGate}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, publishQualityGate: Number(e.target.value) || 0 }))}
+            />
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">自动修复阈值</span>
+            <input
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              type="number"
+              min={0}
+              max={100}
+              value={assistantStrategyForm.autoFixThreshold}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, autoFixThreshold: Number(e.target.value) || 0 }))}
+            />
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">最大自动修复轮次</span>
+            <input
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              type="number"
+              min={1}
+              max={20}
+              value={assistantStrategyForm.maxAutoFixIterations}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, maxAutoFixIterations: Number(e.target.value) || 1 }))}
+            />
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">预算上限</span>
+            <input
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              type="number"
+              min={0}
+              value={assistantStrategyForm.budgetLimit}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, budgetLimit: Number(e.target.value) || 0 }))}
+            />
+            <span className="block text-xs text-muted-foreground">填 0 表示沿用调用方预算，不额外拦截。</span>
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="font-medium text-foreground">预算单位</span>
+            <input
+              className="w-full rounded-md border border-border bg-background px-3 py-2"
+              type="text"
+              value={assistantStrategyForm.budgetCurrency}
+              onChange={(e) => setAssistantStrategyForm((prev) => ({ ...prev, budgetCurrency: e.target.value }))}
+            />
+          </label>
+        </div>
+
+        <div className="space-y-3 rounded-md border border-border/70 bg-card/40 p-4">
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold text-foreground">审批技能名单</h3>
+            <p className="text-xs text-muted-foreground">命中的技能即使已授权，也需要显式审批才能继续执行。</p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            {ASSISTANT_APPROVAL_SKILL_OPTIONS.map((item) => {
+              const checked = assistantStrategyForm.approvalSkills.includes(item.skillId);
+              return (
+                <label key={item.skillId} className="flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      setAssistantStrategyForm((prev) => ({
+                        ...prev,
+                        approvalSkills: e.target.checked
+                          ? [...prev.approvalSkills, item.skillId]
+                          : prev.approvalSkills.filter((skillId) => skillId !== item.skillId),
+                      }));
+                    }}
+                  />
+                  <span>{item.label}</span>
+                  <span className="text-xs text-muted-foreground">{item.skillId}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="space-y-1 text-xs text-muted-foreground">
+            <div>
+              {assistantStrategyData?.settings?.updatedAt
+                ? `最近保存：${new Date(assistantStrategyData.settings.updatedAt).toLocaleString()}`
+                : "尚未保存过助手策略。"}
+            </div>
+            {assistantStrategySaveError ? <div className="text-destructive">{assistantStrategySaveError}</div> : null}
+          </div>
+          <button
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-60"
+            disabled={savingAssistantStrategy}
+            onClick={async () => {
+              setSavingAssistantStrategy(true);
+              setAssistantStrategySaveError(null);
+              try {
+                await saveAssistantStrategy(assistantStrategyForm);
+                await refetchAssistantStrategy();
+              } catch (error) {
+                setAssistantStrategySaveError(error instanceof Error ? error.message : String(error));
+              } finally {
+                setSavingAssistantStrategy(false);
+              }
+            }}
+          >
+            {savingAssistantStrategy ? "保存中..." : "保存助手策略"}
+          </button>
+        </div>
+      </div>
+    );
+  };
   const tabContent = resolveSettingsTabContent(activeTab);
 
   return (
@@ -364,6 +597,11 @@ export function SettingsView({
       {tabContent === "writing" && (
         <div className="rounded-lg border border-border px-6 py-6">
           {renderWritingGovernancePanel()}
+        </div>
+      )}
+      {tabContent === "assistant" && (
+        <div className="rounded-lg border border-border px-6 py-6">
+          {renderAssistantStrategyPanel()}
         </div>
       )}
       {tabContent === "placeholder" && (
