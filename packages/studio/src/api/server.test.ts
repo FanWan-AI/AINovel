@@ -1824,6 +1824,30 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(entries[0]?.rule).toBe("default.system-leak-output");
   });
 
+  it("does not block normal story output that contains in-world '系统提示' wording", async () => {
+    runAgentLoopMock.mockResolvedValueOnce("第31章策划：系统提示弹窗出现，主角获得新线索并推进主冲突。");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ prompt: "帮我策划下章剧情" }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = await readSseBody(response);
+    const donePayload = parseAssistantDonePayload(body);
+    expect(donePayload.ok).toBe(true);
+    expect(donePayload.response).toContain("系统提示");
+
+    const entries = await readAssistantSecurityAuditEntries(root);
+    expect(entries).toHaveLength(0);
+  });
+
   it("supports assistant soft-delete preview/execute/restore for chapter and run", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });

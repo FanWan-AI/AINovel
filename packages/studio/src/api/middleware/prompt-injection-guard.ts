@@ -107,7 +107,8 @@ const DEFAULT_OUTPUT_RULES: ReadonlyArray<SecurityRule> = [
     reason: "输出命中 system prompt 泄漏特征，已拦截返回。",
     routePrefixes: ["/api/assistant/"],
     targets: ["response"],
-    pattern: /(system prompt|developer message|hidden prompt|系统提示词|系统提示|开发者消息|BEGIN_SYSTEM_PROMPT|END_SYSTEM_PROMPT|<system>|role:\s*system)/iu,
+    // Avoid false positives for in-story terms like "系统提示" in webnovel content.
+    pattern: /(system prompt|developer message|hidden prompt|系统提示词|开发者消息|BEGIN_SYSTEM_PROMPT|END_SYSTEM_PROMPT|<system>|role:\s*system|(?:以下|这是|这里是|原文|全文).{0,24}(system prompt|系统提示词|开发者消息))/iu,
   },
 ];
 
