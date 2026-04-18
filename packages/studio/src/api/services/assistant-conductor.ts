@@ -160,7 +160,7 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function resolvePauseAfterConsecutiveFailures(input: number | undefined): number | undefined {
+function normalizeFailureThreshold(input: number | undefined): number | undefined {
   return typeof input === "number" && Number.isFinite(input) && input > 0 ? input : undefined;
 }
 
@@ -453,7 +453,7 @@ export class AssistantConductor {
         state.finishedAt = finishedAt;
         run.consecutiveFailures += 1;
         const hasRetryRemaining = state.attempts <= state.maxRetries;
-        const pauseAfterConsecutiveFailures = resolvePauseAfterConsecutiveFailures(
+        const pauseAfterConsecutiveFailures = normalizeFailureThreshold(
           options.pauseAfterConsecutiveFailures,
         );
         const autopilotPauseTriggered = pauseAfterConsecutiveFailures !== undefined

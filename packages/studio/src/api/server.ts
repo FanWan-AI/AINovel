@@ -1103,7 +1103,7 @@ function buildAssistantTaskGraphFromPlan(
 }
 
 function isAssistantRiskyNode(node: Pick<TaskNode, "action" | "mode">): boolean {
-  return node.action === "revise" || node.action === "rewrite" || node.action === "anti-detect";
+  return node.action === "revise" || node.action === "anti-detect";
 }
 
 function dedupeAssistantTaskEdges(edges: ReadonlyArray<TaskEdge>): TaskEdge[] {
@@ -4176,7 +4176,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ...(budgetInput ? { budget: budgetInput } : {}),
     });
     const runtimeGraph = adaptAssistantTaskGraphForAutopilot(graph, policy.autopilot);
-    assistantTaskGraphs.set(taskId, runtimeGraph);
     const graphHasCheckpoint = runtimeGraph.nodes.some((node) => node.type === "checkpoint");
     const filteredPolicyReasons = graphHasCheckpoint && !approved
       ? policy.reasons.filter((reason) => reason !== ASSISTANT_HIGH_RISK_APPROVAL_REASON)
