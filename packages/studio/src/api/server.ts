@@ -112,6 +112,7 @@ const NO_TRUTH_ARTIFACT_UPDATES_MESSAGE = "No truth artifacts required updates."
 const ASSISTANT_EVALUATE_FAILED_RUN_FALLBACK_MESSAGE = "运行失败，需人工复核。";
 const ASSISTANT_EVALUATE_UNCHANGED_RUN_FALLBACK_MESSAGE = "未应用修订，建议人工复核。";
 const ASSISTANT_BOOK_EVALUATE_BATCH_SIZE = 12;
+const ASSISTANT_BOOK_EVALUATE_SNIPPET_MAX_LENGTH = 220;
 const ASSISTANT_HIGH_RISK_APPROVAL_REASON = "High-risk actions require manual approval before execution.";
 const ASSISTANT_AUTOPILOT_BUDGET_PAUSED_CODE = "ASSISTANT_AUTOPILOT_BUDGET_PAUSED";
 const ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED_CODE = "ASSISTANT_AUTOPILOT_FAILURE_THRESHOLD_REACHED";
@@ -2635,7 +2636,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     for (let index = 0; index < files.length; index += ASSISTANT_BOOK_EVALUATE_BATCH_SIZE) {
       const batch = files.slice(index, index + ASSISTANT_BOOK_EVALUATE_BATCH_SIZE);
       const batchResults = await Promise.all(batch.map(async (fileName) => {
-        const chapter = Number.parseInt(fileName.slice(0, fileName.indexOf("_")), 10);
+        const underscoreIndex = fileName.indexOf("_");
+        if (underscoreIndex === -1) return null;
+        const chapter = Number.parseInt(fileName.slice(0, underscoreIndex), 10);
         if (!Number.isInteger(chapter) || chapter < 1) return null;
         const filePath = join(chaptersDir, fileName);
         let content = "";
@@ -2648,7 +2651,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           content
             .replace(/^#.*$/gmu, "")
             .replace(/\s+/gu, " "),
-          220,
+          ASSISTANT_BOOK_EVALUATE_SNIPPET_MAX_LENGTH,
         );
         const wordCount = content.trim().length;
         const chapterRuns = await chapterRunStore.listRuns(input.bookId, { chapter, limit: 8 });
@@ -2723,10 +2726,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const overallScore = clampSerializableScore(
       Object.values(dimensions).reduce((sum, value) => sum + (value ?? 0), 0) / 6,
     );
-    const repeatedChapter = duplicateCount > 0
-      ? chapters.find((chapter, index) =>
-        chapters.findIndex((candidate) => candidate.normalizedSnippet === chapter.normalizedSnippet && candidate.normalizedSnippet.length > 0) !== index)
-      : null;
+    const seenSnippets = new Set<string>();
+    const repeatedChapter = chapters.find((chapter) => {
+      if (!chapter.normalizedSnippet) return false;
+      if (seenSnippets.has(chapter.normalizedSnippet)) {
+        return true;
+      }
+      seenSnippets.add(chapter.normalizedSnippet);
+      return false;
+    }) ?? null;
     const evidence: AssistantEvaluateEvidence[] = [
       {
         source: storyBible ? `book-story:${scope.bookId}:story_bible.md` : `book:${scope.bookId}:chapters`,

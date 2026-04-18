@@ -100,9 +100,9 @@ export function resolveQualityReportTabs(report: QualityReportBundle): ReadonlyA
   readonly report: QualityReportPayload;
 }> {
   return [
-    report.chapter ? { scopeType: "chapter" as const, label: "章节视图", report: report.chapter } : null,
-    report.book ? { scopeType: "book" as const, label: "全书视图", report: report.book } : null,
-  ].flatMap((item) => item ? [item] : []);
+    ...(report.chapter ? [{ scopeType: "chapter" as const, label: "章节视图", report: report.chapter }] : []),
+    ...(report.book ? [{ scopeType: "book" as const, label: "全书视图", report: report.book }] : []),
+  ];
 }
 
 export function QualityReportCard({
@@ -123,10 +123,11 @@ export function QualityReportCard({
     }
   }, [activeScope, tabs]);
 
-  const activeReport = tabs.find((tab) => tab.scopeType === activeScope)?.report ?? tabs[0]?.report;
-  if (!activeReport) {
+  const activeTab = tabs.find((tab) => tab.scopeType === activeScope) ?? tabs[0];
+  if (!activeTab) {
     return null;
   }
+  const activeReport = activeTab.report;
 
   const dimensionRows = mapQualityDimensionRows(activeReport);
   const evidenceRows = resolveQualityEvidence(activeReport.evidence);
