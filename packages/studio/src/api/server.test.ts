@@ -1266,6 +1266,49 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("[chaos] ignores corrupted assistant task snapshot store and rewrites a valid snapshot file on next failure", async () => {
+    const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(storePath, "{invalid-json", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const history = await app.request("http://localhost/api/assistant/tasks?limit=5");
+    expect(history.status).toBe(200);
+    await expect(history.json()).resolves.toMatchObject({ tasks: [] });
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_chaos_snapshot_001",
+        sessionId: "asst_s_chaos_snapshot_001",
+        approved: false,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "rewrite", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+    expect(response.status).toBe(409);
+
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(storePath, "utf-8")) as {
+        version: number;
+        tasks: Array<{ taskId: string; status: string }>;
+      };
+      expect(raw.version).toBe(1);
+      expect(raw.tasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          taskId: "asst_t_chaos_snapshot_001",
+          status: "failed",
+        }),
+      ]));
+    });
+  });
+
   it("loads persisted assistant task snapshots and supports task summary history query", async () => {
     const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
     await mkdir(join(root, ".inkos"), { recursive: true });
@@ -1424,6 +1467,113 @@ describe("createStudioServer daemon lifecycle", () => {
     const blockedEventsBody = await blockedEvents.json() as { entries: Array<{ data: { taskId: string } }> };
     expect(blockedEventsBody.entries[0]).toBeDefined();
     expect(blockedEventsBody.entries[0]!.data.taskId).toBe("asst_t_execute_budget_001");
+  });
+
+  it("[chaos] interrupts assistant execute on exhausted budget before mutating chapter data", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    const originalChapter = "# 第3章\n预算守卫前的原文。";
+    await writeFile(chapterPath, originalChapter, "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_chaos_budget_001",
+        sessionId: "asst_s_chaos_budget_001",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+        budget: {
+          spent: 1200,
+          limit: 1000,
+          currency: "tokens",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "ASSISTANT_EXECUTE_POLICY_BLOCKED",
+        taskId: "asst_t_chaos_budget_001",
+        policy: {
+          allow: false,
+          budgetWarning: {
+            spent: 1200,
+            limit: 1000,
+            overBy: 200,
+            currency: "tokens",
+          },
+        },
+      },
+    });
+    expect(auditChapterMock).not.toHaveBeenCalled();
+    expect(reviseDraftMock).not.toHaveBeenCalled();
+    await expect(readFile(chapterPath, "utf-8")).resolves.toBe(originalChapter);
+
+    const task = await app.request("http://localhost/api/assistant/tasks/asst_t_chaos_budget_001");
+    expect(task.status).toBe(200);
+    await expect(task.json()).resolves.toMatchObject({
+      taskId: "asst_t_chaos_budget_001",
+      status: "failed",
+    });
+  });
+
+  it("[chaos] marks assistant execute failed when the revise model times out without mutating chapter data", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, "0003_demo.md");
+    const originalChapter = "# 第3章\n原文。";
+    await writeFile(chapterPath, originalChapter, "utf-8");
+    reviseDraftMock.mockRejectedValueOnce(new Error("model request timed out"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: "asst_t_chaos_timeout_001",
+        sessionId: "asst_s_chaos_timeout_001",
+        approved: true,
+        plan: [
+          { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 3 },
+          { stepId: "s2", action: "revise", mode: "spot-fix", bookId: "demo-book", chapter: 3 },
+          { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 3 },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      taskId: "asst_t_chaos_timeout_001",
+      status: "running",
+      currentStepId: "s2",
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request("http://localhost/api/assistant/tasks/asst_t_chaos_timeout_001");
+      expect(task.status).toBe(200);
+      await expect(task.json()).resolves.toMatchObject({
+        taskId: "asst_t_chaos_timeout_001",
+        status: "failed",
+        error: expect.stringContaining("model request timed out"),
+      });
+    });
+
+    expect(auditChapterMock).toHaveBeenCalledTimes(1);
+    expect(reviseDraftMock).toHaveBeenCalledTimes(1);
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "spot-fix");
+    await expect(readFile(chapterPath, "utf-8")).resolves.toBe(originalChapter);
   });
 
   it("interrupts assistant execute chain when a step fails and propagates the error", async () => {
