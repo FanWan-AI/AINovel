@@ -25,6 +25,7 @@ import {
   completeAssistantResponse,
   createAssistantTaskPlanDraft,
   createAssistantInitialState,
+  detectAssistantBookAction,
   requestAssistantConfirmation,
   parseAssistantTaskRecoveryPayload,
   parseAssistantCrudDeleteRequest,
@@ -33,7 +34,10 @@ import {
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
   resolveAssistantScopeBookIds,
+  resolveAssistantAgentOutcomeFromRuntimeEvents,
+  resolveBookFromPrompt,
   resolveAssistantTemplateSuggestedActions,
+  shouldKeepPendingOnChatDisconnect,
   transitionAssistantTaskPlan,
   submitAssistantInput,
 } from "./AssistantView";
@@ -102,9 +106,72 @@ describe("AssistantView", () => {
       .toEqual(["book-1", "book-2"]);
   });
 
+  it("resolves book from prompt using bracket references and fuzzy matching", () => {
+    const books = [
+      { id: "book-1", title: "多子多福:我靠系统躺赢人生" },
+      { id: "book-2", title: "晚星落于旧时区" },
+    ];
+    // Exact bracket match
+    const r1 = resolveBookFromPrompt("《多子多福:我靠系统躺赢人生》目前有几个章节", books);
+    expect(r1).toEqual({ match: { id: "book-1", title: "多子多福:我靠系统躺赢人生" } });
+    // Partial bracket match
+    const r2 = resolveBookFromPrompt("《多子多福》写的怎么样", books);
+    expect(r2).toEqual({ match: { id: "book-1", title: "多子多福:我靠系统躺赢人生" } });
+    // Fuzzy match without brackets
+    const r3 = resolveBookFromPrompt("晚星落那本书写到哪了", books);
+    expect(r3).toEqual({ match: { id: "book-2", title: "晚星落于旧时区" } });
+    // Colon width variant should still match the same book title.
+    const r5 = resolveBookFromPrompt("多子多福：我靠系统躺赢人生", books);
+    expect(r5).toEqual({ match: { id: "book-1", title: "多子多福:我靠系统躺赢人生" } });
+    // Colloquial "这本书" phrasing in the same sentence should lock onto target book.
+    const r6 = resolveBookFromPrompt("多子多福 这本书下一章写他们三人关系建立后的第一次冲突", books);
+    expect(r6).toEqual({ match: { id: "book-1", title: "多子多福:我靠系统躺赢人生" } });
+    // No match
+    const r4 = resolveBookFromPrompt("你好", books);
+    expect(r4).toBeNull();
+    // Empty books
+    expect(resolveBookFromPrompt("《多子多福》", [])).toBeNull();
+  });
+
+  it("detects write-next intent from colloquial next-chapter phrasing", () => {
+    expect(detectAssistantBookAction("下一章节写他们三人关系的第一次冲突")).toBe("write-next");
+    expect(detectAssistantBookAction("写第24章")).toBe("write-next");
+    expect(detectAssistantBookAction("continue writing the next chapter")).toBe("write-next");
+    expect(detectAssistantBookAction("next chapter with stronger conflict")).toBe("write-next");
+  });
+
+  it("hits target book and enters execution directly for book+write request in one sentence", () => {
+    const activeBooks = [
+      { id: "book-1", title: "多子多福:我靠系统躺赢人生" },
+      { id: "book-2", title: "晚星落于旧时区" },
+    ];
+    const prompt = "给《晚星落于旧时区》写下一章，冲突更强一些";
+
+    const resolution = resolveBookFromPrompt(prompt, activeBooks);
+    expect(resolution).not.toBeNull();
+    expect(resolution && "match" in resolution ? resolution.match.id : null).toBe("book-2");
+    expect(detectAssistantBookAction(prompt)).toBe("write-next");
+
+    const draft = buildAssistantConfirmationDraft(prompt, ["book-2"]);
+    expect(draft).toMatchObject({
+      action: "write-next",
+      targetBookIds: ["book-2"],
+    });
+
+    const awaiting = requestAssistantConfirmation(createAssistantInitialState(), draft!, 12_000);
+    expect(awaiting.taskPlan?.status).toBe("awaiting-confirm");
+    expect(awaiting.messages).toHaveLength(1);
+    expect(awaiting.messages[0]?.role).toBe("user");
+    expect(awaiting.messages.some((message) => message.content.includes("你想操作哪本书"))).toBe(false);
+
+    const running = confirmAssistantPendingAction(awaiting, 12_001);
+    expect(running.taskPlan?.status).toBe("running");
+    expect(running.loading).toBe(true);
+  });
+
   it("creates, confirms and cancels parameter confirmation cards for book actions", () => {
     const state = createAssistantInitialState();
-    const draft = buildAssistantConfirmationDraft("请写下一章", "single", ["book-1"], ["book-1", "book-2"]);
+    const draft = buildAssistantConfirmationDraft("请写下一章", ["book-1"]);
     expect(draft).not.toBeNull();
 
     const pending = requestAssistantConfirmation(state, draft!, 3000);
@@ -124,8 +191,8 @@ describe("AssistantView", () => {
   });
 
   it("blocks book-level action draft when no scoped books are selected", () => {
-    expect(buildAssistantConfirmationDraft("请写下一章", "single", [], [])).toBeNull();
-    expect(buildAssistantConfirmationDraft("audit chapter 12", "all-active", [], [])).toBeNull();
+    expect(buildAssistantConfirmationDraft("请写下一章", [])).toBeNull();
+    expect(buildAssistantConfirmationDraft("audit chapter 12", [])).toBeNull();
   });
 
   it("injects template prompt params and L1 risk into confirmation draft", () => {
@@ -133,9 +200,7 @@ describe("AssistantView", () => {
     expect(structureTemplate).toBeTruthy();
     const draft = buildAssistantTemplateConfirmationDraft(
       structureTemplate!,
-      "single",
       ["book-2"],
-      ["book-1", "book-2"],
     );
     expect(draft).toEqual({
       action: "template",
@@ -148,7 +213,7 @@ describe("AssistantView", () => {
   });
 
   it("supports full task-plan state transitions", () => {
-    const draft = buildAssistantConfirmationDraft("audit chapter 12", "single", ["book-1"], ["book-1"]);
+    const draft = buildAssistantConfirmationDraft("audit chapter 12", ["book-1"]);
     expect(draft).not.toBeNull();
     const planDraft = createAssistantTaskPlanDraft(draft!, 5000);
     expect(planDraft.status).toBe("draft");
@@ -435,5 +500,41 @@ describe("AssistantView", () => {
 
     const afterNaturalLanguage = applyAssistantOperatorCommand(afterPauseAgain!, "请继续分析人物弧光", 11_003);
     expect(afterNaturalLanguage).toBeNull();
+  });
+
+  it("recovers final response from runtime after stream interruption", () => {
+    const startedAt = Date.parse("2026-04-18T10:25:43.000Z");
+    const prompt = "下一章节24章 写他们三个人第一次在床上发生关系";
+    const runtimeEvents = [
+      {
+        timestamp: "2026-04-18T10:25:49.000Z",
+        event: "agent:start",
+        data: { instruction: `【用户请求】${prompt}` },
+      },
+      {
+        timestamp: "2026-04-18T10:31:57.000Z",
+        event: "log",
+        data: { message: "后写校验：第24章 2 个错误，3 个警告" },
+      },
+      {
+        timestamp: "2026-04-18T10:32:10.000Z",
+        event: "agent:complete",
+        data: {
+          instruction: `【当前锁定书籍】《《多子多福:我靠系统躺赢人生》》\n【执行要求】除非我明确要求切换书籍，否则不要再次询问“你想操作哪本书”。\n【用户请求】${prompt}`,
+          response: "第24章草稿已完成，并已同步状态。",
+        },
+      },
+    ];
+
+    const outcome = resolveAssistantAgentOutcomeFromRuntimeEvents(runtimeEvents, startedAt, prompt);
+    expect(outcome).toEqual({ ok: true, response: "第24章草稿已完成，并已同步状态。" });
+  });
+
+  it("keeps pending chat state for gateway and http 5xx disconnect errors", () => {
+    expect(shouldKeepPendingOnChatDisconnect("HTTP 504")).toBe(true);
+    expect(shouldKeepPendingOnChatDisconnect("Bad Gateway")).toBe(true);
+    expect(shouldKeepPendingOnChatDisconnect("upstream timeout")).toBe(true);
+    expect(shouldKeepPendingOnChatDisconnect("连接中断（可能是请求耗时过长或代理超时），请重试")).toBe(true);
+    expect(shouldKeepPendingOnChatDisconnect("401 Unauthorized")).toBe(false);
   });
 });

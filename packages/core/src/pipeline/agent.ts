@@ -223,21 +223,11 @@ export interface AgentLoopOptions {
   readonly onToolResult?: (name: string, result: string) => void;
   readonly onMessage?: (content: string) => void;
   readonly maxTurns?: number;
+  /** Override the default CLI-oriented system prompt (e.g. for conversational assistant mode). */
+  readonly systemPrompt?: string;
 }
 
-export async function runAgentLoop(
-  config: PipelineConfig,
-  instruction: string,
-  options?: AgentLoopOptions,
-): Promise<string> {
-  const pipeline = new PipelineRunner(config);
-  const { StateManager } = await import("../state/manager.js");
-  const state = new StateManager(config.projectRoot);
-
-  const messages: AgentMessage[] = [
-    {
-      role: "system",
-      content: `你是 InkOS 小说写作 Agent。用户是小说作者，你帮他管理从建书到成稿的全过程。
+const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是小说作者，你帮他管理从建书到成稿的全过程。
 
 ## 工具
 
@@ -300,8 +290,19 @@ export async function runAgentLoop(
 - 不要用 write_truth_file 修改 current_state.md 的章节进度来"骗"系统跳到某一章
 - 不要用 revise_chapter 补缺失章节或改章节号。revise 只做文字质量修订
 - 用户说"补第 N 章"或"第 N 章是空的"时，先用 get_book_status 和 read_truth_files 判断真实状态，再决定用哪个工具
-- 不要在没有确认书籍状态的情况下直接调用写作工具`,
-    },
+- 不要在没有确认书籍状态的情况下直接调用写作工具`;
+
+export async function runAgentLoop(
+  config: PipelineConfig,
+  instruction: string,
+  options?: AgentLoopOptions,
+): Promise<string> {
+  const pipeline = new PipelineRunner(config);
+  const { StateManager } = await import("../state/manager.js");
+  const state = new StateManager(config.projectRoot);
+
+  const messages: AgentMessage[] = [
+    { role: "system", content: options?.systemPrompt ?? DEFAULT_AGENT_SYSTEM_PROMPT },
     { role: "user", content: instruction },
   ];
 

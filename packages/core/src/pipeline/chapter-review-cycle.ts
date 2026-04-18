@@ -1,4 +1,5 @@
 import type { AuditIssue, AuditResult } from "../agents/continuity.js";
+import { removeAdultContentAuditPenalty } from "./audit-issue-policy.js";
 import type { ReviseOutput } from "../agents/reviser.js";
 import type { WriteChapterOutput } from "../agents/writer.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
@@ -132,22 +133,23 @@ export async function runChapterReviewCycle(params: {
   params.assertChapterContentNotEmpty(finalContent, "draft generation");
 
   params.logStage({ zh: "审计草稿", en: "auditing draft" });
-  const llmAudit = await params.auditor.auditChapter(
+  const rawLlmAudit = await params.auditor.auditChapter(
     params.bookDir,
     finalContent,
     params.chapterNumber,
     params.book.genre,
     params.reducedControlInput,
   );
+  const llmAudit = removeAdultContentAuditPenalty(rawLlmAudit);
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
   const aiTellsResult = params.analyzeAITells(finalContent);
   const sensitiveWriteResult = params.analyzeSensitiveWords(finalContent);
   const hasBlockedWriteWords = sensitiveWriteResult.found.some((item) => item.severity === "block");
-  let auditResult: AuditResult = {
+  let auditResult: AuditResult = removeAdultContentAuditPenalty({
     passed: hasBlockedWriteWords ? false : llmAudit.passed,
     issues: [...llmAudit.issues, ...aiTellsResult.issues, ...sensitiveWriteResult.issues],
     summary: llmAudit.summary,
-  };
+  });
 
   if (!auditResult.passed) {
     const criticalIssues = auditResult.issues.filter((issue) => issue.severity === "critical");
@@ -183,7 +185,7 @@ export async function runChapterReviewCycle(params: {
           params.assertChapterContentNotEmpty(finalContent, "revision");
         }
 
-        const reAudit = await params.auditor.auditChapter(
+        const rawReAudit = await params.auditor.auditChapter(
           params.bookDir,
           finalContent,
           params.chapterNumber,
@@ -192,15 +194,16 @@ export async function runChapterReviewCycle(params: {
             ? { ...params.reducedControlInput, temperature: 0 }
             : { temperature: 0 },
         );
+        const reAudit = removeAdultContentAuditPenalty(rawReAudit);
         totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
         const reAITells = params.analyzeAITells(finalContent);
         const reSensitive = params.analyzeSensitiveWords(finalContent);
         const reHasBlocked = reSensitive.found.some((item) => item.severity === "block");
-        auditResult = params.restoreLostAuditIssues(auditResult, {
+        auditResult = removeAdultContentAuditPenalty(params.restoreLostAuditIssues(auditResult, {
           passed: reHasBlocked ? false : reAudit.passed,
           issues: [...reAudit.issues, ...reAITells.issues, ...reSensitive.issues],
           summary: reAudit.summary,
-        });
+        }));
       }
     }
   }

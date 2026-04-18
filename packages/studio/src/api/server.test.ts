@@ -819,7 +819,7 @@ describe("createStudioServer daemon lifecycle", () => {
     }
   });
 
-  it("routes assistant general chat through agent loop", async () => {
+  it("routes assistant general chat through agent loop with conversational system prompt", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -827,14 +827,181 @@ describe("createStudioServer daemon lifecycle", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        prompt: "你是谁？",
-        instruction: "请直接回答并说明你是小说创作助手。",
+        prompt: "帮我查看书籍状态",
+        scopeBookTitles: ["测试书"],
       }),
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, response: "mock-agent-reply" });
+    // Consume entire stream body (needed to trigger the async SSE callback in Hono's test helper)
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    // Wait a tick for the async callback to complete
+    await new Promise((r) => setTimeout(r, 50));
+
     expect(runAgentLoopMock).toHaveBeenCalledTimes(1);
+    // Verify it passes the custom system prompt with conversational rules
+    const callArgs = runAgentLoopMock.mock.calls[0];
+    expect(callArgs[1]).toBe("帮我查看书籍状态");
+    expect(callArgs[2]).toHaveProperty("systemPrompt");
+    expect(callArgs[2].systemPrompt).toContain("禁止列出工具清单或能力清单");
+    expect(callArgs[2].systemPrompt).toContain("先理解，再行动");
+    expect(callArgs[2].systemPrompt).toContain("读与写严格分离");
+    expect(callArgs[2].systemPrompt).toContain("测试书");
+    // Verify streaming callbacks are passed
+    expect(callArgs[2]).toHaveProperty("onToolCall");
+    expect(callArgs[2]).toHaveProperty("onToolResult");
+    expect(callArgs[2]).toHaveProperty("onMessage");
+  });
+
+  it("streams assistant progress events before completion for long-running chat", async () => {
+    runAgentLoopMock.mockImplementationOnce(async (_config, _prompt, callbacks?: {
+      onToolCall?: (name: string, args: unknown) => void;
+      onMessage?: (content: string) => void;
+    }) => {
+      callbacks?.onToolCall?.("read_truth_files", { bookId: "demo-book" });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      callbacks?.onMessage?.("阶段回复");
+      return "最终回复";
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "生成下一章大纲",
+        scopeBookTitles: ["测试书"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toBeTruthy();
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const firstChunkOrTimeout = await Promise.race([
+      reader.read(),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 80)),
+    ]);
+    expect(firstChunkOrTimeout).not.toBe("timeout");
+    const firstChunk = firstChunkOrTimeout as ReadableStreamReadResult<Uint8Array>;
+    const firstText = decoder.decode(firstChunk.value ?? new Uint8Array(), { stream: true });
+    expect(firstText).toContain("assistant:progress");
+
+    let remaining = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      remaining += decoder.decode(value, { stream: true });
+    }
+    expect(`${firstText}${remaining}`).toContain("assistant:done");
+  });
+
+  it("grounds final assistant response on revise tool result for revise intents", async () => {
+    runAgentLoopMock.mockImplementationOnce(async (_config, _prompt, callbacks?: {
+      onToolCall?: (name: string, args: unknown) => void;
+      onToolResult?: (name: string, result: string) => void;
+      onMessage?: (content: string) => void;
+    }) => {
+      callbacks?.onToolCall?.("revise_chapter", { bookId: "demo-book", chapterNumber: 21, mode: "spot-fix" });
+      callbacks?.onToolResult?.("revise_chapter", JSON.stringify({
+        chapterNumber: 21,
+        actionType: "spot-fix",
+        decision: "applied",
+        status: "ready-for-review",
+        wordCount: 4300,
+      }));
+      callbacks?.onMessage?.("看起来系统有些问题，我先确认状态。");
+      return "看起来系统有些问题，我先确认状态。";
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "把第21章改一下", scopeBookTitles: ["测试书"] }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let body = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+      }
+      expect(body).toContain("assistant:done");
+      const doneDataMatch = body.match(/event:\s*assistant:done\n(?:data:\s*)([^\n]+)/u);
+      expect(doneDataMatch?.[1]).toBeTruthy();
+      const donePayload = JSON.parse(doneDataMatch![1]!) as { response?: string };
+      expect(donePayload.response).toContain("已完成第21章修订");
+      expect(donePayload.response).toContain("spot-fix");
+      expect(donePayload.response).not.toContain("看起来系统有些问题");
+    }
+  });
+
+  it("answers model identity prompts with real runtime llm config", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "你是什么模型" }),
+    });
+
+    expect(response.status).toBe(200);
+    // Short-circuit now returns SSE format
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let body = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+      }
+      expect(body).toContain("assistant:done");
+      expect(body).toContain("provider=openai");
+      expect(body).toContain("model=gpt-5.4");
+    }
+    expect(runAgentLoopMock).not.toHaveBeenCalled();
+  });
+
+  it("returns concise guidance for vague punctuation-only prompts", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "？" }),
+    });
+
+    expect(response.status).toBe(200);
+    // Short-circuit now returns SSE format
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let body = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+      }
+      expect(body).toContain("assistant:done");
+      expect(body).toContain("直接告诉我你要做哪件事");
+    }
+    expect(runAgentLoopMock).not.toHaveBeenCalled();
   });
 
   it("supports assistant soft-delete preview/execute/restore for chapter and run", async () => {

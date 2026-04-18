@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BotMessageSquare, Loader2, Send, Sparkles } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { Theme } from "../hooks/use-theme";
 import type { StringKey, TFunction } from "../hooks/use-i18n";
-import { fetchJson, postApi, useApi } from "../hooks/use-api";
+import { fetchJson, postApi, useApi, buildApiUrl, invalidateApiPaths } from "../hooks/use-api";
 import {
   parseAssistantOperatorCommand,
   type AssistantOperatorParseResult,
@@ -31,6 +33,8 @@ export interface AssistantComposerState {
   readonly input: string;
   readonly messages: ReadonlyArray<AssistantMessage>;
   readonly loading: boolean;
+  readonly streamingStatus: string;
+  readonly streamingProgress: ReadonlyArray<string>;
   readonly nextMessageId: number;
   readonly taskPlan: AssistantTaskPlan | null;
   readonly taskExecution: AssistantTaskExecution | null;
@@ -195,8 +199,140 @@ interface AssistantTaskSnapshot {
 const ASSISTANT_TIMELINE_MAX_ENTRIES = 50;
 const ASSISTANT_TASK_SNAPSHOT_POLL_INTERVAL_MS = 2000;
 const ASSISTANT_TASK_RECOVERY_STORAGE_KEY = "inkos.assistant.task-recovery";
+const ASSISTANT_CHAT_HISTORY_STORAGE_KEY = "inkos.assistant.chat-history";
+const ASSISTANT_CHAT_HISTORY_MAX_MESSAGES = 200;
+const ASSISTANT_CHAT_PENDING_KEY = "inkos.assistant.chat-pending";
+const ASSISTANT_CHAT_PENDING_TTL_MS = 300_000;
+const ASSISTANT_CHAT_PENDING_POLL_MS = 500;
+const GENERATION_INTENT_PATTERN = /生成|创建|创作|大纲|计划|规划|建议|优化|改进|总结|分析|generate|create|plan|outline|suggest|summarize|analyze/iu;
+
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  list_books: "查询书籍列表",
+  get_book_status: "获取书籍状态",
+  read_truth_files: "读取书籍数据",
+  create_book: "创建新书",
+  plan_chapter: "规划章节",
+  compose_chapter: "生成章节上下文",
+  write_draft: "写草稿",
+  audit_chapter: "审计章节",
+  revise_chapter: "修订章节",
+  scan_market: "扫描市场趋势",
+  update_author_intent: "更新作者意图",
+  update_current_focus: "更新关注点",
+  write_full_pipeline: "完整写作管线",
+  web_fetch: "抓取网页",
+  import_style: "导入文风",
+  import_canon: "导入正典",
+  import_chapters: "导入章节",
+  write_truth_file: "写入真相文件",
+};
+
+interface AssistantStreamCallbacks {
+  readonly onProgress: (status: string) => void;
+  readonly onMessage: (content: string) => void;
+  readonly onDone: (result: { ok: boolean; response?: string; error?: string }) => void;
+  readonly abortSignal?: AbortSignal;
+}
+
+function normalizeAssistantStreamError(error: unknown): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "请求已取消";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/failed to fetch|networkerror|network request failed/i.test(message)) {
+    return "连接中断（可能是请求耗时过长或代理超时），请重试";
+  }
+  return message;
+}
+
+async function streamAssistantChat(
+  prompt: string,
+  scopeBookTitles: ReadonlyArray<string>,
+  callbacks: AssistantStreamCallbacks,
+): Promise<void> {
+  const url = buildApiUrl("/assistant/chat");
+  if (!url) {
+    callbacks.onDone({ ok: false, error: "Invalid API path" });
+    return;
+  }
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, scopeBookTitles }),
+      signal: callbacks.abortSignal,
+    });
+  } catch (e) {
+    callbacks.onDone({ ok: false, error: normalizeAssistantStreamError(e) });
+    return;
+  }
+
+  if (!response.ok || !response.body) {
+    callbacks.onDone({ ok: false, error: `HTTP ${response.status}` });
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastResponse = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      let eventName = "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:") && eventName) {
+          const rawData = line.slice(5).trim();
+          try {
+            const data = JSON.parse(rawData) as Record<string, unknown>;
+            if (eventName === "assistant:progress") {
+              const toolName = typeof data.tool === "string" ? data.tool : "";
+              const displayName = TOOL_DISPLAY_NAMES[toolName] ?? toolName;
+              if (data.type === "tool_call") {
+                callbacks.onProgress(`正在调用 ${displayName}…`);
+              } else if (data.type === "tool_result") {
+                callbacks.onProgress(`${displayName} 完成`);
+              }
+            } else if (eventName === "assistant:message") {
+              if (typeof data.content === "string") {
+                lastResponse = data.content;
+                callbacks.onMessage(data.content);
+              }
+            } else if (eventName === "assistant:done") {
+              const finalResponse = typeof data.response === "string" ? data.response : lastResponse;
+              callbacks.onDone({ ok: data.ok !== false, response: finalResponse, error: typeof data.error === "string" ? data.error : undefined });
+              return;
+            }
+          } catch { /* skip unparseable SSE data */ }
+          eventName = "";
+        } else if (line === "") {
+          eventName = "";
+        }
+      }
+    }
+    // Stream ended without explicit done event
+    if (lastResponse) {
+      callbacks.onDone({ ok: true, response: lastResponse });
+    } else {
+      callbacks.onDone({ ok: false, error: "Stream ended without response" });
+    }
+  } catch (e) {
+    if (callbacks.abortSignal?.aborted) return;
+    callbacks.onDone({ ok: false, error: normalizeAssistantStreamError(e) });
+  }
+}
 const BOOK_STATUS_ACTIVE = "active";
-const WRITE_NEXT_ACTION_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|下一章节?写|下一章写|创作下一章|写第\s*\d+\s*章|继续写|续写|write[-\s]?next|next\s*chapter|continue\s*writing/iu;
 const AUDIT_ACTION_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const CRUD_READ_ACTION_PATTERN = /查询|查看|检索|read|search/iu;
 const CRUD_DELETE_ACTION_PATTERN = /删除|delete/iu;
@@ -210,6 +346,102 @@ const NOVEL_QA_HINT_PATTERN = /主角|角色|人物|设定|世界观|伏笔|章�
 const CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
+
+// --- Smart book context resolution ---
+const BOOK_TITLE_BRACKET_PATTERN = /[《「]([^》」]+)[》」]/gu;
+
+function normalizeBookLookupText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[《》「」"'\s]/gu, "")
+    .replace(/[：:·\-—_|]/gu, "");
+}
+
+export interface ChatBookContext {
+  readonly id: string;
+  readonly title: string;
+}
+
+/**
+ * Resolve which book the user is referring to from the prompt text.
+ * Returns:
+ * - `{ match: book }` if exactly one book matches
+ * - `{ candidates: books }` if multiple books match (disambiguation needed)
+ * - `null` if no book reference detected in the prompt
+ */
+export function resolveBookFromPrompt(
+  prompt: string,
+  activeBooks: ReadonlyArray<{ readonly id: string; readonly title: string }>,
+): { match: { id: string; title: string } } | { candidates: ReadonlyArray<{ id: string; title: string }> } | null {
+  if (activeBooks.length === 0) return null;
+  const normalizedPromptCompact = normalizeBookLookupText(prompt);
+
+  // 1. Try explicit bracket references: 《书名》or「書名」
+  const bracketMatches = [...prompt.matchAll(BOOK_TITLE_BRACKET_PATTERN)].map((m) => m[1].trim());
+  if (bracketMatches.length > 0) {
+    for (const ref of bracketMatches) {
+      const exact = activeBooks.find((b) => normalizeBookLookupText(b.title) === normalizeBookLookupText(ref));
+      if (exact) return { match: { id: exact.id, title: exact.title } };
+      // Partial match: book title contains the reference or reference contains part of the title
+      const normalizedRef = normalizeBookLookupText(ref);
+      const partials = activeBooks.filter((b) =>
+        normalizeBookLookupText(b.title).includes(normalizedRef)
+        || normalizedRef.includes(normalizeBookLookupText(b.title)),
+      );
+      if (partials.length === 1) return { match: { id: partials[0].id, title: partials[0].title } };
+      if (partials.length > 1) return { candidates: partials.map((b) => ({ id: b.id, title: b.title })) };
+    }
+  }
+
+  // 2. Try fuzzy matching: check if prompt contains a significant portion of any book title
+  const normalized = prompt.toLowerCase();
+  const scored: Array<{ book: { id: string; title: string }; score: number }> = [];
+  for (const book of activeBooks) {
+    const titleLower = book.title.toLowerCase();
+    const compactTitle = normalizeBookLookupText(book.title);
+    // Extract meaningful segments from book title (split by common separators)
+    const segments = titleLower.split(/[:：\s·\-—_|]/u).filter((s) => s.length >= 2);
+    let maxScore = 0;
+    // Check full title
+    if (normalized.includes(titleLower) || normalizedPromptCompact.includes(compactTitle)) {
+      maxScore = titleLower.length;
+    } else {
+      // Check individual segments
+      for (const seg of segments) {
+        const compactSeg = normalizeBookLookupText(seg);
+        if ((normalized.includes(seg) || normalizedPromptCompact.includes(compactSeg)) && seg.length > maxScore) {
+          maxScore = seg.length;
+        }
+      }
+      // Check if prompt contains a prefix of the title (at least 3 chars for CJK, 4 for latin)
+      if (maxScore === 0) {
+        const minLen = /[\u4e00-\u9fff]/u.test(titleLower) ? 3 : 4;
+        for (let len = titleLower.length; len >= minLen; len--) {
+          const prefix = titleLower.slice(0, len);
+          if (normalized.includes(prefix)) {
+            maxScore = prefix.length;
+            break;
+          }
+        }
+      }
+    }
+    if (maxScore >= 2) {
+      scored.push({ book: { id: book.id, title: book.title }, score: maxScore });
+    }
+  }
+
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.score - a.score);
+  // If top match is significantly better, use it
+  if (scored.length === 1 || scored[0].score > scored[1].score) {
+    return { match: scored[0].book };
+  }
+  // Multiple equal-scored matches → disambiguation
+  const topScore = scored[0].score;
+  const topCandidates = scored.filter((s) => s.score === topScore).map((s) => s.book);
+  return topCandidates.length === 1 ? { match: topCandidates[0] } : { candidates: topCandidates };
+}
 const ACTION_LABEL_KEY_BY_TYPE: Record<AssistantBookActionType, "assistant.actionWriteNext" | "assistant.actionAudit" | "assistant.actionTemplate"> = {
   "write-next": "assistant.actionWriteNext",
   audit: "assistant.actionAudit",
@@ -280,12 +512,21 @@ export const ASSISTANT_PROMPT_TEMPLATES: ReadonlyArray<AssistantPromptTemplate> 
   },
 ];
 
-export function createAssistantInitialState(): AssistantComposerState {
+export function createAssistantInitialState(
+  restoredMessages?: ReadonlyArray<AssistantMessage>,
+): AssistantComposerState {
+  const messages = restoredMessages ?? [];
+  const maxId = messages.reduce((max, m) => {
+    const num = Number.parseInt(m.id.replace("msg-", ""), 10);
+    return Number.isFinite(num) && num > max ? num : max;
+  }, 0);
   return {
     input: "",
-    messages: [],
+    messages,
     loading: false,
-    nextMessageId: 1,
+    streamingStatus: "",
+    streamingProgress: [],
+    nextMessageId: maxId + 1,
     taskPlan: null,
     taskExecution: null,
     qualityReport: null,
@@ -293,6 +534,207 @@ export function createAssistantInitialState(): AssistantComposerState {
     suggestedNextActions: [],
     operatorSession: ASSISTANT_DEFAULT_OPERATOR_SESSION,
   };
+}
+
+function restoreChatHistory(): ReadonlyArray<AssistantMessage> {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.sessionStorage.getItem(ASSISTANT_CHAT_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (m: unknown): m is AssistantMessage =>
+        typeof m === "object" && m !== null
+        && typeof (m as Record<string, unknown>).id === "string"
+        && typeof (m as Record<string, unknown>).role === "string"
+        && typeof (m as Record<string, unknown>).content === "string"
+        && typeof (m as Record<string, unknown>).timestamp === "number",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveChatHistory(messages: ReadonlyArray<AssistantMessage>): void {
+  if (typeof window === "undefined") return;
+  try {
+    const trimmed = messages.length > ASSISTANT_CHAT_HISTORY_MAX_MESSAGES
+      ? messages.slice(-ASSISTANT_CHAT_HISTORY_MAX_MESSAGES)
+      : messages;
+    window.sessionStorage.setItem(ASSISTANT_CHAT_HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+interface AssistantChatPendingState {
+  readonly loading: boolean;
+  readonly prompt: string;
+  readonly startedAt: number;
+  readonly response?: string;
+  readonly interimResponse?: string;
+  readonly progressLogs?: ReadonlyArray<string>;
+  readonly detached?: boolean;
+  readonly detachedReason?: string;
+  readonly error?: string;
+  readonly completedAt?: number;
+}
+
+export interface AssistantRuntimeEventEntry {
+  readonly timestamp?: string;
+  readonly event?: string;
+  readonly data?: unknown;
+}
+
+export function shouldKeepPendingOnChatDisconnect(errorMessage: string): boolean {
+  return /连接中断|failed to fetch|network request failed|stream ended without response|timeout|timed out|http\s*5\d\d|\b50[234]\b|\b52[0-9]\b|gateway|bad gateway|upstream/i.test(errorMessage);
+}
+
+function matchesAgentInstruction(instruction: string, prompt: string): boolean {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) return true;
+  if (instruction.trim() === normalizedPrompt) return true;
+  return instruction.includes(`【用户请求】${normalizedPrompt}`);
+}
+
+function saveChatPendingState(pending: AssistantChatPendingState): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ASSISTANT_CHAT_PENDING_KEY, JSON.stringify(pending));
+  } catch { /* ignore */ }
+}
+
+function restoreChatPendingState(): AssistantChatPendingState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(ASSISTANT_CHAT_PENDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.prompt !== "string") return null;
+    return parsed as AssistantChatPendingState;
+  } catch { return null; }
+}
+
+function clearChatPendingState(): void {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(ASSISTANT_CHAT_PENDING_KEY); } catch { /* ignore */ }
+}
+
+function appendStreamingProgressLine(
+  lines: ReadonlyArray<string>,
+  line: string,
+): string[] {
+  const normalized = line.trim();
+  if (!normalized) {
+    return [...lines];
+  }
+  const next = [...lines];
+  const parse = (value: string): { base: string; count: number } => {
+    const matched = value.match(/^(.*) \(x(\d+)\)$/u);
+    return {
+      base: (matched?.[1] ?? value).trim(),
+      count: matched?.[2] ? Math.max(1, Number.parseInt(matched[2], 10)) : 1,
+    };
+  };
+
+  const normalizedBase = parse(normalized).base;
+  const duplicateIndex = next.findIndex((item) => parse(item).base === normalizedBase);
+  if (duplicateIndex >= 0) {
+    const current = parse(next[duplicateIndex] ?? normalizedBase);
+    next[duplicateIndex] = `${current.base} (x${current.count + 1})`;
+  } else {
+    next.push(normalizedBase);
+  }
+
+  return next.slice(-12);
+}
+
+function buildAssistantThinkingLogs(lines: ReadonlyArray<string>): ReadonlyArray<string> {
+  return lines
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function extractAssistantProgressLineFromRuntimeLog(data: unknown): string | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return null;
+  }
+  const message = typeof (data as Record<string, unknown>).message === "string"
+    ? ((data as Record<string, unknown>).message as string).trim()
+    : "";
+  if (!message) {
+    return null;
+  }
+  return message;
+}
+
+async function fetchAssistantRuntimeProgressSince(startedAt: number): Promise<string[]> {
+  try {
+    const query = `/runtime/events?source=pipeline&limit=200`;
+    const response = await fetchJson<{ entries?: AssistantRuntimeEventEntry[] }>(query);
+    const entries = Array.isArray(response.entries) ? response.entries : [];
+    const filtered = entries
+      .filter((entry) => {
+        if (typeof entry.timestamp !== "string") return false;
+        const ts = Date.parse(entry.timestamp);
+        return Number.isFinite(ts) && ts >= startedAt;
+      })
+      .filter((entry) => entry.event === "log")
+      .map((entry) => extractAssistantProgressLineFromRuntimeLog(entry.data))
+      .filter((line): line is string => Boolean(line));
+    return filtered;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchAssistantAgentOutcomeSince(
+  startedAt: number,
+  prompt: string,
+): Promise<{ ok: boolean; response?: string; error?: string } | null> {
+  try {
+    const query = `/runtime/events?source=agent&limit=200`;
+    const response = await fetchJson<{ entries?: AssistantRuntimeEventEntry[] }>(query);
+    return resolveAssistantAgentOutcomeFromRuntimeEvents(Array.isArray(response.entries) ? response.entries : [], startedAt, prompt);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveAssistantAgentOutcomeFromRuntimeEvents(
+  entries: ReadonlyArray<AssistantRuntimeEventEntry>,
+  startedAt: number,
+  prompt: string,
+): { ok: boolean; response?: string; error?: string } | null {
+  const sorted = entries
+    .map((entry) => {
+      const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+      return { entry, ts };
+    })
+    .filter(({ ts }) => Number.isFinite(ts) && ts >= startedAt)
+    .sort((a, b) => b.ts - a.ts);
+
+  for (const { entry } of sorted) {
+    if (entry.event !== "agent:complete" && entry.event !== "agent:error") {
+      continue;
+    }
+    const data = typeof entry.data === "object" && entry.data !== null && !Array.isArray(entry.data)
+      ? entry.data as Record<string, unknown>
+      : null;
+    if (!data) continue;
+    const instruction = typeof data.instruction === "string" ? data.instruction : "";
+    if (instruction && !matchesAgentInstruction(instruction, prompt)) {
+      continue;
+    }
+    if (entry.event === "agent:complete") {
+      const responseText = typeof data.response === "string" ? data.response.trim() : "";
+      return responseText ? { ok: true, response: responseText } : null;
+    }
+    const errorText = typeof data.error === "string" ? data.error : "后台执行失败";
+    return { ok: false, error: errorText };
+  }
+  return null;
 }
 
 export function parseAssistantEventTimestamp(input: unknown, fallback = Date.now()): number {
@@ -408,6 +850,10 @@ export function formatAssistantTimelineMessage(
 
 export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, message: SSEMessage): AssistantComposerState {
   if (!ASSISTANT_EVENT_SET.has(message.event)) {
+    return state;
+  }
+  const inTaskExecutionContext = Boolean(state.taskExecution) || state.taskPlan?.status === "running";
+  if (!inTaskExecutionContext) {
     return state;
   }
   const payload = typeof message.data === "object" && message.data !== null ? message.data as Record<string, unknown> : null;
@@ -604,6 +1050,8 @@ export function submitAssistantInput(
   return {
     input: "",
     loading: true,
+    streamingStatus: "",
+    streamingProgress: [],
     messages: [...state.messages, { id: `msg-${state.nextMessageId}`, role: "user", content: normalized, timestamp: now }],
     nextMessageId: state.nextMessageId + 1,
     taskPlan: state.taskPlan,
@@ -624,6 +1072,8 @@ export function completeAssistantResponse(
   return {
     ...state,
     loading: false,
+    streamingStatus: "",
+    streamingProgress: [],
     taskPlan: state.taskPlan,
     taskExecution: state.taskExecution,
     qualityReport: state.qualityReport,
@@ -834,16 +1284,13 @@ export function resolveAssistantPromptTemplate(templateId: string): AssistantPro
 
 export function buildAssistantTemplateConfirmationDraft(
   template: AssistantPromptTemplate,
-  scopeMode: AssistantBookScopeMode,
-  selectedBookIds: ReadonlyArray<string>,
-  activeBookIds: ReadonlyArray<string>,
+  targetBookIds: ReadonlyArray<string>,
 ): AssistantConfirmationDraft | null {
-  const targetBookIds = resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds);
   if (targetBookIds.length === 0) return null;
   return {
     action: "template",
     prompt: template.prompt,
-    targetBookIds,
+    targetBookIds: [...targetBookIds],
     templateId: template.id,
     templateRiskLevel: template.riskLevel,
     templateNextAction: template.defaultNextAction,
@@ -869,6 +1316,33 @@ export function detectAssistantBookAction(prompt: string): AssistantBookActionTy
   if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return "write-next";
   if (AUDIT_ACTION_PATTERN.test(normalized)) return "audit";
   return null;
+}
+
+function isBookSelectionOnlyPrompt(
+  prompt: string,
+  matchedBook: Readonly<{ id: string; title: string }>,
+): boolean {
+  const normalized = prompt.trim();
+  if (!normalized) return false;
+  if (detectAssistantBookAction(normalized)) return false;
+  if (CRUD_DELETE_ACTION_PATTERN.test(normalized) || CRUD_RESTORE_ACTION_PATTERN.test(normalized)) return false;
+  if (WORLD_REPORT_ACTION_PATTERN.test(normalized) || CRUD_READ_ACTION_PATTERN.test(normalized)) return false;
+  if (GENERATION_INTENT_PATTERN.test(normalized) || AUDIT_ACTION_PATTERN.test(normalized)) return false;
+
+  const normalizeSelectionToken = (value: string): string => value
+    .trim()
+    .toLowerCase()
+    .replace(/^[《「"'\s]+/u, "")
+    .replace(/[》」"'\s]+$/u, "")
+    .replace(/^(选择|选|就选|切换到|切到|切换|进入|打开|用|使用)\s*/iu, "")
+    .replace(/\s*(这本书|这本小说|book)$/iu, "")
+    .replace(/[《》「」\s:：]/gu, "");
+
+  const barePrompt = normalizeSelectionToken(normalized);
+  const bareTitle = normalizeSelectionToken(matchedBook.title);
+  if (!barePrompt || !bareTitle) return false;
+  if (barePrompt.length > 80) return false;
+  return bareTitle.includes(barePrompt) || barePrompt.includes(bareTitle);
 }
 
 export function parseAssistantCrudReadRequest(prompt: string): {
@@ -909,6 +1383,15 @@ function inferAssistantReadRequestFromPrompt(prompt: string): {
   if (detectAssistantBookAction(normalized)) return null;
   if (CRUD_DELETE_ACTION_PATTERN.test(normalized) || CRUD_RESTORE_ACTION_PATTERN.test(normalized)) return null;
   if (WORLD_REPORT_ACTION_PATTERN.test(normalized)) return null;
+  if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return null;
+
+  if (GENERATION_INTENT_PATTERN.test(normalized)) return null;
+
+  // Skip complex prompts that contain modification/advice intent — route to agent chat instead
+  if (/修改|调整|怎么办|如何|不符|偏离|问题|建议|帮我|你去/iu.test(normalized)) return null;
+
+  // Skip long prompts (>40 chars) — they're likely complex requests for the agent
+  if (normalized.length > 40) return null;
 
   const looksLikeNovelQ = NOVEL_QA_HINT_PATTERN.test(normalized);
   if (!looksLikeNovelQ) {
@@ -969,18 +1452,15 @@ export function extractAssistantAuditChapter(prompt: string): number | undefined
 
 export function buildAssistantConfirmationDraft(
   prompt: string,
-  scopeMode: AssistantBookScopeMode,
-  selectedBookIds: ReadonlyArray<string>,
-  activeBookIds: ReadonlyArray<string>,
+  targetBookIds: ReadonlyArray<string>,
 ): AssistantConfirmationDraft | null {
   const action = detectAssistantBookAction(prompt);
   if (!action) return null;
-  const targetBookIds = resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds);
   if (targetBookIds.length === 0) return null;
   return {
     action,
     prompt,
-    targetBookIds,
+    targetBookIds: [...targetBookIds],
     chapterNumber: action === "audit" ? extractAssistantAuditChapter(prompt) : undefined,
   };
 }
@@ -1094,17 +1574,15 @@ function buildAssistantAgentInstruction(
   prompt: string,
   selectedBookTitles: ReadonlyArray<string>,
 ): string {
-  const scopeHint = selectedBookTitles.length > 0
-    ? `当前关注书籍：${selectedBookTitles.join("、")}`
-    : "当前未选择具体书籍";
-  return [
-    "你是 InkOS Studio 的小说创作 Agent。",
-    "优先直接回答用户问题，不要输出模板化套话或长篇能力清单。",
-    "回答要简洁自然：默认 1-3 句，除非用户明确要求详细展开。",
-    "如果用户意图是写作执行、审计、删除或恢复章节，再明确指出需要调用对应任务能力。",
-    scopeHint,
-    `用户输入：${prompt}`,
-  ].join("\n");
+  if (selectedBookTitles.length === 1) {
+    const bookTitle = selectedBookTitles[0];
+    return [
+      `【当前锁定书籍】《${bookTitle}》`,
+      "【执行要求】除非我明确要求切换书籍，否则不要再次询问“你想操作哪本书”。",
+      `【用户请求】${prompt}`,
+    ].join("\n");
+  }
+  return prompt;
 }
 
 function EmptyConversation() {
@@ -1127,7 +1605,32 @@ function LoadingConversation() {
   );
 }
 
-function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantMessage> }) {
+function MessageList({
+  messages,
+  loading,
+  streamingStatus,
+  streamingProgress,
+}: {
+  readonly messages: ReadonlyArray<AssistantMessage>;
+  readonly loading?: boolean;
+  readonly streamingStatus?: string;
+  readonly streamingProgress?: ReadonlyArray<string>;
+}) {
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const thinkingLogs = useMemo(
+    () => buildAssistantThinkingLogs(streamingProgress ?? []),
+    [streamingProgress],
+  );
+  const displayThinkingLogs = useMemo(() => {
+    if (thinkingLogs.length > 0) {
+      return thinkingLogs;
+    }
+    const fallback = (streamingStatus ?? "").trim();
+    return fallback ? [fallback] : [];
+  }, [thinkingLogs, streamingStatus]);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length, loading, streamingStatus, streamingProgress?.length]);
   return (
     <div className="space-y-3">
       {messages.map((message) => (
@@ -1136,13 +1639,42 @@ function MessageList({ messages }: { readonly messages: ReadonlyArray<AssistantM
           className={cn(
             "max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed border",
             message.role === "user"
-              ? "ml-auto bg-primary text-primary-foreground border-primary/30"
-              : "bg-card text-card-foreground border-border",
+              ? "ml-auto bg-primary text-primary-foreground border-primary/30 whitespace-pre-wrap"
+              : "bg-card text-card-foreground border-border prose prose-sm dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 max-w-none",
           )}
         >
-          {message.content}
+          {message.role === "user" ? (
+            message.content
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+          )}
         </div>
       ))}
+      {loading && (
+        <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed border bg-card text-muted-foreground border-border space-y-1" data-testid="assistant-thinking-indicator">
+          <div className="flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin" />
+            <span>AI 助手正在思考…</span>
+          </div>
+          {displayThinkingLogs.length > 0 && (
+            <div className="text-xs text-muted-foreground/70 pl-[22px]" data-testid="assistant-thinking-progress">
+              <div
+                className="h-10 overflow-y-auto pr-1 leading-5"
+                data-testid="assistant-thinking-log-viewport"
+              >
+                <ul className="space-y-0.5">
+                  {displayThinkingLogs.map((line, index) => (
+                    <li key={`thinking-log-${index}`}>
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      <div ref={messagesEndRef} />
     </div>
   );
 }
@@ -1273,7 +1805,21 @@ export function AssistantView({
   initialPrompt?: string;
   initialPromptKey?: string;
 }) {
-  const [state, setState] = useState<AssistantComposerState>(() => createAssistantInitialState());
+  const [state, setState] = useState<AssistantComposerState>(() => {
+    const initial = createAssistantInitialState(restoreChatHistory());
+    const pending = restoreChatPendingState();
+    if (pending?.loading && Date.now() - pending.startedAt < ASSISTANT_CHAT_PENDING_TTL_MS) {
+      const logs = Array.isArray(pending.progressLogs) ? pending.progressLogs.filter((line): line is string => typeof line === "string") : [];
+      const lastStatus = logs.length > 0 ? logs[logs.length - 1] ?? "" : "";
+      return {
+        ...initial,
+        loading: true,
+        streamingProgress: logs,
+        streamingStatus: lastStatus,
+      };
+    }
+    return initial;
+  });
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { messages: sseMessages } = useSSE();
   const sseCursorRef = useRef(0);
@@ -1282,8 +1828,7 @@ export function AssistantView({
     () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
     [booksData?.books],
   );
-  const [scopeMode, setScopeMode] = useState<AssistantBookScopeMode>("all-active");
-  const [selectedBookIds, setSelectedBookIds] = useState<ReadonlyArray<string>>([]);
+  const [chatBookContext, setChatBookContext] = useState<ChatBookContext | null>(null);
   const [scopeBlockHint, setScopeBlockHint] = useState("");
   const [crudReadResult, setCrudReadResult] = useState<AssistantCrudReadResponse | null>(null);
   const [crudDeletePreview, setCrudDeletePreview] = useState<AssistantCrudDeletePreviewResponse["preview"] | null>(null);
@@ -1291,22 +1836,28 @@ export function AssistantView({
   const [crudBusy, setCrudBusy] = useState(false);
   const consumedPromptKeyRef = useRef<string | null>(null);
   const taskRecoveryAppliedRef = useRef<string | null>(null);
+  const chatInFlightRef = useRef(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
   const promptTemplates = useMemo(() => ASSISTANT_PROMPT_TEMPLATES, []);
   const activeBookIds = useMemo(() => activeBooks.map((book) => book.id), [activeBooks]);
-  const selectedScopeBookIds = useMemo(
-    () => resolveAssistantScopeBookIds(scopeMode, selectedBookIds, activeBookIds),
-    [scopeMode, selectedBookIds, activeBookIds],
-  );
   const activeBookTitleById = useMemo(
     () => new Map(activeBooks.map((book) => [book.id, book.title] as const)),
     [activeBooks],
   );
-  const selectedBookTitles = useMemo(
-    () => resolveAssistantBookTitlesByIds(selectedScopeBookIds, activeBookTitleById, t),
-    [selectedScopeBookIds, activeBookTitleById, t],
+  const contextBookTitles = useMemo(
+    () => chatBookContext ? [chatBookContext.title] : [],
+    [chatBookContext],
   );
+
+  const invalidateAssistantBookViews = useCallback((bookId?: string | null) => {
+    const paths = ["/api/books"];
+    if (bookId && bookId.trim().length > 0) {
+      paths.push(`/api/books/${bookId}`);
+    }
+    invalidateApiPaths(paths);
+  }, []);
   const taskPlanTargetBookTitles = useMemo(
     () => (state.taskPlan ? resolveAssistantBookTitlesByIds(state.taskPlan.targetBookIds, activeBookTitleById, t) : []),
     [state.taskPlan, activeBookTitleById, t],
@@ -1324,6 +1875,136 @@ export function AssistantView({
     const riskLabel = state.taskPlan.templateRiskLevel ? ` · ${t("assistant.templateRiskPrefix")}${state.taskPlan.templateRiskLevel}` : "";
     return `${templateLabel}${riskLabel}`;
   }, [state.taskPlan, t]);
+
+  useEffect(() => {
+    const pending = restoreChatPendingState();
+    if (!pending) return;
+    if (pending.loading && Date.now() - pending.startedAt >= ASSISTANT_CHAT_PENDING_TTL_MS) {
+      clearChatPendingState();
+      setState((prev) => prev.loading ? completeAssistantResponse(prev, "请求超时，请重试。") : prev);
+      return;
+    }
+    if (pending.loading) {
+      const logs = Array.isArray(pending.progressLogs) ? pending.progressLogs.filter((line): line is string => typeof line === "string") : [];
+      setState((prev) => ({
+        ...prev,
+        loading: true,
+        streamingStatus: (logs.length > 0 ? logs[logs.length - 1] : "") || prev.streamingStatus,
+        streamingProgress: logs.length > 0 ? logs : prev.streamingProgress,
+      }));
+      return;
+    }
+    if (!pending.loading) {
+      setState((prev) => {
+        const lastMsg = prev.messages[prev.messages.length - 1];
+        if (lastMsg?.role === "assistant") return prev;
+        clearChatPendingState();
+        if (pending.response) {
+          return completeAssistantResponse(prev, pending.response);
+        }
+        return completeAssistantResponse(prev, `聊天请求失败：${pending.error ?? "未知错误"}`);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!state.loading || chatInFlightRef.current) return;
+    const intervalId = window.setInterval(() => {
+      const pending = restoreChatPendingState();
+      if (!pending) return;
+      if (pending.loading) {
+        const logs = Array.isArray(pending.progressLogs) ? pending.progressLogs.filter((line): line is string => typeof line === "string") : [];
+        setState((prev) => {
+          if (!prev.loading) return prev;
+          const last = logs.length > 0 ? logs[logs.length - 1] ?? prev.streamingStatus : prev.streamingStatus;
+          return {
+            ...prev,
+            streamingStatus: last,
+            streamingProgress: logs.length > 0 ? logs : prev.streamingProgress,
+          };
+        });
+        return;
+      }
+      window.clearInterval(intervalId);
+      clearChatPendingState();
+      setState((prev) => {
+        if (!prev.loading) return prev;
+        if (pending.response) {
+          return completeAssistantResponse(prev, pending.response);
+        }
+        return completeAssistantResponse(prev, `聊天请求失败：${pending.error ?? "未知错误"}`);
+      });
+    }, ASSISTANT_CHAT_PENDING_POLL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [state.loading]);
+
+  useEffect(() => {
+    if (!state.loading) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      const pending = restoreChatPendingState();
+      if (!pending?.loading) {
+        return;
+      }
+      void (async () => {
+        const [runtimeLines, detachedOutcome] = await Promise.all([
+          fetchAssistantRuntimeProgressSince(pending.startedAt),
+          pending.detached ? fetchAssistantAgentOutcomeSince(pending.startedAt, pending.prompt) : Promise.resolve(null),
+        ]);
+
+        const mergedLines = runtimeLines.reduce<string[]>((acc, line) => appendStreamingProgressLine(acc, line), []);
+        const last = mergedLines[mergedLines.length - 1] ?? "";
+
+        saveChatPendingState({
+          ...pending,
+          ...(mergedLines.length > 0 ? { progressLogs: mergedLines } : {}),
+        });
+        if (mergedLines.length > 0) {
+          setState((prev) => {
+            if (!prev.loading) return prev;
+            return {
+              ...prev,
+              streamingStatus: last || prev.streamingStatus,
+              streamingProgress: mergedLines,
+            };
+          });
+        }
+
+        if (!detachedOutcome) {
+          return;
+        }
+        const finalizedLogs = mergedLines.length > 0 ? mergedLines : (Array.isArray(pending.progressLogs) ? pending.progressLogs : []);
+        if (detachedOutcome.ok && detachedOutcome.response) {
+          saveChatPendingState({
+            loading: false,
+            prompt: pending.prompt,
+            startedAt: pending.startedAt,
+            response: detachedOutcome.response,
+            completedAt: Date.now(),
+            progressLogs: finalizedLogs,
+          });
+          const hintedBook = (chatBookContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : undefined)) ?? undefined;
+          invalidateAssistantBookViews(hintedBook);
+          setState((prev) => completeAssistantResponse(prev, detachedOutcome.response!));
+          return;
+        }
+
+        const errorMsg = detachedOutcome.error ?? "后台执行失败";
+        saveChatPendingState({
+          loading: false,
+          prompt: pending.prompt,
+          startedAt: pending.startedAt,
+          error: errorMsg,
+          completedAt: Date.now(),
+          progressLogs: finalizedLogs,
+        });
+        setScopeBlockHint(`聊天请求失败：${errorMsg}`);
+        setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+      })();
+    }, 2000);
+    return () => window.clearInterval(intervalId);
+  }, [state.loading, activeBooks, chatBookContext, invalidateAssistantBookViews]);
 
   useEffect(() => {
     const key = initialPromptKey ?? initialPrompt ?? "";
@@ -1344,7 +2025,31 @@ export function AssistantView({
     }
     const pending = sseMessages.slice(sseCursorRef.current);
     sseCursorRef.current = sseMessages.length;
-    setState((prev) => pending.reduce((next, message) => applyAssistantTaskEventFromSSE(next, message), prev));
+    setState((prev) => {
+      let next = prev;
+      for (const message of pending) {
+        next = applyAssistantTaskEventFromSSE(next, message);
+        if (message.event === "log" && next.loading) {
+          const line = extractAssistantProgressLineFromRuntimeLog(message.data);
+          if (line) {
+            const updatedProgress = appendStreamingProgressLine(next.streamingProgress, line);
+            next = {
+              ...next,
+              streamingStatus: line,
+              streamingProgress: updatedProgress,
+            };
+            const chatPending = restoreChatPendingState();
+            if (chatPending?.loading) {
+              saveChatPendingState({
+                ...chatPending,
+                progressLogs: updatedProgress,
+              });
+            }
+          }
+        }
+      }
+      return next;
+    });
   }, [sseMessages]);
 
   useEffect(() => {
@@ -1405,6 +2110,10 @@ export function AssistantView({
       // ignore storage write failures
     }
   }, [state.taskExecution, state.taskPlan]);
+
+  useEffect(() => {
+    saveChatHistory(state.messages);
+  }, [state.messages]);
 
   useEffect(() => {
     if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {
@@ -1470,7 +2179,20 @@ export function AssistantView({
     if (state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
       return;
     }
-    const draft = buildAssistantTemplateConfirmationDraft(template, scopeMode, selectedBookIds, activeBookIds);
+    // L0 templates: skip confirmation, route directly through chat
+    if (template.riskLevel === "L0") {
+      sendPrompt(template.prompt, { forceChat: true });
+      return;
+    }
+    // L1 templates need a target book — use context or auto-select if only 1 active book
+    const targetBookIds = chatBookContext ? [chatBookContext.id] : (activeBookIds.length === 1 ? [activeBookIds[0]] : []);
+    if (targetBookIds.length === 0) {
+      setScopeBlockHint("");
+      setState((prev) => submitAssistantInput(prev, template.prompt));
+      setState((prev) => completeAssistantResponse(prev, `请先告诉我你要操作哪本书。当前活跃书籍：${activeBooks.map((b) => `《${b.title}》`).join("、")}。`));
+      return;
+    }
+    const draft = buildAssistantTemplateConfirmationDraft(template, targetBookIds);
     if (!draft) {
       setScopeBlockHint(t("assistant.scopeBlocked"));
       return;
@@ -1485,7 +2207,7 @@ export function AssistantView({
     setState((prev) => requestAssistantConfirmation(prev, draft));
   };
 
-  const sendPrompt = (rawPrompt: string) => {
+  const sendPrompt = (rawPrompt: string, options?: { forceChat?: boolean }) => {
     const normalizedPrompt = rawPrompt.trim();
     if (!normalizedPrompt) {
       return;
@@ -1497,19 +2219,150 @@ export function AssistantView({
       setState(commandState);
       return;
     }
-    if (state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
+    if (state.loading || chatInFlightRef.current || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
+      return;
+    }
+
+    // --- Smart book context resolution ---
+    const bookResolution = resolveBookFromPrompt(normalizedPrompt, activeBooks);
+    let resolvedContext = chatBookContext;
+
+    if (bookResolution) {
+      if ("match" in bookResolution) {
+        // Exact or fuzzy match — update context
+        resolvedContext = bookResolution.match;
+        setChatBookContext(resolvedContext);
+      } else if ("candidates" in bookResolution) {
+        // Ambiguous — ask user to clarify
+        setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+        const bookList = bookResolution.candidates.map((b, i) => `${i + 1}. 《${b.title}》`).join("\n");
+        setState((prev) => completeAssistantResponse(prev, `你提到的书名匹配到了多本书，请告诉我你指的是哪一本：\n\n${bookList}\n\n你可以直接说书名或序号。`));
+        return;
+      }
+    }
+
+    // Auto-select if only 1 active book and no context yet
+    if (!resolvedContext && activeBooks.length === 1) {
+      resolvedContext = { id: activeBooks[0].id, title: activeBooks[0].title };
+      setChatBookContext(resolvedContext);
+    }
+
+    const contextTitles = resolvedContext ? [resolvedContext.title] : activeBooks.map((b) => b.title);
+
+    if (resolvedContext && isBookSelectionOnlyPrompt(normalizedPrompt, resolvedContext)) {
+      setScopeBlockHint("");
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      setState((prev) => completeAssistantResponse(prev, `已切换到《${resolvedContext.title}》。后续我会默认按这本书执行。`));
+      return;
+    }
+
+    // Helper: require a single book for book-specific operations
+    const requireSingleBook = (): string | null => {
+      if (resolvedContext) return resolvedContext.id;
+      if (activeBooks.length === 0) {
+        setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+        setState((prev) => completeAssistantResponse(prev, "当前没有活跃书籍。请先创建一本书。"));
+        return null;
+      }
+      // Multiple books, no context
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      const bookList = activeBooks.map((b) => `- 《${b.title}》`).join("\n");
+      setState((prev) => completeAssistantResponse(prev, `你想操作哪本书？当前活跃书籍：\n\n${bookList}\n\n请直接说书名，我会记住你的选择。`));
+      return null;
+    };
+
+    // forceChat bypasses all local routing and sends directly to agent chat
+    if (options?.forceChat) {
+      setScopeBlockHint("");
+      setState((prev) => submitAssistantInput(prev, normalizedPrompt));
+      chatInFlightRef.current = true;
+      saveChatPendingState({ loading: true, prompt: normalizedPrompt, startedAt: Date.now(), progressLogs: [] });
+      const abortController = new AbortController();
+      chatAbortRef.current = abortController;
+      const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
+      void streamAssistantChat(agentPrompt, contextTitles, {
+        abortSignal: abortController.signal,
+        onProgress: (status) => {
+          setState((prev) => {
+            const logs = appendStreamingProgressLine(prev.streamingProgress, status);
+            return {
+              ...prev,
+              streamingStatus: status,
+              streamingProgress: logs,
+            };
+          });
+          const pending = restoreChatPendingState();
+          const merged = appendStreamingProgressLine(
+            Array.isArray(pending?.progressLogs) ? pending.progressLogs : [],
+            status,
+          );
+          saveChatPendingState({
+            loading: true,
+            prompt: normalizedPrompt,
+            startedAt: pending?.startedAt ?? Date.now(),
+            progressLogs: merged,
+            ...(pending?.interimResponse ? { interimResponse: pending.interimResponse } : {}),
+          });
+        },
+        onMessage: (content) => {
+          const pending = restoreChatPendingState();
+          saveChatPendingState({
+            loading: true,
+            prompt: normalizedPrompt,
+            startedAt: pending?.startedAt ?? Date.now(),
+            ...(Array.isArray(pending?.progressLogs) ? { progressLogs: pending.progressLogs } : {}),
+            interimResponse: content,
+          });
+        },
+        onDone: (result) => {
+          chatInFlightRef.current = false;
+          chatAbortRef.current = null;
+          const pending = restoreChatPendingState();
+          const startedAt = pending?.startedAt ?? Date.now();
+          const progressLogs = Array.isArray(pending?.progressLogs) ? pending.progressLogs : [];
+          if (result.ok && result.response) {
+            const reply = result.response.trim() || "没有收到回复，请重试。";
+            saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, response: reply, completedAt: Date.now(), progressLogs });
+            invalidateAssistantBookViews(resolvedContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null));
+            setState((prev) => completeAssistantResponse(prev, reply));
+          } else {
+            const errorMsg = result.error ?? "未知错误";
+            if (shouldKeepPendingOnChatDisconnect(errorMsg)) {
+              const recoveredLogs = appendStreamingProgressLine(progressLogs, "连接波动，正在继续同步后台进度…");
+              saveChatPendingState({
+                loading: true,
+                prompt: normalizedPrompt,
+                startedAt,
+                progressLogs: recoveredLogs,
+                detached: true,
+                detachedReason: errorMsg,
+                ...(typeof pending?.interimResponse === "string" && pending.interimResponse.trim().length > 0
+                  ? { interimResponse: pending.interimResponse }
+                  : {}),
+              });
+              setState((prev) => {
+                if (!prev.loading) return prev;
+                return {
+                  ...prev,
+                  streamingStatus: "连接波动，正在继续同步后台进度…",
+                  streamingProgress: recoveredLogs,
+                };
+              });
+              return;
+            }
+            saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, error: errorMsg, completedAt: Date.now(), progressLogs });
+            setScopeBlockHint(`聊天请求失败：${errorMsg}`);
+            setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+          }
+        },
+      });
       return;
     }
 
     const readRequest = parseAssistantCrudReadRequest(normalizedPrompt) ?? inferAssistantReadRequestFromPrompt(normalizedPrompt);
     if (readRequest) {
-      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
-      if (!targetBookId) {
-        setScopeBlockHint(t("assistant.scopeBlocked"));
-        setState((prev) => submitAssistantInput(prev, normalizedPrompt));
-        setState((prev) => completeAssistantResponse(prev, "当前没有可用书籍范围。请先选择一本书，我再基于书内内容回答。"));
-        return;
-      }
+      const targetBookId = requireSingleBook();
+      if (!targetBookId) return;
       setScopeBlockHint("");
       setCrudBusy(true);
       setState((prev) => submitAssistantInput(prev, normalizedPrompt));
@@ -1522,10 +2375,7 @@ export function AssistantView({
           setCrudReadResult(response);
           setCrudDeletePreview(null);
           setCrudDeleteResult(null);
-          const topEvidence = response.evidence[0]?.excerpt;
-          const reply = topEvidence
-            ? `根据书内资料：${response.summary}\n\n先给你一个关键片段：${topEvidence}`
-            : `根据书内资料：${response.summary}`;
+          const reply = response.summary || "未查到相关信息。";
           setState((prev) => completeAssistantResponse(prev, reply));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1561,11 +2411,8 @@ export function AssistantView({
 
     const deleteRequest = parseAssistantCrudDeleteRequest(normalizedPrompt);
     if (deleteRequest) {
-      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
-      if (!targetBookId) {
-        setScopeBlockHint(t("assistant.scopeBlocked"));
-        return;
-      }
+      const targetBookId = requireSingleBook();
+      if (!targetBookId) return;
       setScopeBlockHint("");
       setCrudBusy(true);
       setState((prev) => submitAssistantInput(prev, normalizedPrompt));
@@ -1591,11 +2438,8 @@ export function AssistantView({
     }
 
     if (WORLD_REPORT_ACTION_PATTERN.test(normalizedPrompt)) {
-      const targetBookId = selectedScopeBookIds[0] ?? activeBookIds[0];
-      if (!targetBookId) {
-        setScopeBlockHint(t("assistant.scopeBlocked"));
-        return;
-      }
+      const targetBookId = requireSingleBook();
+      if (!targetBookId) return;
       setScopeBlockHint("");
       setCrudBusy(true);
       setState((prev) => submitAssistantInput(prev, normalizedPrompt));
@@ -1619,8 +2463,13 @@ export function AssistantView({
       return;
     }
 
-    const draft = buildAssistantConfirmationDraft(normalizedPrompt, scopeMode, selectedBookIds, activeBookIds);
     if (detectAssistantBookAction(normalizedPrompt)) {
+      let actionBookId: string | null = resolvedContext?.id ?? null;
+      if (!actionBookId) {
+        actionBookId = requireSingleBook();
+        if (!actionBookId) return;
+      }
+      const draft = buildAssistantConfirmationDraft(normalizedPrompt, [actionBookId]);
       if (!draft) {
         setScopeBlockHint(t("assistant.scopeBlocked"));
         return;
@@ -1632,22 +2481,90 @@ export function AssistantView({
 
     setScopeBlockHint("");
     setState((prev) => submitAssistantInput(prev, normalizedPrompt));
-    void (async () => {
-      try {
-        const response = await postApi<AssistantChatResponse>("/assistant/chat", {
-          prompt: normalizedPrompt,
-          scopeBookIds: selectedScopeBookIds,
-          scopeBookTitles: selectedBookTitles,
-          instruction: buildAssistantAgentInstruction(normalizedPrompt, selectedBookTitles),
+    chatInFlightRef.current = true;
+    saveChatPendingState({ loading: true, prompt: normalizedPrompt, startedAt: Date.now(), progressLogs: [] });
+
+    const abortController = new AbortController();
+    chatAbortRef.current = abortController;
+
+    const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
+
+    void streamAssistantChat(agentPrompt, contextTitles, {
+      abortSignal: abortController.signal,
+      onProgress: (status) => {
+        setState((prev) => {
+          const logs = appendStreamingProgressLine(prev.streamingProgress, status);
+          return {
+            ...prev,
+            streamingStatus: status,
+            streamingProgress: logs,
+          };
         });
-        const reply = response.response?.trim() || "我在，继续说你的目标，我会按 Agent 方式推进。";
-        setState((prev) => completeAssistantResponse(prev, reply));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setScopeBlockHint(`聊天失败：${message}`);
-        setState((prev) => completeAssistantResponse(prev, "聊天请求失败，请检查模型配置和 API Key 后重试。"));
-      }
-    })();
+        const pending = restoreChatPendingState();
+        const merged = appendStreamingProgressLine(
+          Array.isArray(pending?.progressLogs) ? pending.progressLogs : [],
+          status,
+        );
+        saveChatPendingState({
+          loading: true,
+          prompt: normalizedPrompt,
+          startedAt: pending?.startedAt ?? Date.now(),
+          progressLogs: merged,
+          ...(pending?.interimResponse ? { interimResponse: pending.interimResponse } : {}),
+        });
+      },
+      onMessage: (content) => {
+        const pending = restoreChatPendingState();
+        saveChatPendingState({
+          loading: true,
+          prompt: normalizedPrompt,
+          startedAt: pending?.startedAt ?? Date.now(),
+          ...(Array.isArray(pending?.progressLogs) ? { progressLogs: pending.progressLogs } : {}),
+          interimResponse: content,
+        });
+      },
+      onDone: (result) => {
+        chatInFlightRef.current = false;
+        chatAbortRef.current = null;
+        const pending = restoreChatPendingState();
+        const startedAt = pending?.startedAt ?? Date.now();
+        const progressLogs = Array.isArray(pending?.progressLogs) ? pending.progressLogs : [];
+        if (result.ok && result.response) {
+          const reply = result.response.trim() || "没有收到回复，请重试。";
+          saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, response: reply, completedAt: Date.now(), progressLogs });
+          invalidateAssistantBookViews(resolvedContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null));
+          setState((prev) => completeAssistantResponse(prev, reply));
+        } else {
+          const errorMsg = result.error ?? "未知错误";
+          if (shouldKeepPendingOnChatDisconnect(errorMsg)) {
+            const recoveredLogs = appendStreamingProgressLine(progressLogs, "连接波动，正在继续同步后台进度…");
+            saveChatPendingState({
+              loading: true,
+              prompt: normalizedPrompt,
+              startedAt,
+              progressLogs: recoveredLogs,
+              detached: true,
+              detachedReason: errorMsg,
+              ...(typeof pending?.interimResponse === "string" && pending.interimResponse.trim().length > 0
+                ? { interimResponse: pending.interimResponse }
+                : {}),
+            });
+            setState((prev) => {
+              if (!prev.loading) return prev;
+              return {
+                ...prev,
+                streamingStatus: "连接波动，正在继续同步后台进度…",
+                streamingProgress: recoveredLogs,
+              };
+            });
+            return;
+          }
+          saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, error: errorMsg, completedAt: Date.now(), progressLogs });
+          setScopeBlockHint(`聊天失败：${errorMsg}`);
+          setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+        }
+      },
+    });
   };
 
   const handleConfirmAction = async () => {
@@ -1755,85 +2672,26 @@ export function AssistantView({
           </button>
         </div>
         <div className="mt-3 space-y-2" data-testid="assistant-scope-selector">
-          <div className="text-xs text-muted-foreground">{t("assistant.scopeLabel")}</div>
-          <div className="flex flex-wrap gap-4 text-xs">
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                checked={scopeMode === "single"}
-                onChange={() => {
-                  setScopeMode("single");
-                  setState((prev) => cancelAssistantPendingAction(prev));
-                  setSelectedBookIds((prev) => {
-                    const selected = prev.find((id) => activeBookIds.includes(id));
-                    return selected ? [selected] : [];
-                  });
-                }}
-              />
-              <span>{t("assistant.scopeSingle")}</span>
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                checked={scopeMode === "multi"}
-                onChange={() => {
-                  setScopeMode("multi");
-                  setState((prev) => cancelAssistantPendingAction(prev));
-                }}
-              />
-              <span>{t("assistant.scopeMulti")}</span>
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                checked={scopeMode === "all-active"}
-                onChange={() => {
-                  setScopeMode("all-active");
-                  setState((prev) => cancelAssistantPendingAction(prev));
-                }}
-              />
-              <span>{t("assistant.scopeAllActive")}</span>
-            </label>
-          </div>
-          {scopeMode === "single" && (
-            <select
-              value={selectedBookIds[0] ?? ""}
-              onChange={(event) => setSelectedBookIds(event.target.value ? [event.target.value] : [])}
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-            >
-              <option value="">{t("assistant.scopeSelectBook")}</option>
-              {activeBooks.map((book) => (
-                <option key={book.id} value={book.id}>{book.title}</option>
-              ))}
-            </select>
-          )}
-          {scopeMode === "multi" && (
-            <div className="grid gap-1 sm:grid-cols-2">
-              {activeBooks.length === 0 ? (
-                <span className="text-xs text-muted-foreground">{t("assistant.scopeNoBooks")}</span>
-              ) : activeBooks.map((book) => {
-                const checked = selectedBookIds.includes(book.id);
-                return (
-                  <label key={book.id} className="inline-flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(event) => {
-                        if (event.target.checked) {
-                          setSelectedBookIds((prev) => [...new Set([...prev, book.id])]);
-                        } else {
-                          setSelectedBookIds((prev) => prev.filter((id) => id !== book.id));
-                        }
-                      }}
-                    />
-                    <span className="truncate">{book.title}</span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-          <div className="text-xs text-muted-foreground" data-testid="assistant-scope-summary">
-            {selectedBookTitles.length > 0 ? selectedBookTitles.join("、") : t("assistant.scopeNoneSelected")}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{t("assistant.scopeLabel")}</span>
+            {chatBookContext ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-primary" data-testid="assistant-scope-summary">
+                《{chatBookContext.title}》
+                <button
+                  onClick={() => setChatBookContext(null)}
+                  className="ml-1 text-muted-foreground hover:text-destructive transition-colors"
+                  title="清除书籍上下文"
+                >
+                  ✕
+                </button>
+              </span>
+            ) : (
+              <span className="text-muted-foreground/60" data-testid="assistant-scope-summary">
+                {activeBooks.length > 0
+                  ? `${activeBooks.length} 本活跃书籍 — 聊天时会自动识别`
+                  : t("assistant.scopeNoBooks")}
+              </span>
+            )}
           </div>
           {scopeBlockHint && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive" data-testid="assistant-scope-blocked">
@@ -1844,7 +2702,7 @@ export function AssistantView({
       </section>
 
         <section className="flex-1 min-h-[360px] overflow-y-auto rounded-xl border border-border/70 bg-background/70 p-4" data-testid="assistant-message-list">
-          {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : <MessageList messages={state.messages} />}
+          {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : <MessageList messages={state.messages} loading={state.loading} streamingStatus={state.streamingStatus} streamingProgress={state.streamingProgress} />}
           {state.taskPlan && (
             <TaskPlanCard
               t={t}

@@ -44,6 +44,7 @@ import { persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
+import { removeAdultContentAuditPenalty, removeAdultContentIssues } from "./audit-issue-policy.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -3239,13 +3240,14 @@ ${matrix}`,
       };
     };
   }): Promise<MergedAuditEvaluation> {
-    const llmAudit = await params.auditor.auditChapter(
+    const rawLlmAudit = await params.auditor.auditChapter(
       params.bookDir,
       params.chapterContent,
       params.chapterNumber,
       params.book.genre,
       params.auditOptions,
     );
+    const llmAudit = removeAdultContentAuditPenalty(rawLlmAudit);
     const aiTells = analyzeAITells(params.chapterContent, params.language);
     const sensitiveResult = analyzeSensitiveWords(params.chapterContent, undefined, params.language);
     const longSpanFatigue = await analyzeLongSpanFatigue({
@@ -3264,19 +3266,21 @@ ${matrix}`,
     // revisionBlockingIssues excludes long-span-fatigue issues by
     // construction (not by category name) so that an LLM-reported issue
     // sharing a category label with a long-span issue is still counted.
-    const revisionBlockingIssues: ReadonlyArray<AuditIssue> = [
+    const revisionBlockingIssues: ReadonlyArray<AuditIssue> = removeAdultContentIssues([
       ...llmAudit.issues,
       ...aiTells.issues,
       ...sensitiveResult.issues,
-    ];
+    ]);
+
+    const mergedAuditResult = removeAdultContentAuditPenalty({
+      passed: hasBlockedWords ? false : llmAudit.passed,
+      issues,
+      summary: llmAudit.summary,
+      tokenUsage: llmAudit.tokenUsage,
+    });
 
     return {
-      auditResult: {
-        passed: hasBlockedWords ? false : llmAudit.passed,
-        issues,
-        summary: llmAudit.summary,
-        tokenUsage: llmAudit.tokenUsage,
-      },
+      auditResult: mergedAuditResult,
       aiTellCount: aiTells.issues.length,
       blockingCount: revisionBlockingIssues.filter((issue) => issue.severity === "warning" || issue.severity === "critical").length,
       criticalCount: revisionBlockingIssues.filter((issue) => issue.severity === "critical").length,

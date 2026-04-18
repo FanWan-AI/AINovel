@@ -285,7 +285,7 @@ function buildBriefTrace(
 // --- V2 confirm run-state store ---
 const bookCreateRunStore = new BookCreateRunStore();
 
-type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next";
+type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next" | "generate_structure";
 type AssistantPlanRiskLevel = "low" | "medium" | "high";
 type AssistantPlanScope = DaemonPlanBookScope;
 
@@ -518,6 +518,7 @@ interface AssistantOptimizeIteration {
 const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
+const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
 const ASSISTANT_CRUD_READ_PATTERN = /查询|查看|检索|read|search/iu;
 const ASSISTANT_CRUD_DELETE_PATTERN = /删除|delete/iu;
 const ASSISTANT_CRUD_RESTORE_PATTERN = /恢复|restore/iu;
@@ -532,6 +533,68 @@ const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
 const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
+const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|rewrite|revise|spot-fix|polish|rework|anti-detect/iu;
+
+interface AssistantToolOutcome {
+  readonly name: string;
+  readonly parsed?: Record<string, unknown>;
+  readonly raw: string;
+}
+
+function parseAssistantToolOutcome(name: string, raw: string): AssistantToolOutcome {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return { name, parsed: parsed as Record<string, unknown>, raw };
+    }
+  } catch {
+    // fallthrough: keep raw text only
+  }
+  return { name, raw };
+}
+
+function buildGroundedAssistantResponse(
+  prompt: string,
+  toolOutcomes: ReadonlyArray<AssistantToolOutcome>,
+  fallback: string,
+): string {
+  if (!ASSISTANT_REVISE_INTENT_PATTERN.test(prompt)) {
+    return fallback;
+  }
+
+  const reviseOutcomes = toolOutcomes.filter((item) => item.name === "revise_chapter");
+  if (reviseOutcomes.length === 0) {
+    return fallback;
+  }
+
+  const lastRevise = reviseOutcomes[reviseOutcomes.length - 1];
+  const parsed = lastRevise.parsed;
+  if (!parsed) {
+    return fallback;
+  }
+
+  const error = typeof parsed.error === "string" ? parsed.error.trim() : "";
+  if (error.length > 0) {
+    return `修订未完成：${error}`;
+  }
+
+  const chapterNumber = typeof parsed.chapterNumber === "number" ? parsed.chapterNumber : undefined;
+  const status = typeof parsed.status === "string" ? parsed.status : undefined;
+  const decision = typeof parsed.decision === "string" ? parsed.decision : undefined;
+  const wordCount = typeof parsed.wordCount === "number" ? parsed.wordCount : undefined;
+  const mode = typeof parsed.actionType === "string" ? parsed.actionType : undefined;
+
+  const chapterLabel = chapterNumber !== undefined ? `第${chapterNumber}章` : "目标章节";
+  const detailParts = [
+    mode ? `模式：${mode}` : undefined,
+    status ? `状态：${status}` : undefined,
+    decision ? `决策：${decision}` : undefined,
+    wordCount !== undefined ? `字数：${wordCount}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+
+  const details = detailParts.length > 0 ? `（${detailParts.join("，")}）` : "";
+  return `已完成${chapterLabel}修订${details}。如需，我可以继续按你的新要求再做一轮定向改写。`;
+}
 
 function buildAssistantModelIdentityReply(config: ProjectConfig): string {
   const llm = config.llm;
@@ -565,6 +628,10 @@ function parseAssistantCrudDimensionFromInput(input: string): AssistantCrudReadD
 function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   const normalized = input.trim();
   if (!normalized) return null;
+  // "写下一章" takes priority — "自审" in a write context means write+audit, not audit-only
+  if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
+    return "write_next";
+  }
   if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
     return "audit_and_optimize";
   }
@@ -574,8 +641,8 @@ function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   if (ASSISTANT_AUDIT_PATTERN.test(normalized)) {
     return "audit";
   }
-  if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
-    return "write_next";
+  if (ASSISTANT_GENERATE_STRUCTURE_PATTERN.test(normalized)) {
+    return "generate_structure";
   }
   return null;
 }
@@ -779,6 +846,18 @@ function buildAssistantPlanDraft(
       risk: {
         level: "medium",
         reasons: ["涉及章节内容改写"],
+      },
+    };
+  }
+
+  if (intent === "generate_structure") {
+    return {
+      plan: [
+        { stepId: "s1", action: "plan-next", ...bookTarget },
+      ],
+      risk: {
+        level: "medium",
+        reasons: ["将生成项目结构大纲"],
       },
     };
   }
@@ -2638,46 +2717,147 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
     const payload = body as Record<string, unknown>;
     const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-    const instruction = typeof payload.instruction === "string" ? payload.instruction.trim() : "";
-    if (!prompt && !instruction) {
+    const scopeBookTitles = Array.isArray(payload.scopeBookTitles)
+      ? (payload.scopeBookTitles as unknown[]).filter((t): t is string => typeof t === "string")
+      : [];
+    if (!prompt) {
       return c.json({
         code: "ASSISTANT_CHAT_VALIDATION_FAILED",
-        errors: [{ field: "prompt", message: "prompt or instruction must be a non-empty string" }],
+        errors: [{ field: "prompt", message: "prompt must be a non-empty string" }],
       }, 422);
     }
 
-    if (prompt && ASSISTANT_MODEL_IDENTITY_PATTERN.test(prompt)) {
+    // Short-circuit: model identity
+    if (ASSISTANT_MODEL_IDENTITY_PATTERN.test(prompt)) {
       const currentConfig = await loadCurrentProjectConfig({ requireApiKey: false });
-      return c.json({ ok: true, response: buildAssistantModelIdentityReply(currentConfig) });
-    }
-
-    if (prompt && ASSISTANT_VAGUE_PROMPT_PATTERN.test(prompt)) {
-      return c.json({
-        ok: true,
-        response: "直接告诉我你要做哪件事：查看状态、续写下一章、审计某章，或问我具体问题。",
+      const reply = buildAssistantModelIdentityReply(currentConfig);
+      return streamSSE(c, async (stream) => {
+        await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: true, response: reply }) });
       });
     }
 
-    const response = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction: instruction || prompt }),
+    // Short-circuit: vague punctuation-only input
+    if (ASSISTANT_VAGUE_PROMPT_PATTERN.test(prompt)) {
+      const reply = "直接告诉我你要做哪件事：查看状态、续写下一章、审计某章，或问我具体问题。";
+      return streamSSE(c, async (stream) => {
+        await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: true, response: reply }) });
+      });
+    }
+
+    broadcast("agent:start", { instruction: prompt });
+
+    const scopeHint = scopeBookTitles.length > 0
+      ? `\n当前对话聚焦的书籍：${scopeBookTitles.join("、")}。优先针对这些书籍回答和操作。`
+      : "";
+
+    const assistantSystemPrompt = `你是 InkOS Studio 的 AI 助手，正在和一位小说作者实时聊天。
+
+## 核心原则
+
+1. **先理解，再行动**。分析用户真实意图后才决定是否调用工具。
+2. **读与写严格分离**：
+   - "看看 / 怎么样 / 写的如何 / 评价一下" → **只读操作**。用 read_truth_files 或 get_book_status 获取信息，然后用自己的判断回答。绝对不要修改任何内容。
+   - "改一下 / 修一下 / 润色 / 重写 / 修订" → 写操作。调用 revise_chapter，但先告知用户你将修改内容。
+   - "审计 / 审一下 / 检查质量" → 调用 audit_chapter（只评不改）。
+   - "写下一章 / 继续写 / 续写" → 调用 write_draft。
+3. **回答简洁自然**。1-3 句为主，除非用户要求展开。
+4. **禁止连锁操作**。不要自动把 audit 的结果接上 revise，不要审完一章自动审下一章。每次只执行用户明确要求的那一个动作。
+5. **闲聊简短回应**。"你好"→回个问候，不要介绍功能列表。
+6. **不编造内容**。不确定就先调工具查，不要猜测章节内容或审计结果。
+7. **上下文不失忆**。如果对话中已明确“当前聚焦书籍”，除非用户明确要求切换书籍，否则禁止再次追问“你想操作哪本书”。
+
+## 意图判断指南
+
+| 用户说 | 意图 | 正确操作 |
+|--------|------|----------|
+| "看看第X章" / "第X章写的如何" / "评价一下" | 阅读+评价 | read_truth_files 获取章节摘要，结合自身判断给出评价。不调 audit，不调 revise |
+| "审计第X章" / "审一下" / "检查" | 质量审计 | audit_chapter（只评不改） |
+| "修一下" / "改改第X章" / "润色" | 修订 | revise_chapter |
+| "写下一章" / "继续写" | 续写 | write_draft |
+| "状态" / "进度" | 查询 | get_book_status |
+| "大纲" / "规划" | 生成/查看 | 视上下文：查看用 read_truth_files，生成用 plan_chapter |
+
+## 禁止事项
+
+- 用户说"看看"或"怎么样"时，禁止调用 audit_chapter 或 revise_chapter
+- 禁止自动连锁：审计完不要自动修订，修订完不要自动再审
+- write_draft 只能写最新章之后的下一章
+- 不要用 write_truth_file 改 current_state.md 的章节进度
+- 不要用 import_chapters 补单章
+- 禁止列出工具清单或能力清单
+- 若系统已提供“当前对话聚焦的书籍”，不要再要求用户重复确认书名（仅在用户主动切书或指令冲突时允许澄清）
+${scopeHint}`;
+
+    return streamSSE(c, async (stream) => {
+      let clientAborted = false;
+      let writeChain = Promise.resolve();
+      const queueSSE = (event: string, payload: unknown) => {
+        if (clientAborted) {
+          return writeChain;
+        }
+        const data = typeof payload === "string" ? payload : JSON.stringify(payload);
+        writeChain = writeChain
+          .then(async () => {
+            if (clientAborted) return;
+            await stream.writeSSE({ event, data });
+          })
+          .catch(() => {
+            // Ignore stream write failures; onAbort will stop subsequent writes.
+          });
+        return writeChain;
+      };
+
+      const keepAlive = setInterval(() => {
+        void queueSSE("ping", "");
+      }, 15_000);
+
+      stream.onAbort(() => {
+        clientAborted = true;
+        clearInterval(keepAlive);
+      });
+
+      try {
+        const { runAgentLoop } = await import("@actalk/inkos-core");
+
+        let lastResponse = "";
+        const toolOutcomes: AssistantToolOutcome[] = [];
+
+        const result = await runAgentLoop(
+          await buildPipelineConfig(),
+          prompt,
+          {
+            systemPrompt: assistantSystemPrompt,
+            onToolCall: (name, args) => {
+              const toolEvent = { type: "tool_call" as const, tool: name, args };
+              void queueSSE("assistant:progress", toolEvent);
+              broadcast("log", `工具调用：${name}`);
+            },
+            onToolResult: (name, result) => {
+              const truncated = result.length > 500 ? `${result.slice(0, 500)}…` : result;
+              const toolResultEvent = { type: "tool_result" as const, tool: name, preview: truncated };
+              void queueSSE("assistant:progress", toolResultEvent);
+              toolOutcomes.push(parseAssistantToolOutcome(name, result));
+            },
+            onMessage: (content) => {
+              lastResponse = content;
+              void queueSSE("assistant:message", { content });
+            },
+          },
+        );
+
+  const rawResponse = result || lastResponse || "处理完成。";
+  const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        await queueSSE("assistant:done", { ok: true, response: finalResponse });
+        broadcast("agent:complete", { instruction: prompt, response: finalResponse });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await queueSSE("assistant:done", { ok: false, error: msg });
+        broadcast("agent:error", { instruction: prompt, error: msg });
+      } finally {
+        clearInterval(keepAlive);
+        await writeChain;
+      }
     });
-    const result = await response.json().catch(() => null) as Record<string, unknown> | null;
-    if (!response.ok) {
-      return new Response(JSON.stringify({
-        error: {
-          code: "ASSISTANT_CHAT_UPSTREAM_FAILED",
-          message: typeof result?.error === "string" ? result.error : "Agent chat request failed.",
-        },
-      }), {
-        status: response.status,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    const reply = typeof result?.response === "string" ? result.response : "";
-    return c.json({ ok: true, response: reply });
   });
 
   app.post("/api/assistant/delete/preview", async (c) => {
@@ -4861,6 +5041,27 @@ export async function startStudioServer(
     }
   }
 
-  console.log(`NovaScribe Studio running on http://localhost:${port}`);
-  serve({ fetch: app.fetch, port });
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const tryPort = port + attempt;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const server = serve({ fetch: app.fetch, port: tryPort }, () => {
+          console.log(`NovaScribe Studio running on http://localhost:${tryPort}`);
+          resolve();
+        });
+        server.once("error", (err: NodeJS.ErrnoException) => {
+          reject(err);
+        });
+      });
+      return; // success
+    } catch (err) {
+      const isAddrInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+      if (isAddrInUse && attempt < maxRetries - 1) {
+        console.warn(`Port ${tryPort} is in use, trying ${tryPort + 1}...`);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
