@@ -33,6 +33,7 @@ export interface TaskGraph {
   readonly nodes: ReadonlyArray<TaskNode>;
   readonly edges: ReadonlyArray<TaskEdge>;
   readonly intent?: string;
+  readonly intentType?: string;
   readonly riskLevel?: string;
 }
 

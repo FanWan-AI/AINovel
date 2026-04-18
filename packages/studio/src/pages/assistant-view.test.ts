@@ -15,6 +15,7 @@ import {
   applyAssistantOperatorCommand,
   applyAssistantQuickAction,
   applyAssistantTaskEventFromSSE,
+  buildGoalToBookConfirmationDraft,
   buildAssistantConfirmationDraft,
   buildAssistantTaskRecoveryPayload,
   buildAssistantNextActionPrompt,
@@ -35,6 +36,7 @@ import {
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
   resolveAssistantCandidateSelection,
+  resolveAssistantGoalToBookProgress,
   resolveAssistantScopeBookIds,
   resolveAssistantAgentOutcomeFromRuntimeEvents,
   resolveBookFromPrompt,
@@ -58,8 +60,74 @@ describe("AssistantView", () => {
     expect(html).toContain("assistant-message-list");
     expect(html).toContain("assistant-input-panel");
     expect(html).toContain("assistant-template-panel");
+    expect(html).toContain("assistant-goal-to-book-wizard");
     expect(html).toContain("assistant-empty-state");
     expect(html).toContain("生成大纲");
+  });
+
+  it("builds a goal-to-book confirmation draft from wizard input", () => {
+    expect(buildGoalToBookConfirmationDraft("  用一句话目标推进成 2 章小说  ", ["book-1"])).toEqual({
+      action: "goal-to-book",
+      prompt: "用一句话目标推进成 2 章小说",
+      targetBookIds: ["book-1"],
+    });
+    expect(buildGoalToBookConfirmationDraft("  ", ["book-1"])).toBeNull();
+  });
+
+  it("derives goal-to-book phase progress and remaining steps from task snapshots", () => {
+    const progress = resolveAssistantGoalToBookProgress({
+      taskId: "asst_t_goal_01",
+      sessionId: "asst_s_goal_01",
+      status: "running",
+      currentStepId: "s6",
+      steps: {},
+      nodes: {
+        s1: { nodeId: "s1", type: "task", action: "plan-next", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:01.000Z" },
+        cp1: { nodeId: "cp1", type: "checkpoint", action: "checkpoint", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:01.000Z", finishedAt: "2026-01-01T00:00:02.000Z" },
+        s2: { nodeId: "s2", type: "task", action: "write-next", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:02.000Z", finishedAt: "2026-01-01T00:00:03.000Z" },
+        s3: { nodeId: "s3", type: "task", action: "audit", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:03.000Z", finishedAt: "2026-01-01T00:00:04.000Z" },
+        s4: { nodeId: "s4", type: "task", action: "revise", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:04.000Z", finishedAt: "2026-01-01T00:00:05.000Z" },
+        s5: { nodeId: "s5", type: "task", action: "re-audit", status: "succeeded", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:05.000Z", finishedAt: "2026-01-01T00:00:06.000Z" },
+        s6: { nodeId: "s6", type: "task", action: "write-next", status: "running", attempts: 1, maxRetries: 0, startedAt: "2026-01-01T00:00:06.000Z" },
+      },
+      graph: {
+        taskId: "asst_t_goal_01",
+        intentType: "goal-to-book",
+        nodes: [
+          { nodeId: "s1", type: "task", action: "plan-next" },
+          { nodeId: "cp1", type: "checkpoint", action: "checkpoint", mode: "blueprint-confirm" },
+          { nodeId: "s2", type: "task", action: "write-next", chapter: 1 },
+          { nodeId: "s3", type: "task", action: "audit", chapter: 1 },
+          { nodeId: "s4", type: "task", action: "revise", chapter: 1 },
+          { nodeId: "s5", type: "task", action: "re-audit", chapter: 1 },
+          { nodeId: "s6", type: "task", action: "write-next", chapter: 2 },
+          { nodeId: "s7", type: "task", action: "audit", chapter: 2 },
+          { nodeId: "s8", type: "task", action: "revise", chapter: 2 },
+          { nodeId: "s9", type: "task", action: "re-audit", chapter: 2 },
+          { nodeId: "cp2", type: "checkpoint", action: "checkpoint", mode: "publish-candidate-confirm" },
+        ],
+        edges: [],
+      },
+      lastUpdatedAt: "2026-01-01T00:00:06.000Z",
+    });
+
+    expect(progress).toMatchObject({
+      currentStageIndex: 4,
+      currentStageLabel: "写",
+      currentStepLabel: "第2章 写作中",
+      remainingSteps: 5,
+      completedChapterLoops: 1,
+      chapterLoopTarget: 2,
+    });
+    expect(progress?.stages.map((stage) => stage.status)).toEqual([
+      "complete",
+      "complete",
+      "complete",
+      "current",
+      "upcoming",
+      "upcoming",
+      "upcoming",
+    ]);
   });
 
   it("resolves candidate selection state from task snapshots", () => {

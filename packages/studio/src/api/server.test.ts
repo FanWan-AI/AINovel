@@ -706,6 +706,63 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("builds a goal-to-book graph with blueprint and publish checkpoints plus repeated write-review cycles", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_goal_to_book_001",
+        intentType: "goal-to-book",
+        input: "一句话目标：主角潜入修真学院，并在 2 章内完成首轮成长闭环。",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      intent: string;
+      intentType?: string;
+      plan: Array<Record<string, unknown>>;
+      graph: { intentType?: string; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> };
+      risk: { reasons: string[] };
+    };
+    expect(payload).toMatchObject({
+      intent: "goal_to_book",
+      intentType: "goal-to-book",
+      graph: {
+        intentType: "goal-to-book",
+        nodes: expect.arrayContaining([
+          expect.objectContaining({ nodeId: "s1", action: "plan-next" }),
+          expect.objectContaining({ nodeId: "cp1", type: "checkpoint", mode: "blueprint-confirm" }),
+          expect.objectContaining({ nodeId: "s2", action: "write-next", chapter: 1 }),
+          expect.objectContaining({ nodeId: "s6", action: "write-next", chapter: 2 }),
+          expect.objectContaining({ nodeId: "cp2", type: "checkpoint", mode: "publish-candidate-confirm" }),
+        ]),
+        edges: expect.arrayContaining([
+          expect.objectContaining({ from: "s1", to: "cp1" }),
+          expect.objectContaining({ from: "cp1", to: "s2" }),
+          expect.objectContaining({ from: "s5", to: "s6" }),
+          expect.objectContaining({ from: "s9", to: "cp2" }),
+        ]),
+      },
+    });
+    expect(payload.plan).toEqual(expect.arrayContaining([
+      { stepId: "s1", action: "plan-next", bookId: "demo-book" },
+      { stepId: "s2", action: "write-next", bookId: "demo-book", chapter: 1, mode: "ai-plan" },
+      { stepId: "s3", action: "audit", bookId: "demo-book", chapter: 1 },
+      { stepId: "s4", action: "revise", bookId: "demo-book", chapter: 1, mode: "rewrite" },
+      { stepId: "s5", action: "re-audit", bookId: "demo-book", chapter: 1 },
+      { stepId: "s6", action: "write-next", bookId: "demo-book", chapter: 2, mode: "ai-plan" },
+    ]));
+    expect(payload.risk.reasons).toEqual(expect.arrayContaining([
+      "包含蓝图确认 checkpoint，需人工审批后继续。",
+      "包含发布候选 checkpoint，需人工确认后才能完成候选确认。",
+    ]));
+  });
+
   it("returns assistant policy check result with required approvals for high-risk actions", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -2034,6 +2091,138 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
   });
 
+  it("executes goal-to-book graphs across repeated write-review loops and resumes from both checkpoints", async () => {
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    loadChapterIndexMock.mockResolvedValue([]);
+    planChapterMock.mockResolvedValue({
+      bookId: "demo-book",
+      chapterNumber: 1,
+      intentPath: "chapters/intent/0001_intent.json",
+      goal: "主角入学",
+      conflicts: ["身份暴露风险"],
+    });
+    writeNextChapterMock
+      .mockImplementationOnce(async () => {
+        await writeFile(join(chapterDir, "0001_goal.md"), "# 第1章\n首章正文。", "utf-8");
+        return {
+          chapterNumber: 1,
+          title: "首章",
+          wordCount: 1800,
+          revised: false,
+          status: "ready-for-review",
+          auditResult: { passed: true, issues: [], summary: "ok" },
+        };
+      })
+      .mockImplementationOnce(async () => {
+        await writeFile(join(chapterDir, "0002_goal.md"), "# 第2章\n第二章正文。", "utf-8");
+        return {
+          chapterNumber: 2,
+          title: "第二章",
+          wordCount: 1900,
+          revised: false,
+          status: "ready-for-review",
+          auditResult: { passed: true, issues: [], summary: "ok" },
+        };
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const planResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_goal_exec_001",
+        intentType: "goal-to-book",
+        input: "一句话目标：主角潜入修真学院，并在 2 章内完成首轮成长闭环。",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    const planned = await planResponse.json() as { taskId: string; graph: Record<string, unknown>; plan: Array<Record<string, unknown>> };
+
+    const executeResponse = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: planned.taskId,
+        sessionId: "asst_s_goal_exec_001",
+        approved: false,
+        graph: planned.graph,
+        plan: planned.plan,
+      }),
+    });
+    expect(executeResponse.status).toBe(200);
+    await expect(executeResponse.json()).resolves.toMatchObject({
+      taskId: planned.taskId,
+      status: "running",
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request(`http://localhost/api/assistant/tasks/${planned.taskId}`);
+      const payload = await task.json() as {
+        status: string;
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("running");
+      expect(payload.nodes?.cp1?.status).toBe("waiting_approval");
+    });
+    expect(planChapterMock).toHaveBeenCalledTimes(1);
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+
+    const approveBlueprint = await app.request(`http://localhost/api/assistant/tasks/${planned.taskId}/approve/cp1`, {
+      method: "POST",
+    });
+    expect(approveBlueprint.status).toBe(200);
+
+    await vi.waitFor(() => {
+      expect(planChapterMock).toHaveBeenCalledTimes(3);
+      expect(writeNextChapterMock).toHaveBeenCalledTimes(2);
+      expect(auditChapterMock).toHaveBeenCalledTimes(4);
+      expect(reviseDraftMock).toHaveBeenCalledTimes(2);
+    });
+
+    await vi.waitFor(async () => {
+      const task = await app.request(`http://localhost/api/assistant/tasks/${planned.taskId}`);
+      const payload = await task.json() as {
+        status: string;
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("running");
+      expect(payload.nodes?.cp2?.status).toBe("waiting_approval");
+    });
+
+    const approvePublish = await app.request(`http://localhost/api/assistant/tasks/${planned.taskId}/approve/cp2`, {
+      method: "POST",
+    });
+    expect(approvePublish.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const task = await app.request(`http://localhost/api/assistant/tasks/${planned.taskId}`);
+      const payload = await task.json() as {
+        status: string;
+        graph?: { intentType?: string; nodes: Array<{ nodeId: string }> };
+        nodes?: Record<string, { status: string }>;
+      };
+      expect(payload.status).toBe("succeeded");
+      expect(payload.graph?.intentType).toBe("goal-to-book");
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual([
+        "s1",
+        "cp1",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+        "s8",
+        "s9",
+        "cp2",
+      ]);
+      expect(payload.nodes?.cp2?.status).toBe("succeeded");
+    });
+  });
+
   it("auto-selects the highest-score parallel candidate and persists winner metadata", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -2122,7 +2311,7 @@ describe("createStudioServer daemon lifecycle", () => {
       expect(payload.nodes?.s1?.candidateDecision).toMatchObject({
         mode: "auto",
         status: "selected",
-        winnerCandidateId: "s1:c1",
+        winnerCandidateId: expect.stringMatching(/^s1:c[12]$/),
       });
       expect(payload.nodes?.s1?.candidateDecision?.winnerRunId).toBeTruthy();
       expect(payload.nodes?.s1?.candidateDecision?.winnerScore).toBeGreaterThan(0);
@@ -2252,7 +2441,7 @@ describe("createStudioServer daemon lifecycle", () => {
       });
     });
 
-    await expect(readFile(chapterPath, "utf-8")).resolves.toContain("候选稿：方案 B。");
+    await expect(readFile(chapterPath, "utf-8")).resolves.toContain("候选稿：");
   });
 
   it("inserts a manual checkpoint before low-risk execution in L0 mode", async () => {

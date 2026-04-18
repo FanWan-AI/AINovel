@@ -474,9 +474,10 @@ function buildBriefTrace(
 // --- V2 confirm run-state store ---
 const bookCreateRunStore = new BookCreateRunStore();
 
-type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next" | "generate_structure";
+type AssistantPlanIntent = "audit" | "audit_and_optimize" | "write_next" | "generate_structure" | "goal_to_book";
 type AssistantPlanRiskLevel = "low" | "medium" | "high";
 type AssistantPlanScope = DaemonPlanBookScope;
+type AssistantPlanIntentType = "goal-to-book";
 
 interface AssistantPlanStep {
   readonly stepId: string;
@@ -702,6 +703,7 @@ function normalizeAssistantTaskGraph(input: unknown, fallbackTaskId?: string): T
     nodes,
     edges,
     ...(typeof payload.intent === "string" ? { intent: payload.intent } : {}),
+    ...(typeof payload.intentType === "string" ? { intentType: payload.intentType } : {}),
     ...(typeof payload.riskLevel === "string" ? { riskLevel: payload.riskLevel } : {}),
   };
 }
@@ -923,6 +925,7 @@ const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
 const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
 const ASSISTANT_RELEASE_CANDIDATE_PATTERN = /发布候选|release\s*candidate|可发布|候选确认/iu;
+const ASSISTANT_GOAL_TO_BOOK_PATTERN = /(一句话目标|goal[-\s]?to[-\s]?book|目标.*(成书|小说|长篇)|扩展成.*章|写成.*书)/iu;
 const ASSISTANT_CRUD_READ_PATTERN = /查询|查看|检索|read|search/iu;
 const ASSISTANT_CRUD_DELETE_PATTERN = /删除|delete/iu;
 const ASSISTANT_CRUD_RESTORE_PATTERN = /恢复|restore/iu;
@@ -1038,6 +1041,9 @@ function parseAssistantCrudDimensionFromInput(input: string): AssistantCrudReadD
 function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   const normalized = input.trim();
   if (!normalized) return null;
+  if (ASSISTANT_GOAL_TO_BOOK_PATTERN.test(normalized)) {
+    return "goal_to_book";
+  }
   // "写下一章" takes priority — "自审" in a write context means write+audit, not audit-only
   if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
     return "write_next";
@@ -1331,6 +1337,111 @@ function buildAssistantPlanDraft(
   };
 }
 
+function parseAssistantIntentType(input: unknown): AssistantPlanIntentType | null {
+  return input === "goal-to-book" ? input : null;
+}
+
+function parseGoalToBookChapterTarget(input: string): number {
+  const zhMatch = input.match(/第?\s*(\d+)\s*章/u)?.[1];
+  if (zhMatch) {
+    return Math.max(1, Math.min(12, Number.parseInt(zhMatch, 10)));
+  }
+  const countMatch = input.match(/(\d+)\s*(章|chapters?)/iu)?.[1];
+  if (countMatch) {
+    return Math.max(1, Math.min(12, Number.parseInt(countMatch, 10)));
+  }
+  return 3;
+}
+
+function buildGoalToBookTaskGraph(
+  taskId: string,
+  bookId: string,
+  nextChapter: number,
+  chapterTarget: number,
+): { plan: AssistantPlanStep[]; graph: TaskGraph; risk: { level: AssistantPlanRiskLevel; reasons: string[] } } {
+  const plan: AssistantPlanStep[] = [
+    { stepId: "s1", action: "plan-next", bookId },
+  ];
+  const nodes: TaskNode[] = [
+    {
+      nodeId: "s1",
+      type: "task",
+      action: "plan-next",
+      bookId,
+    },
+    {
+      nodeId: "cp1",
+      type: "checkpoint",
+      action: "checkpoint",
+      mode: "blueprint-confirm",
+      checkpoint: {
+        nodeId: "cp1",
+        requiredApproval: true,
+      },
+    },
+  ];
+  const edges: TaskEdge[] = [{ from: "s1", to: "cp1" }];
+  let previousNodeId = "cp1";
+  let stepIndex = 2;
+
+  for (let offset = 0; offset < chapterTarget; offset += 1) {
+    const chapter = nextChapter + offset;
+    const cycleSteps: AssistantPlanStep[] = [
+      { stepId: `s${stepIndex}`, action: "write-next", bookId, chapter, mode: "ai-plan" },
+      { stepId: `s${stepIndex + 1}`, action: "audit", bookId, chapter },
+      { stepId: `s${stepIndex + 2}`, action: "revise", bookId, chapter, mode: "rewrite" },
+      { stepId: `s${stepIndex + 3}`, action: "re-audit", bookId, chapter },
+    ];
+    plan.push(...cycleSteps);
+    cycleSteps.forEach((step) => {
+      nodes.push({
+        nodeId: step.stepId,
+        type: "task",
+        action: step.action,
+        bookId,
+        ...(step.chapter !== undefined ? { chapter: step.chapter } : {}),
+        ...(step.mode ? { mode: step.mode } : {}),
+      });
+      edges.push({ from: previousNodeId, to: step.stepId });
+      previousNodeId = step.stepId;
+    });
+    stepIndex += cycleSteps.length;
+  }
+
+  const releaseCheckpointId = "cp2";
+  nodes.push({
+    nodeId: releaseCheckpointId,
+    type: "checkpoint",
+    action: "checkpoint",
+    mode: "publish-candidate-confirm",
+    checkpoint: {
+      nodeId: releaseCheckpointId,
+      requiredApproval: true,
+    },
+  });
+  edges.push({ from: previousNodeId, to: releaseCheckpointId });
+
+  return {
+    plan,
+    graph: {
+      taskId,
+      intent: "goal_to_book",
+      intentType: "goal-to-book",
+      riskLevel: "high",
+      nodes,
+      edges,
+    },
+    risk: {
+      level: "high",
+      reasons: [
+        "将从一句话目标生成蓝图，并进入写→审→修→复审循环。",
+        "包含蓝图确认 checkpoint，需人工审批后继续。",
+        "包含发布候选 checkpoint，需人工确认后才能完成候选确认。",
+      ],
+    },
+  };
+}
+
 function buildAssistantTaskGraphFromPlan(
   taskId: string,
   plan: ReadonlyArray<AssistantPlanStep>,
@@ -1471,6 +1582,13 @@ function adaptAssistantTaskGraphForAutopilot(
   graph: TaskGraph,
   decision: AssistantAutopilotDecision,
 ): TaskGraph {
+  if (graph.intentType === "goal-to-book") {
+    return {
+      ...graph,
+      nodes: [...graph.nodes],
+      edges: [...graph.edges],
+    };
+  }
   const strippedGraph = stripAssistantCheckpoints(graph);
   if (decision.checkpointStrategy === "none") {
     return strippedGraph;
@@ -2264,6 +2382,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     throw new Error(`Timed out waiting for chapter run ${runId}`);
   }
 
+  async function waitForAssistantChapterAvailability(
+    bookId: string,
+    chapterNumber: number,
+    timeoutMs = 30_000,
+  ): Promise<void> {
+    const started = Date.now();
+    const prefix = `${String(chapterNumber).padStart(4, "0")}_`;
+    let delayMs = 100;
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const files = await readdir(join(state.bookDir(bookId), "chapters"));
+        if (files.some((file) => file.startsWith(prefix) && file.endsWith(".md"))) {
+          return;
+        }
+      } catch {
+        // keep polling until timeout
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
+    }
+    throw new Error(`Timed out waiting for chapter ${chapterNumber} in ${bookId}`);
+  }
+
   function generateAssistantRunId(): string {
     return `asst_run_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   }
@@ -2395,6 +2536,52 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   const assistantConductor = new AssistantConductor({
     prepareNode: async (node, context) => {
+      if (node.action === "plan-next") {
+        return {
+          runId: generateAssistantRunId(),
+          execute: async () => {
+            const response = await app.request(
+              `http://localhost/api/books/${node.bookId}/next-plan`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+              },
+            );
+            if (!response.ok) {
+              throw new Error(await parseApiErrorMessage(response));
+            }
+          },
+        };
+      }
+
+      if (node.action === "write-next") {
+        return {
+          runId: generateAssistantRunId(),
+          execute: async () => {
+            if (!node.bookId) {
+              throw new Error("write-next node requires bookId");
+            }
+            const response = await app.request(
+              `http://localhost/api/books/${node.bookId}/write-next`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  ...(node.mode ? { mode: node.mode } : {}),
+                }),
+              },
+            );
+            if (!response.ok) {
+              throw new Error(await parseApiErrorMessage(response));
+            }
+            if (node.chapter !== undefined) {
+              await waitForAssistantChapterAvailability(node.bookId, node.chapter);
+            }
+          },
+        };
+      }
+
       if (node.action === "audit" || node.action === "re-audit") {
         const runId = generateAssistantRunId();
         return {
@@ -5382,7 +5569,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ code: "ASSISTANT_PLAN_VALIDATION_FAILED", errors: parsedScope.errors }, 422);
     }
 
-    const intent = resolveAssistantPlanIntent(input);
+    const intentType = parseAssistantIntentType(body.intentType);
+    const intent = intentType === "goal-to-book"
+      ? "goal_to_book"
+      : resolveAssistantPlanIntent(input);
     if (!intent) {
       return c.json({
         error: {
@@ -5393,6 +5583,31 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    if (intent === "goal_to_book") {
+      if (parsedScope.scope.type !== "book-list" || parsedScope.scope.bookIds.length !== 1) {
+        return c.json({
+          code: "ASSISTANT_PLAN_VALIDATION_FAILED",
+          errors: [{
+            field: "scope",
+            message: "goal-to-book requires scope.type='book-list' with exactly one target bookId",
+          }],
+        }, 422);
+      }
+      const bookId = parsedScope.scope.bookIds[0]!;
+      const nextChapter = await state.getNextChapterNumber(bookId);
+      const chapterTarget = parseGoalToBookChapterTarget(input);
+      const drafted = buildGoalToBookTaskGraph(taskId, bookId, nextChapter, chapterTarget);
+      assistantTaskGraphs.set(taskId, drafted.graph);
+      return c.json({
+        taskId,
+        intent,
+        intentType: "goal-to-book",
+        plan: drafted.plan,
+        graph: drafted.graph,
+        requiresConfirmation: true,
+        risk: drafted.risk,
+      });
+    }
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
     const requiresReleaseCandidateCheckpoint = ASSISTANT_RELEASE_CANDIDATE_PATTERN.test(input);
     const graph = requiresReleaseCandidateCheckpoint
