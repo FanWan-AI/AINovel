@@ -281,13 +281,13 @@ function validateAssistantStrategyInput(raw: unknown): { ok: true; value: Assist
   const knownSkillIds = new Set(listAssistantSkills().map((skill) => skill.skillId));
 
   if (body.autopilotLevel !== undefined) {
-    if (!ASSISTANT_AUTOPILOT_LEVEL_VALUES.includes(body.autopilotLevel as AssistantAutopilotLevel)) {
+    if (!ASSISTANT_AUTOPILOT_LEVEL_VALUES.includes(body.autopilotLevel as AssistantStrategySettings["autopilotLevel"])) {
       errors.push({
         field: "autopilotLevel",
         message: `autopilotLevel must be one of ${ASSISTANT_AUTOPILOT_LEVEL_VALUES.join(", ")}.`,
       });
     } else {
-      result.autopilotLevel = body.autopilotLevel as AssistantAutopilotLevel;
+      result.autopilotLevel = body.autopilotLevel as AssistantStrategySettings["autopilotLevel"];
     }
   }
 

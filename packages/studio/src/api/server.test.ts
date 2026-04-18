@@ -1699,7 +1699,7 @@ describe("createStudioServer daemon lifecycle", () => {
       };
       expect(payload.status).toBe("succeeded");
       expect(payload.lastUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "cp1", "s2", "s3"]);
+      expect(payload.graph?.nodes.map((node) => node.nodeId)).toEqual(["s1", "s2", "s3"]);
       expect(payload.nodes?.s2?.status).toBe("succeeded");
     });
 
