@@ -1,27 +1,10 @@
-import { fetchJson, useApi, postApi } from "../hooks/use-api";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SSEMessage } from "../hooks/use-sse";
+import { fetchJson, useApi } from "../hooks/use-api";
+import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { useColors } from "../hooks/use-colors";
-import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
-import { ConfirmDialog } from "../components/ConfirmDialog";
-import {
-  Plus,
-  BookOpen,
-  BarChart2,
-  Zap,
-  Clock,
-  CheckCircle2,
-  AlertCircle,
-  MoreVertical,
-  ChevronRight,
-  Flame,
-  Trash2,
-  Settings,
-  Download,
-  FileInput,
-} from "lucide-react";
+import { ArrowRight, BookOpen, Clock3, Eye, FileText, Plus, Trash2 } from "lucide-react";
 
 interface BookSummary {
   readonly id: string;
@@ -37,92 +20,20 @@ interface Nav {
   toBook: (id: string) => void;
   toAnalytics: (id: string) => void;
   toBookCreate: () => void;
+  toTruth?: (id: string) => void;
 }
 
-function BookMenu({ bookId, bookTitle, nav, t, onDelete }: {
-  readonly bookId: string;
-  readonly bookTitle: string;
-  readonly nav: Nav;
-  readonly t: TFunction;
-  readonly onDelete: () => void;
+export function Dashboard({
+  nav,
+  sse,
+}: {
+  nav: Nav;
+  sse: { messages: ReadonlyArray<SSEMessage> };
+  theme: Theme;
+  t: TFunction;
 }) {
-  const [open, setOpen] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [open]);
-
-  const handleDelete = async () => {
-    setConfirmDelete(false);
-    setOpen(false);
-    await fetchJson(`/books/${bookId}`, { method: "DELETE" });
-    onDelete();
-  };
-
-  return (
-    <div ref={menuRef} className="relative">
-      <button
-        onClick={() => setOpen((prev) => !prev)}
-        className="p-3 rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 hover:scale-105 active:scale-95 transition-all cursor-pointer"
-      >
-        <MoreVertical size={18} />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-card border border-border rounded-xl shadow-lg shadow-primary/5 py-1 z-50 fade-in">
-          <button
-            onClick={() => { setOpen(false); nav.toBook(bookId); }}
-            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-foreground hover:bg-secondary/50 transition-colors cursor-pointer"
-          >
-            <Settings size={14} className="text-muted-foreground" />
-            {t("book.settings")}
-          </button>
-          <a
-            href={`/api/books/${bookId}/export?format=txt`}
-            download
-            onClick={() => setOpen(false)}
-            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-foreground hover:bg-secondary/50 transition-colors cursor-pointer"
-          >
-            <Download size={14} className="text-muted-foreground" />
-            {t("book.export")}
-          </a>
-          <div className="border-t border-border/50 my-1" />
-          <button
-            onClick={() => { setOpen(false); setConfirmDelete(true); }}
-            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
-          >
-            <Trash2 size={14} />
-            {t("book.deleteBook")}
-          </button>
-        </div>
-      )}
-      <ConfirmDialog
-        open={confirmDelete}
-        title={t("book.deleteBook")}
-        message={`${t("book.confirmDelete")}\n\n"${bookTitle}"`}
-        confirmLabel={t("common.delete")}
-        cancelLabel={t("common.cancel")}
-        variant="danger"
-        onConfirm={handleDelete}
-        onCancel={() => setConfirmDelete(false)}
-      />
-    </div>
-  );
-}
-
-export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: ReadonlyArray<SSEMessage> }; theme: Theme; t: TFunction }) {
-  const c = useColors(theme);
   const { data, loading, error, refetch } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const writingBooks = useMemo(() => deriveActiveBookIds(sse.messages), [sse.messages]);
-
-  const logEvents = sse.messages.filter((m) => m.event === "log").slice(-8);
-  const progressEvent = sse.messages.filter((m) => m.event === "llm:progress").slice(-1)[0];
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
@@ -132,214 +43,289 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
     }
   }, [refetch, sse.messages]);
 
-  if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 space-y-4">
-      <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-      <span className="text-sm text-muted-foreground animate-pulse">Gathering manuscripts...</span>
-    </div>
-  );
-
-  if (error) return (
-    <div className="flex flex-col items-center justify-center py-20 bg-destructive/5 border border-destructive/20 rounded-2xl">
-      <AlertCircle className="text-destructive mb-4" size={32} />
-      <h2 className="text-lg font-semibold text-destructive">Failed to load library</h2>
-      <p className="text-sm text-muted-foreground mt-1">{error}</p>
-    </div>
-  );
-
-  if (!data?.books.length) {
+  if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center fade-in">
-        <div className="w-20 h-20 rounded-full bg-primary/5 flex items-center justify-center mb-8">
-          <BookOpen size={40} className="text-primary/20" />
+      <div className="flex min-h-full items-center justify-center">
+        <div className="space-y-4 text-center">
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
+          <div className="text-sm text-muted-foreground">正在整理作品书架…</div>
         </div>
-        <h2 className="font-serif text-3xl italic text-foreground/80 mb-3">{t("dash.noBooks")}</h2>
-        <p className="text-sm text-muted-foreground max-w-xs leading-relaxed mb-10">
-          {t("dash.createFirst")}
-        </p>
-        <button
-          onClick={nav.toBookCreate}
-          className="group flex items-center gap-2 px-8 py-3.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
-        >
-          <Plus size={18} />
-          {t("nav.newBook")}
-        </button>
       </div>
     );
   }
 
+  if (error) {
+    return (
+      <div className="mx-auto mt-12 max-w-3xl rounded-[28px] border border-destructive/30 bg-destructive/5 p-8 text-destructive">
+        <div className="text-xl font-semibold">作品页加载失败</div>
+        <div className="mt-2 text-sm text-destructive/80">{error}</div>
+      </div>
+    );
+  }
+
+  const books = data?.books ?? [];
+
+  if (books.length === 0) {
+    return (
+      <div className="flex min-h-full items-center justify-center px-8">
+        <div className="w-full max-w-3xl rounded-[36px] border border-border/70 bg-card/70 px-10 py-14 text-center shadow-2xl shadow-black/10 backdrop-blur-xl">
+          <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-primary text-primary-foreground">
+            <BookOpen size={28} />
+          </div>
+          <div className="text-xs uppercase tracking-[0.22em] text-muted-foreground">作品</div>
+          <h1 className="mt-4 text-5xl font-semibold tracking-tight text-foreground">你的作品</h1>
+          <p className="mx-auto mt-4 max-w-xl text-base leading-7 text-muted-foreground">
+            先创建第一本书，把世界观、人物和章节续写都纳入同一个工作台。
+          </p>
+          <button
+            onClick={nav.toBookCreate}
+            className="mx-auto mt-8 inline-flex h-12 items-center gap-2 rounded-2xl bg-primary px-5 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
+          >
+            <Plus size={16} />
+            新建作品
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const featuredBook = books[0];
+  const secondaryBooks = books.slice(1);
+
   return (
-    <div className="space-y-12">
-      <div className="flex items-end justify-between border-b border-border/40 pb-8">
-        <div>
-          <h1 className="font-serif text-4xl mb-2">{t("dash.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("dash.subtitle")}</p>
+    <div className="min-h-full bg-transparent text-foreground">
+      <div className="mx-auto flex h-full max-w-[1440px] flex-col px-10 pb-12 pt-24">
+        <section className="mb-10 rounded-[32px] border border-border/70 bg-card/58 p-6 shadow-[0_24px_64px_-36px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="max-w-3xl">
+              <div className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/40 px-3 py-1 text-[11px] text-muted-foreground">
+                <Plus size={12} />
+                创建新作品
+              </div>
+              <h2 className="mt-4 font-sans text-3xl font-semibold tracking-tight text-foreground">
+                开一本新的故事线
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground">
+                从题材、平台定位到风格基调，直接开始新的项目。适合开新坑、切换题材，或给不同平台单独做一套作品方案。
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-3 lg:min-w-[280px]">
+              <button
+                onClick={nav.toBookCreate}
+                className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-5 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
+              >
+                <Plus size={16} />
+                新建作品
+              </button>
+              <div className="rounded-2xl border border-border bg-background/50 px-4 py-3 text-xs leading-6 text-muted-foreground">
+                建议先准备：
+                <span className="ml-1">书名、核心题材、读者定位、风格方向。</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div className="mb-12">
+          <div className="inline-flex items-center gap-2 rounded-full border border-border bg-card/60 px-3 py-1 text-xs text-muted-foreground">
+            <BookOpen size={12} />
+            作品
+          </div>
+          <h1 className="mt-5 text-6xl font-semibold tracking-tight text-foreground">你的作品</h1>
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1.45fr_0.95fr]">
+          <BookShowcaseCard
+            book={featuredBook}
+            featured
+            writing={writingBooks.has(featuredBook.id)}
+            onOpen={() => nav.toBook(featuredBook.id)}
+            onViewTruth={() => nav.toTruth?.(featuredBook.id)}
+            onDelete={async () => {
+              await fetchJson(`/books/${featuredBook.id}`, { method: "DELETE" });
+              refetch();
+            }}
+          />
+          <div className="space-y-5">
+            {secondaryBooks.length > 0 ? secondaryBooks.map((book) => (
+              <BookShowcaseCard
+                key={book.id}
+                book={book}
+                writing={writingBooks.has(book.id)}
+                onOpen={() => nav.toBook(book.id)}
+                onViewTruth={() => nav.toTruth?.(book.id)}
+                onDelete={async () => {
+                  await fetchJson(`/books/${book.id}`, { method: "DELETE" });
+                  refetch();
+                }}
+              />
+            )) : (
+              <button
+                onClick={nav.toBookCreate}
+                className="flex min-h-[220px] w-full flex-col justify-between rounded-[32px] border border-dashed border-border bg-card/50 p-6 text-left transition-colors hover:bg-card/80"
+              >
+                <div className="rounded-full border border-border bg-secondary/40 px-3 py-1 text-xs text-muted-foreground w-fit">
+                  新作品
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold text-foreground">再开一本新书</div>
+                  <div className="mt-3 max-w-sm text-sm leading-6 text-muted-foreground">
+                    把新的题材、风格和平台定位也纳入同一个创作系统。
+                  </div>
+                </div>
+                <div className="flex items-center justify-between text-sm text-muted-foreground">
+                  <span>现在开始</span>
+                  <ArrowRight size={18} />
+                </div>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BookShowcaseCard({
+  book,
+  featured = false,
+  writing,
+  onOpen,
+  onViewTruth,
+  onDelete,
+}: {
+  readonly book: BookSummary;
+  readonly featured?: boolean;
+  readonly writing: boolean;
+  readonly onOpen: () => void;
+  readonly onViewTruth?: () => void;
+  readonly onDelete?: () => Promise<void>;
+}) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const statusLabel = book.status === "active" ? "连载中" : book.status === "paused" ? "暂停中" : book.status;
+  const description = featured
+    ? "一个节奏强、设定直给的系统流作品，核心卖点是轻松升级、持续反馈和高爽点推进。"
+    : "偏克制与氛围感的情感故事，强调人物情绪、关系张力和更细腻的叙事节奏。";
+
+  const handleDelete = async () => {
+    if (!onDelete) return;
+    setDeleting(true);
+    try {
+      await onDelete();
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  return (
+    <div
+      className={`group relative w-full rounded-[32px] border border-border/70 bg-card/68 p-6 text-left shadow-[0_24px_64px_-36px_rgba(0,0,0,0.22)] backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:bg-card/90 ${
+        featured ? "min-h-[250px]" : "min-h-[220px]"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-border bg-secondary/40 px-3 py-1 text-[11px] text-muted-foreground">
+            {book.genre || "未分类"}
+          </span>
+          <span className="rounded-full border border-border bg-secondary/40 px-3 py-1 text-[11px] text-muted-foreground">
+            {statusLabel}
+          </span>
+          {writing && (
+            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-[11px] text-emerald-600 dark:text-emerald-300">
+              写作中
+            </span>
+          )}
         </div>
         <button
-          onClick={nav.toBookCreate}
-          className="group flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
+          onClick={onOpen}
+          className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-secondary/40 text-muted-foreground transition-colors hover:text-foreground hover:bg-secondary/70"
         >
-          <Plus size={16} />
-          {t("nav.newBook")}
+          <ArrowRight size={18} />
         </button>
       </div>
 
-      <div className="grid gap-6">
-        {data.books.map((book, index) => {
-          const isWriting = writingBooks.has(book.id);
-          const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
-          return (
-            <div
-              key={book.id}
-              className={`paper-sheet group relative rounded-2xl overflow-hidden fade-in ${staggerClass}`}
+      <button onClick={onOpen} className="block w-full text-left">
+        <h2 className={`mt-6 font-sans font-semibold tracking-tight text-foreground ${featured ? "text-5xl leading-[1.08]" : "text-3xl leading-[1.15]"}`}>
+          《{book.title}》
+        </h2>
+
+        <p className={`mt-4 max-w-3xl text-muted-foreground ${featured ? "text-base leading-8" : "text-sm leading-7"}`}>
+          {description}
+        </p>
+      </button>
+
+      {/* Footer: time + action buttons */}
+      <div className="mt-8 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Clock3 size={15} />
+          <span>{featured ? "今天更新" : `${Math.max(book.chaptersWritten - 3, 1)} 天前编辑`}</span>
+        </div>
+
+        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border/50 bg-secondary/50 px-3 py-1.5 text-[11px] font-semibold text-muted-foreground transition-all hover:bg-primary/10 hover:text-primary hover:border-primary/30"
+          >
+            <Eye size={12} />
+            查看小说
+          </button>
+          {onViewTruth && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onViewTruth(); }}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-border/50 bg-secondary/50 px-3 py-1.5 text-[11px] font-semibold text-muted-foreground transition-all hover:bg-primary/10 hover:text-primary hover:border-primary/30"
             >
-              <div className="p-8 flex items-start justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="p-2 rounded-lg bg-primary/5 text-primary">
-                      <BookOpen size={20} />
-                    </div>
-                    <button
-                      onClick={() => nav.toBook(book.id)}
-                      className="font-serif text-2xl hover:text-primary transition-all text-left truncate block font-medium hover:underline underline-offset-4 decoration-primary/30"
-                    >
-                      {book.title}
-                    </button>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-[13px] text-muted-foreground font-medium">
-                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-secondary/50">
-                      <span className="uppercase tracking-wider">{book.genre}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Clock size={14} />
-                      <span>{book.chaptersWritten} {t("dash.chapters")}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <div className={`w-2 h-2 rounded-full ${
-                        book.status === "active" ? "bg-emerald-500" :
-                        book.status === "paused" ? "bg-amber-500" :
-                        "bg-muted-foreground"
-                      }`} />
-                      <span>{
-                        book.status === "active" ? t("book.statusActive") :
-                        book.status === "paused" ? t("book.statusPaused") :
-                        book.status === "outlining" ? t("book.statusOutlining") :
-                        book.status === "completed" ? t("book.statusCompleted") :
-                        book.status === "dropped" ? t("book.statusDropped") :
-                        book.status
-                      }</span>
-                    </div>
-                    {book.language === "en" && (
-                      <span className="px-1.5 py-0.5 rounded border border-primary/20 text-primary text-[10px] font-bold">EN</span>
-                    )}
-                    {book.fanficMode && (
-                      <span className="flex items-center gap-1 text-purple-500">
-                        <Zap size={12} />
-                        <span className="italic">{book.fanficMode}</span>
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 shrink-0 ml-6">
-                  <button
-                    onClick={() => postApi(`/books/${book.id}/write-next`)}
-                    disabled={isWriting}
-                    className={`flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-bold transition-all shadow-sm ${
-                      isWriting
-                        ? "bg-primary/20 text-primary cursor-wait animate-pulse"
-                        : "bg-secondary text-foreground hover:bg-primary hover:text-primary-foreground hover:shadow-lg hover:shadow-primary/20 hover:scale-105 active:scale-95"
-                    }`}
-                  >
-                    {isWriting ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-                        {t("dash.writing")}
-                      </>
-                    ) : (
-                      <>
-                        <Zap size={16} />
-                        {t("dash.writeNext")}
-                      </>
-                    )}
-                  </button>
-                  <button
-                    onClick={() => nav.toAnalytics(book.id)}
-                    className="p-3 rounded-xl bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 hover:border-primary/30 hover:shadow-md hover:scale-105 active:scale-95 transition-all border border-border/50 shadow-sm"
-                    title={t("dash.stats")}
-                  >
-                    <BarChart2 size={18} />
-                  </button>
-                  <BookMenu
-                    bookId={book.id}
-                    bookTitle={book.title}
-                    nav={nav}
-                    t={t}
-                    onDelete={() => refetch()}
-                  />
-                </div>
-              </div>
-
-              {/* Enhanced progress indicator */}
-              {isWriting && (
-                <div className="absolute bottom-0 left-0 right-0 h-1 bg-secondary overflow-hidden">
-                   <div className="h-full bg-primary w-1/3 animate-[progress_2s_ease-in-out_infinite]" />
-                </div>
-              )}
-            </div>
-          );
-        })}
+              <FileText size={12} />
+              真相文件
+            </button>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true); }}
+            disabled={deleting}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border/50 bg-secondary/50 px-3 py-1.5 text-[11px] font-semibold text-muted-foreground transition-all hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30 disabled:opacity-50"
+          >
+            <Trash2 size={12} />
+            删除
+          </button>
+        </div>
       </div>
 
-      {/* Modern writing progress panel */}
-      {writingBooks.size > 0 && logEvents.length > 0 && (
-        <div className="glass-panel rounded-2xl p-8 border-primary/20 bg-primary/[0.02] shadow-2xl shadow-primary/5 fade-in">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-primary text-primary-foreground shadow-lg shadow-primary/20">
-                <Flame size={18} className="animate-pulse" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold uppercase tracking-widest text-primary"> Manuscript Foundry</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">Real-time LLM generation tracking</p>
-              </div>
+      {/* Delete confirmation overlay */}
+      {confirmingDelete && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center rounded-[32px] bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false); }}
+        >
+          <div
+            className="mx-6 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-foreground">确认删除</h3>
+            <p className="mt-2 text-sm text-muted-foreground leading-6">
+              确定要删除《{book.title}》吗？此操作不可撤销，所有章节、设定和版本记录都将被永久删除。
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleting}
+                className="rounded-xl border border-border/50 bg-secondary px-4 py-2 text-xs font-semibold text-muted-foreground hover:bg-secondary/80 transition-colors disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="rounded-xl border border-destructive/30 bg-destructive px-4 py-2 text-xs font-semibold text-white hover:bg-destructive/90 transition-colors disabled:opacity-50"
+              >
+                {deleting ? "删除中…" : "确认删除"}
+              </button>
             </div>
-            {progressEvent && (
-              <div className="flex items-center gap-4 text-xs font-bold text-primary px-4 py-2 rounded-full bg-primary/10 border border-primary/20">
-                <div className="flex items-center gap-2">
-                  <Clock size={12} />
-                  <span>{Math.round(((progressEvent.data as { elapsedMs?: number })?.elapsedMs ?? 0) / 1000)}s</span>
-                </div>
-                <div className="w-px h-3 bg-primary/20" />
-                <div className="flex items-center gap-2">
-                  <Zap size={12} />
-                  <span>{((progressEvent.data as { totalChars?: number })?.totalChars ?? 0).toLocaleString()} Chars</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-2 font-mono text-xs bg-black/5 dark:bg-black/20 p-6 rounded-xl border border-border/50 max-h-[200px] overflow-y-auto scrollbar-thin">
-            {logEvents.map((msg, i) => {
-              const d = msg.data as { tag?: string; message?: string };
-              return (
-                <div key={i} className="flex gap-3 leading-relaxed animate-in fade-in slide-in-from-left-2 duration-300">
-                  <span className="text-primary/60 font-bold shrink-0">[{d.tag}]</span>
-                  <span className="text-muted-foreground">{d.message}</span>
-                </div>
-              );
-            })}
           </div>
         </div>
       )}
-
-      <style>{`
-        @keyframes progress {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(300%); }
-        }
-      `}</style>
     </div>
   );
 }

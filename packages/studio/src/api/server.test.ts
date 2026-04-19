@@ -672,6 +672,28 @@ describe("createStudioServer daemon lifecycle", () => {
         message: "Unable to recognize assistant intent from input.",
       },
     });
+
+    const fallbackChapterResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "asst_s_004",
+        input: "请重新审计当前章节并给出质量结论。",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(fallbackChapterResponse.status).toBe(200);
+    await expect(fallbackChapterResponse.json()).resolves.toMatchObject({
+      intent: "audit",
+      plan: [
+        { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 1 },
+      ],
+      graph: {
+        nodes: expect.arrayContaining([
+          expect.objectContaining({ nodeId: "s1", type: "task", action: "audit", bookId: "demo-book", chapter: 1 }),
+        ]),
+      },
+    });
   });
 
   it("appends a release-candidate checkpoint when the assistant input requests candidate confirmation", async () => {

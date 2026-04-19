@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StringKey } from "./use-i18n";
 
-export type ChapterRunActionType = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "resync";
+export type ChapterRunActionType = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "resync" | "chapter-redesign";
 export type ChapterRunStatus = "running" | "success" | "failed" | "unchanged";
 export type ChapterLifecycleAction = "revise" | "rewrite" | "anti-detect" | "resync";
 export type ChapterLifecycleStage = "success" | "fail" | "unchanged";

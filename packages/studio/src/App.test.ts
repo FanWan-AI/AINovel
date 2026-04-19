@@ -64,7 +64,7 @@ describe("settings tab query parsing", () => {
 
   it("resolves initial route to settings when tab query exists", () => {
     expect(resolveInitialRouteFromSearch("?tab=appearance")).toEqual({ page: "settings", tab: "appearance" });
-    expect(resolveInitialRouteFromSearch("")).toEqual({ page: "dashboard" });
+    expect(resolveInitialRouteFromSearch("")).toEqual({ page: "assistant" });
   });
 });
 

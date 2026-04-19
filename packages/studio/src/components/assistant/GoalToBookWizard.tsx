@@ -1,5 +1,7 @@
 import type { AssistantGoalToBookProgress } from "../../pages/AssistantView";
 
+import { useEffect, useRef } from "react";
+
 export function GoalToBookWizard({
   value,
   onChange,
@@ -15,19 +17,34 @@ export function GoalToBookWizard({
   readonly activeBookTitle?: string | null;
   readonly progress?: AssistantGoalToBookProgress | null;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const resizeTextarea = () => {
+    const node = textareaRef.current;
+    if (!node) return;
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, 168)}px`;
+  };
+
+  useEffect(() => {
+    resizeTextarea();
+  }, [value]);
+
   return (
     <section className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-3" data-testid="assistant-goal-to-book-wizard">
       <div className="space-y-1">
-        <div className="text-sm font-medium">Goal-to-Book 向导</div>
+        <div className="text-sm font-medium">目标落书向导（Goal-to-Book）</div>
         <div className="text-xs text-muted-foreground">
-          输入一句话目标，生成蓝图 → 写审修循环 → 发布候选任务流。
+          用一句话目标，自动生成可执行流程：蓝图规划 → 章节写作/审核/修订 → 发布候选确认。
           {activeBookTitle ? ` 当前书籍：《${activeBookTitle}》` : " 请先锁定一本书。"}
         </div>
       </div>
       <div className="flex gap-2">
-        <input
+        <textarea
+          ref={textareaRef}
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          onInput={resizeTextarea}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -35,7 +52,7 @@ export function GoalToBookWizard({
             }
           }}
           placeholder="例：一个普通人误入修真学院，并在 2 章内完成蓝图与首轮创作。"
-          className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm"
+          className="min-h-10 max-h-[168px] flex-1 resize-none overflow-y-auto rounded-md border border-border bg-background px-3 py-2 text-sm leading-6"
           data-testid="assistant-goal-to-book-input"
           disabled={disabled}
         />
@@ -46,7 +63,7 @@ export function GoalToBookWizard({
           className="rounded-md bg-primary px-3 py-2 text-xs text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60"
           data-testid="assistant-goal-to-book-submit"
         >
-          生成任务流
+          生成执行流程
         </button>
       </div>
       {progress && (

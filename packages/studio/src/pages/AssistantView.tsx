@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Theme } from "../hooks/use-theme";
 import type { StringKey, TFunction } from "../hooks/use-i18n";
-import { fetchJson, postApi, putApi, useApi, buildApiUrl, invalidateApiPaths } from "../hooks/use-api";
+import { ApiError, fetchJson, postApi, putApi, useApi, buildApiUrl, invalidateApiPaths } from "../hooks/use-api";
 import {
   parseAssistantOperatorCommand,
   type AssistantOperatorParseResult,
@@ -20,9 +20,19 @@ import {
   type AssistantWorldConsistencyMarketReport,
 } from "../components/assistant/WorldConsistencyMarketCard";
 import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
-import { GoalToBookWizard } from "../components/assistant/GoalToBookWizard";
+import { CheckpointApprovalCard } from "../components/assistant/CheckpointApprovalCard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
+import {
+  ASSISTANT_CREATE_NEW_CONVERSATION_EVENT,
+  ASSISTANT_SELECT_CONVERSATION_EVENT,
+  createAndActivateAssistantConversation,
+  ensureActiveAssistantConversationId,
+  getActiveAssistantConversationId,
+  readAssistantConversationSnapshot,
+  setActiveAssistantConversationId,
+  upsertAssistantConversationSnapshot,
+} from "../lib/assistant-conversations";
 
 interface Nav {
   toDashboard: () => void;
@@ -114,11 +124,18 @@ export interface AssistantTaskExecution {
   readonly sessionId: string;
   readonly status: "running" | "waiting_approval" | "succeeded" | "failed";
   readonly stepRunIds?: Record<string, string>;
+  readonly pendingCheckpoint?: AssistantPendingCheckpoint | null;
   readonly candidateSelection?: AssistantCandidateSelection | null;
   readonly goalToBookProgress?: AssistantGoalToBookProgress | null;
   readonly timeline: ReadonlyArray<AssistantTaskTimelineEntry>;
   readonly lastSyncedAt: number;
   readonly nextSequence: number;
+}
+
+export interface AssistantPendingCheckpoint {
+  readonly nodeId: string;
+  readonly mode?: string;
+  readonly label?: string;
 }
 
 export interface AssistantGoalToBookStage {
@@ -317,6 +334,7 @@ const ASSISTANT_CHAT_HISTORY_MAX_MESSAGES = 200;
 const ASSISTANT_CHAT_PENDING_KEY = "inkos.assistant.chat-pending";
 const ASSISTANT_CHAT_PENDING_TTL_MS = 300_000;
 const ASSISTANT_CHAT_PENDING_POLL_MS = 500;
+const ASSISTANT_CHAT_RUNTIME_OUTCOME_WATCHDOG_MS = 6_000;
 const ASSISTANT_SESSION_MEMORY_STORAGE_KEY = "inkos.assistant.session-memory";
 let assistantSessionFallbackCounter = 0;
 const GENERATION_INTENT_PATTERN = /生成|创建|创作|大纲|计划|规划|建议|优化|改进|总结|分析|generate|create|plan|outline|suggest|summarize|analyze/iu;
@@ -656,6 +674,13 @@ export function createAssistantInitialState(
 
 function restoreChatHistory(): ReadonlyArray<AssistantMessage> {
   if (typeof window === "undefined") return [];
+  const activeConversationId = getActiveAssistantConversationId();
+  if (activeConversationId) {
+    const snapshot = readAssistantConversationSnapshot(activeConversationId);
+    if (snapshot) {
+      return snapshot.messages;
+    }
+  }
   try {
     const raw = window.sessionStorage.getItem(ASSISTANT_CHAT_HISTORY_STORAGE_KEY);
     if (!raw) return [];
@@ -680,7 +705,11 @@ function saveChatHistory(messages: ReadonlyArray<AssistantMessage>): void {
     const trimmed = messages.length > ASSISTANT_CHAT_HISTORY_MAX_MESSAGES
       ? messages.slice(-ASSISTANT_CHAT_HISTORY_MAX_MESSAGES)
       : messages;
-    window.sessionStorage.setItem(ASSISTANT_CHAT_HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+    const activeConversationId = getActiveAssistantConversationId();
+    const storageKey = activeConversationId
+      ? `${ASSISTANT_CHAT_HISTORY_STORAGE_KEY}:${activeConversationId}`
+      : ASSISTANT_CHAT_HISTORY_STORAGE_KEY;
+    window.sessionStorage.setItem(storageKey, JSON.stringify(trimmed));
   } catch {
     // ignore storage write failures
   }
@@ -719,14 +748,22 @@ function matchesAgentInstruction(instruction: string, prompt: string): boolean {
 function saveChatPendingState(pending: AssistantChatPendingState): void {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.setItem(ASSISTANT_CHAT_PENDING_KEY, JSON.stringify(pending));
+    const activeConversationId = getActiveAssistantConversationId();
+    const storageKey = activeConversationId
+      ? `${ASSISTANT_CHAT_PENDING_KEY}:${activeConversationId}`
+      : ASSISTANT_CHAT_PENDING_KEY;
+    window.sessionStorage.setItem(storageKey, JSON.stringify(pending));
   } catch { /* ignore */ }
 }
 
 function restoreChatPendingState(): AssistantChatPendingState | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(ASSISTANT_CHAT_PENDING_KEY);
+    const activeConversationId = getActiveAssistantConversationId();
+    const storageKey = activeConversationId
+      ? `${ASSISTANT_CHAT_PENDING_KEY}:${activeConversationId}`
+      : ASSISTANT_CHAT_PENDING_KEY;
+    const raw = window.sessionStorage.getItem(storageKey);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || typeof parsed.prompt !== "string") return null;
@@ -736,7 +773,13 @@ function restoreChatPendingState(): AssistantChatPendingState | null {
 
 function clearChatPendingState(): void {
   if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(ASSISTANT_CHAT_PENDING_KEY); } catch { /* ignore */ }
+  try {
+    const activeConversationId = getActiveAssistantConversationId();
+    const storageKey = activeConversationId
+      ? `${ASSISTANT_CHAT_PENDING_KEY}:${activeConversationId}`
+      : ASSISTANT_CHAT_PENDING_KEY;
+    window.sessionStorage.removeItem(storageKey);
+  } catch { /* ignore */ }
 }
 
 function createAssistantSessionId(): string {
@@ -749,8 +792,27 @@ function createAssistantSessionId(): string {
 
 function restoreAssistantSessionMemory(): AssistantSessionMemory | null {
   if (typeof window === "undefined") return null;
+  const activeConversationId = getActiveAssistantConversationId();
+  if (activeConversationId) {
+    const snapshot = readAssistantConversationSnapshot(activeConversationId);
+    if (snapshot) {
+      return {
+        sessionId: snapshot.sessionId,
+        goal: snapshot.messages.find((message) => message.role === "user")?.content.slice(0, 200) ?? null,
+        currentBookId: snapshot.currentBookId,
+        currentBookTitle: snapshot.currentBookTitle,
+        messageCount: snapshot.messages.length,
+        recentMessages: snapshot.messages.slice(-8).map((message) => ({
+          role: message.role,
+          content: message.content.slice(0, 280),
+        })),
+        updatedAt: new Date(snapshot.updatedAt).toISOString(),
+      };
+    }
+  }
   try {
-    const raw = window.sessionStorage.getItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY);
+    const raw = window.sessionStorage.getItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY)
+      ?? window.localStorage.getItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<AssistantSessionMemory>;
     return {
@@ -782,7 +844,19 @@ function restoreAssistantSessionMemory(): AssistantSessionMemory | null {
 function saveAssistantSessionMemory(memory: AssistantSessionMemory): void {
   if (typeof window === "undefined") return;
   try {
+    const activeConversationId = getActiveAssistantConversationId();
+    if (activeConversationId) {
+      const existing = readAssistantConversationSnapshot(activeConversationId);
+      upsertAssistantConversationSnapshot({
+        id: activeConversationId,
+        sessionId: memory.sessionId,
+        messages: existing?.messages ?? [],
+        currentBookId: memory.currentBookId,
+        currentBookTitle: memory.currentBookTitle,
+      });
+    }
     window.sessionStorage.setItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY, JSON.stringify(memory));
+    window.localStorage.setItem(ASSISTANT_SESSION_MEMORY_STORAGE_KEY, JSON.stringify(memory));
   } catch {
     // ignore storage write failures
   }
@@ -1017,6 +1091,7 @@ export function recoverAssistantStateFromSnapshot(
       taskId: snapshot.taskId,
       sessionId: snapshot.sessionId || payload.sessionId,
       status: snapshot.status,
+      pendingCheckpoint: null,
       candidateSelection: state.taskExecution?.taskId === snapshot.taskId ? (state.taskExecution.candidateSelection ?? null) : null,
       goalToBookProgress: resolveAssistantGoalToBookProgress(snapshot),
       timeline: state.taskExecution?.taskId === snapshot.taskId ? state.taskExecution.timeline : [],
@@ -1058,6 +1133,30 @@ export function resolveAssistantCandidateSelection(
   return {
     nodeId: withDecision.nodeId,
     ...withDecision.candidateDecision,
+  };
+}
+
+export function resolveAssistantPendingCheckpoint(
+  snapshot: AssistantTaskSnapshot,
+): AssistantPendingCheckpoint | null {
+  if (snapshot.awaitingApproval?.type !== "checkpoint") {
+    return null;
+  }
+  const nodeId = snapshot.awaitingApproval.nodeId;
+  if (!nodeId) {
+    return null;
+  }
+  const graphNode = snapshot.graph?.nodes.find((node) => node.nodeId === nodeId);
+  const mode = graphNode?.mode;
+  const label = mode === "publish-candidate-confirm"
+    ? "发布候选确认"
+    : mode === "blueprint-confirm"
+      ? "蓝图确认"
+      : "流程确认";
+  return {
+    nodeId,
+    ...(typeof mode === "string" ? { mode } : {}),
+    label,
   };
 }
 
@@ -1107,6 +1206,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     taskId,
     sessionId: typeof payload?.sessionId === "string" ? payload.sessionId : "",
     status: "running" as const,
+    pendingCheckpoint: null,
     candidateSelection: null,
     goalToBookProgress: null,
     timeline: [],
@@ -1137,6 +1237,17 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     : payload?.nodeStatus === "waiting_approval"
       ? "waiting_approval"
       : "running";
+  const pendingCheckpoint = payload?.action === "checkpoint"
+    && payload?.nodeStatus === "waiting_approval"
+    && typeof payload?.stepId === "string"
+    && payload.stepId.trim().length > 0
+    ? {
+        nodeId: payload.stepId,
+        label: "流程确认",
+      }
+    : taskStatus === "waiting_approval"
+      ? currentExecution.pendingCheckpoint ?? null
+      : null;
   const nextTaskPlan = terminal
     ? (state.taskPlan
       ? transitionAssistantTaskPlan(state.taskPlan, taskStatus === "succeeded" ? "succeeded" : "failed", timestamp)
@@ -1149,6 +1260,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     taskExecution: {
       ...currentExecution,
       status: taskStatus,
+      pendingCheckpoint,
       candidateSelection: currentExecution.candidateSelection ?? null,
       goalToBookProgress: currentExecution.goalToBookProgress ?? null,
       timeline: [...currentExecution.timeline.slice(-(ASSISTANT_TIMELINE_MAX_ENTRIES - 1)), nextEntry],
@@ -1218,6 +1330,7 @@ export function reconcileAssistantTaskFromSnapshot(
   }
   const done = snapshot.status !== "running";
   const candidateSelection = resolveAssistantCandidateSelection(snapshot);
+  const pendingCheckpoint = resolveAssistantPendingCheckpoint(snapshot);
   const goalToBookProgress = resolveAssistantGoalToBookProgress(snapshot);
   const executionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
     ? "waiting_approval"
@@ -1231,6 +1344,7 @@ export function reconcileAssistantTaskFromSnapshot(
       sessionId: snapshot.sessionId,
       status: executionStatus,
       stepRunIds: state.taskExecution.stepRunIds,
+      pendingCheckpoint,
       candidateSelection,
       goalToBookProgress,
       timeline,
@@ -1240,8 +1354,8 @@ export function reconcileAssistantTaskFromSnapshot(
   };
 }
 
-export function AssistantTimeline({ entries }: { readonly entries: ReadonlyArray<AssistantTaskTimelineEntry> }) {
-  if (entries.length === 0) {
+export function AssistantTimeline({ entries, streamingStatus }: { readonly entries: ReadonlyArray<AssistantTaskTimelineEntry>; readonly streamingStatus?: string }) {
+  if (entries.length === 0 && !streamingStatus) {
     return null;
   }
   return (
@@ -1258,6 +1372,12 @@ export function AssistantTimeline({ entries }: { readonly entries: ReadonlyArray
           </li>
         ))}
       </ul>
+      {streamingStatus && (
+        <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" />
+          {streamingStatus}
+        </div>
+      )}
     </section>
   );
 }
@@ -1978,11 +2098,11 @@ function buildAssistantAgentInstruction(
 
 function EmptyConversation() {
   return (
-    <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground/80 px-6" data-testid="assistant-empty-state">
-      <div className="w-14 h-14 rounded-2xl border border-dashed border-border bg-secondary/30 flex items-center justify-center mb-4">
-        <BotMessageSquare size={24} className="text-muted-foreground" />
+    <div className="flex flex-col items-center justify-center text-center px-6" data-testid="assistant-empty-state">
+      <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl shadow-black/20">
+        <BotMessageSquare size={26} />
       </div>
-      <p className="text-sm">开始一段新对话，或使用下方快捷动作。</p>
+      <p className="text-sm text-white/55">开始一段新对话，或直接把你想写的故事告诉我。</p>
     </div>
   );
 }
@@ -1996,32 +2116,29 @@ function LoadingConversation() {
   );
 }
 
+function useElapsedTime(startTimestamp: number | null): string {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!startTimestamp) {
+      setElapsed(0);
+      return;
+    }
+    const tick = () => setElapsed(Math.floor((Date.now() - startTimestamp) / 1000));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startTimestamp]);
+  if (elapsed < 60) return `${elapsed}s`;
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  return `${m}m${s.toString().padStart(2, "0")}s`;
+}
+
 function MessageList({
   messages,
-  loading,
-  streamingStatus,
-  streamingProgress,
 }: {
   readonly messages: ReadonlyArray<AssistantMessage>;
-  readonly loading?: boolean;
-  readonly streamingStatus?: string;
-  readonly streamingProgress?: ReadonlyArray<string>;
 }) {
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const thinkingLogs = useMemo(
-    () => buildAssistantThinkingLogs(streamingProgress ?? []),
-    [streamingProgress],
-  );
-  const displayThinkingLogs = useMemo(() => {
-    if (thinkingLogs.length > 0) {
-      return thinkingLogs;
-    }
-    const fallback = (streamingStatus ?? "").trim();
-    return fallback ? [fallback] : [];
-  }, [thinkingLogs, streamingStatus]);
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, loading, streamingStatus, streamingProgress?.length]);
   return (
     <div className="space-y-3">
       {messages.map((message) => (
@@ -2041,32 +2158,62 @@ function MessageList({
           )}
         </div>
       ))}
-      {loading && (
-        <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed border bg-card text-muted-foreground border-border space-y-1" data-testid="assistant-thinking-indicator">
-          <div className="flex items-center gap-2">
-            <Loader2 size={14} className="animate-spin" />
-            <span>AI 助手正在思考…</span>
-          </div>
-          {displayThinkingLogs.length > 0 && (
-            <div className="text-xs text-muted-foreground/70 pl-[22px]" data-testid="assistant-thinking-progress">
-              <div
-                className="h-10 overflow-y-auto pr-1 leading-5"
-                data-testid="assistant-thinking-log-viewport"
-              >
-                <ul className="space-y-0.5">
-                  {displayThinkingLogs.map((line, index) => (
-                    <li key={`thinking-log-${index}`}>
-                      {line}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      <div ref={messagesEndRef} />
     </div>
+  );
+}
+
+function AssistantThinkingIndicator({
+  streamingStatus,
+  streamingProgress,
+  startTimestamp,
+}: {
+  readonly streamingStatus?: string;
+  readonly streamingProgress?: ReadonlyArray<string>;
+  readonly startTimestamp: number | null;
+}) {
+  const elapsedLabel = useElapsedTime(startTimestamp);
+  const thinkingLogs = useMemo(
+    () => buildAssistantThinkingLogs(streamingProgress ?? []),
+    [streamingProgress],
+  );
+  const displayThinkingLogs = useMemo(() => {
+    if (thinkingLogs.length > 0) {
+      return thinkingLogs;
+    }
+    const fallback = (streamingStatus ?? "").trim();
+    return fallback ? [fallback] : [];
+  }, [thinkingLogs, streamingStatus]);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [streamingStatus, streamingProgress?.length]);
+  return (
+    <>
+      <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed border bg-card text-muted-foreground border-border space-y-1 mt-3" data-testid="assistant-thinking-indicator">
+        <div className="flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin" />
+          <span>AI 助手正在思考…</span>
+          {startTimestamp && <span className="text-xs text-muted-foreground/50 tabular-nums">{elapsedLabel}</span>}
+        </div>
+        {displayThinkingLogs.length > 0 && (
+          <div className="text-xs text-muted-foreground/70 pl-[22px]" data-testid="assistant-thinking-progress">
+            <div
+              className="h-10 overflow-y-auto pr-1 leading-5"
+              data-testid="assistant-thinking-log-viewport"
+            >
+              <ul className="space-y-0.5">
+                {displayThinkingLogs.map((line, index) => (
+                  <li key={`thinking-log-${index}`}>
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+      </div>
+      <div ref={bottomRef} />
+    </>
   );
 }
 
@@ -2189,15 +2336,21 @@ export function AssistantView({
   t,
   initialPrompt,
   initialPromptKey,
+  sse,
 }: {
   nav: Nav;
   theme: Theme;
   t: TFunction;
   initialPrompt?: string;
   initialPromptKey?: string;
+  sse?: { messages: ReadonlyArray<SSEMessage> };
 }) {
+  const bootConversationId = ensureActiveAssistantConversationId();
+  const bootConversationSnapshot = readAssistantConversationSnapshot(bootConversationId);
+  const [activeConversationId, setActiveConversationIdState] = useState<string>(bootConversationId);
   const [state, setState] = useState<AssistantComposerState>(() => {
-    const initial = createAssistantInitialState(restoreChatHistory());
+    const initialMessages = bootConversationSnapshot?.messages ?? restoreChatHistory();
+    const initial = createAssistantInitialState(initialMessages);
     const pending = restoreChatPendingState();
     if (pending?.loading && Date.now() - pending.startedAt < ASSISTANT_CHAT_PENDING_TTL_MS) {
       const logs = Array.isArray(pending.progressLogs) ? pending.progressLogs.filter((line): line is string => typeof line === "string") : [];
@@ -2212,30 +2365,36 @@ export function AssistantView({
     return initial;
   });
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
-  const { messages: sseMessages } = useSSE();
+  const localSSE = useSSE();
+  const sseMessages = sse?.messages ?? localSSE.messages;
   const sseCursorRef = useRef(0);
   const evaluatedTaskIdRef = useRef<string | null>(null);
   const activeBooks = useMemo(
     () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
     [booksData?.books],
   );
-  const [chatBookContext, setChatBookContext] = useState<ChatBookContext | null>(null);
+  const [chatBookContext, setChatBookContext] = useState<ChatBookContext | null>(
+    bootConversationSnapshot?.currentBookId && bootConversationSnapshot.currentBookTitle
+      ? { id: bootConversationSnapshot.currentBookId, title: bootConversationSnapshot.currentBookTitle }
+      : null,
+  );
   const [scopeBlockHint, setScopeBlockHint] = useState("");
-  const [goalToBookGoal, setGoalToBookGoal] = useState("");
   const [crudReadResult, setCrudReadResult] = useState<AssistantCrudReadResponse | null>(null);
   const [crudDeletePreview, setCrudDeletePreview] = useState<AssistantCrudDeletePreviewResponse["preview"] | null>(null);
   const [crudDeleteResult, setCrudDeleteResult] = useState<AssistantCrudDeleteExecuteResponse | null>(null);
   const [crudBusy, setCrudBusy] = useState(false);
   const consumedPromptKeyRef = useRef<string | null>(null);
   const taskRecoveryAppliedRef = useRef<string | null>(null);
+  const restoredBookContextAppliedRef = useRef(false);
   const chatInFlightRef = useRef(false);
   const chatAbortRef = useRef<AbortController | null>(null);
+  const chatIntentionalAbortRef = useRef(false);
+  const assistantInputRef = useRef<HTMLTextAreaElement | null>(null);
   const assistantSessionIdRef = useRef<string>(
-    restoreAssistantSessionMemory()?.sessionId ?? createAssistantSessionId(),
+    bootConversationSnapshot?.sessionId ?? restoreAssistantSessionMemory()?.sessionId ?? createAssistantSessionId(),
   );
 
   const quickActions = useMemo(() => ASSISTANT_QUICK_ACTIONS, []);
-  const promptTemplates = useMemo(() => ASSISTANT_PROMPT_TEMPLATES, []);
   const activeBookIds = useMemo(() => activeBooks.map((book) => book.id), [activeBooks]);
   const activeBookTitleById = useMemo(
     () => new Map(activeBooks.map((book) => [book.id, book.title] as const)),
@@ -2245,7 +2404,6 @@ export function AssistantView({
     () => chatBookContext ? [chatBookContext.title] : [],
     [chatBookContext],
   );
-  const goalToBookProgress = state.taskExecution?.goalToBookProgress ?? null;
 
   const invalidateAssistantBookViews = useCallback((bookId?: string | null) => {
     const paths = ["/api/books"];
@@ -2264,7 +2422,7 @@ export function AssistantView({
     }
     const baseLabel = t(ACTION_LABEL_KEY_BY_TYPE[state.taskPlan.action] ?? "assistant.actionTemplate");
     if (state.taskPlan.action === "goal-to-book") {
-      return "Goal-to-Book 端到端向导";
+      return "目标落书执行流程";
     }
     if (state.taskPlan.action !== "template") {
       return baseLabel;
@@ -2274,6 +2432,117 @@ export function AssistantView({
     const riskLabel = state.taskPlan.templateRiskLevel ? ` · ${t("assistant.templateRiskPrefix")}${state.taskPlan.templateRiskLevel}` : "";
     return `${templateLabel}${riskLabel}`;
   }, [state.taskPlan, t]);
+
+  const selectedBookId = chatBookContext?.id ?? "";
+  const hasSelectedBook = selectedBookId.length > 0;
+  const taskRunning = state.taskExecution?.status === "running" || state.taskPlan?.status === "running";
+  const assistantBusy = state.loading || taskRunning;
+  const assistantBusyProgress = useMemo(() => {
+    if (state.streamingProgress.length > 0) {
+      return state.streamingProgress;
+    }
+    if (taskRunning) {
+      return (state.taskExecution?.timeline ?? [])
+        .slice(-4)
+        .map((entry) => entry.message)
+        .filter((line): line is string => typeof line === "string" && line.trim().length > 0);
+    }
+    return [];
+  }, [state.streamingProgress, taskRunning, state.taskExecution?.timeline]);
+  const assistantBusyStatus = (state.streamingStatus || (taskRunning ? "任务执行中…" : "")).trim();
+  const taskStartTimestamp = useMemo(() => {
+    if (!assistantBusy) return null;
+    // Task execution timeline (persisted across snapshot polls)
+    const firstEntry = state.taskExecution?.timeline?.[0];
+    if (firstEntry) return firstEntry.timestamp;
+    // Chat pending state (persisted in sessionStorage)
+    const pending = restoreChatPendingState();
+    if (pending?.startedAt) return pending.startedAt;
+    // Task plan creation time
+    if (state.taskPlan?.createdAt) return state.taskPlan.createdAt;
+    return Date.now();
+  }, [assistantBusy, state.taskExecution?.timeline, state.taskPlan?.createdAt]);
+
+  const resizeAssistantInput = useCallback(() => {
+    const node = assistantInputRef.current;
+    if (!node) return;
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
+  }, []);
+
+  const activateConversation = useCallback((conversationId: string) => {
+    const snapshot = readAssistantConversationSnapshot(conversationId);
+    const safeSnapshot = snapshot ?? createAndActivateAssistantConversation();
+    setActiveAssistantConversationId(safeSnapshot.id);
+    setActiveConversationIdState(safeSnapshot.id);
+    assistantSessionIdRef.current = safeSnapshot.sessionId || createAssistantSessionId();
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    chatInFlightRef.current = false;
+    setScopeBlockHint("");
+    setCrudReadResult(null);
+    setCrudDeletePreview(null);
+    setCrudDeleteResult(null);
+    setState(createAssistantInitialState(safeSnapshot.messages));
+    setChatBookContext(
+      safeSnapshot.currentBookId && safeSnapshot.currentBookTitle
+        ? { id: safeSnapshot.currentBookId, title: safeSnapshot.currentBookTitle }
+        : null,
+    );
+  }, []);
+
+  const handleChangeSelectedBook = (bookId: string) => {
+    const trimmed = bookId.trim();
+    if (!trimmed) {
+      setChatBookContext(null);
+      setScopeBlockHint("");
+      return;
+    }
+    const book = activeBooks.find((entry) => entry.id === trimmed);
+    if (!book) return;
+    setChatBookContext({ id: book.id, title: book.title });
+    setScopeBlockHint("");
+  };
+
+  useEffect(() => {
+    const handleCreate = () => {
+      const snapshot = createAndActivateAssistantConversation();
+      activateConversation(snapshot.id);
+    };
+    const handleSelect = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      const conversationId = typeof detail?.id === "string" ? detail.id : "";
+      if (!conversationId.trim()) {
+        return;
+      }
+      activateConversation(conversationId);
+    };
+    window.addEventListener(ASSISTANT_CREATE_NEW_CONVERSATION_EVENT, handleCreate);
+    window.addEventListener(ASSISTANT_SELECT_CONVERSATION_EVENT, handleSelect as EventListener);
+    return () => {
+      window.removeEventListener(ASSISTANT_CREATE_NEW_CONVERSATION_EVENT, handleCreate);
+      window.removeEventListener(ASSISTANT_SELECT_CONVERSATION_EVENT, handleSelect as EventListener);
+    };
+  }, [activateConversation]);
+
+  useEffect(() => {
+    if (restoredBookContextAppliedRef.current) {
+      return;
+    }
+    if (activeBooks.length === 0) {
+      return;
+    }
+    restoredBookContextAppliedRef.current = true;
+    const memory = restoreAssistantSessionMemory();
+    const rememberedBookId = memory?.currentBookId?.trim();
+    if (!rememberedBookId) {
+      return;
+    }
+    const matched = activeBooks.find((book) => book.id === rememberedBookId);
+    if (matched) {
+      setChatBookContext({ id: matched.id, title: matched.title });
+    }
+  }, [activeBooks]);
 
   useEffect(() => {
     const pending = restoreChatPendingState();
@@ -2341,15 +2610,18 @@ export function AssistantView({
     if (!state.loading) {
       return;
     }
-    const intervalId = window.setInterval(() => {
+    const pollRuntimeProgress = () => {
       const pending = restoreChatPendingState();
       if (!pending?.loading) {
         return;
       }
       void (async () => {
+        const elapsed = Date.now() - pending.startedAt;
         const [runtimeLines, detachedOutcome] = await Promise.all([
           fetchAssistantRuntimeProgressSince(pending.startedAt),
-          pending.detached ? fetchAssistantAgentOutcomeSince(pending.startedAt, pending.prompt) : Promise.resolve(null),
+          pending.detached || elapsed >= ASSISTANT_CHAT_RUNTIME_OUTCOME_WATCHDOG_MS
+            ? fetchAssistantAgentOutcomeSince(pending.startedAt, pending.prompt)
+            : Promise.resolve(null),
         ]);
 
         const mergedLines = runtimeLines.reduce<string[]>((acc, line) => appendStreamingProgressLine(acc, line), []);
@@ -2373,6 +2645,10 @@ export function AssistantView({
         if (!detachedOutcome) {
           return;
         }
+        chatIntentionalAbortRef.current = true;
+        chatAbortRef.current?.abort();
+        chatAbortRef.current = null;
+        chatInFlightRef.current = false;
         const finalizedLogs = mergedLines.length > 0 ? mergedLines : (Array.isArray(pending.progressLogs) ? pending.progressLogs : []);
         if (detachedOutcome.ok && detachedOutcome.response) {
           saveChatPendingState({
@@ -2385,6 +2661,7 @@ export function AssistantView({
           });
           const hintedBook = (chatBookContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : undefined)) ?? undefined;
           invalidateAssistantBookViews(hintedBook);
+          clearChatPendingState();
           setState((prev) => completeAssistantResponse(prev, detachedOutcome.response!));
           return;
         }
@@ -2399,11 +2676,19 @@ export function AssistantView({
           progressLogs: finalizedLogs,
         });
         setScopeBlockHint(`聊天请求失败：${errorMsg}`);
+        clearChatPendingState();
         setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
       })();
-    }, 2000);
+    };
+    // Run immediately on mount to recover missed logs without waiting 2s
+    pollRuntimeProgress();
+    const intervalId = window.setInterval(pollRuntimeProgress, 2000);
     return () => window.clearInterval(intervalId);
   }, [state.loading, activeBooks, chatBookContext, invalidateAssistantBookViews]);
+
+  useEffect(() => {
+    resizeAssistantInput();
+  }, [state.input, resizeAssistantInput]);
 
   useEffect(() => {
     const key = initialPromptKey ?? initialPrompt ?? "";
@@ -2428,7 +2713,7 @@ export function AssistantView({
       let next = prev;
       for (const message of pending) {
         next = applyAssistantTaskEventFromSSE(next, message);
-        if (message.event === "log" && next.loading) {
+        if (message.event === "log" && (next.loading || next.taskExecution?.status === "running")) {
           const line = extractAssistantProgressLineFromRuntimeLog(message.data);
           if (line) {
             const updatedProgress = appendStreamingProgressLine(next.streamingProgress, line);
@@ -2461,7 +2746,7 @@ export function AssistantView({
     } catch {
       payload = null;
     }
-    if (!payload || (payload.status !== "running" && payload.status !== "waiting_approval") || taskRecoveryAppliedRef.current === payload.taskId) {
+    if (!payload || taskRecoveryAppliedRef.current === payload.taskId) {
       return;
     }
     taskRecoveryAppliedRef.current = payload.taskId;
@@ -2469,8 +2754,10 @@ export function AssistantView({
       try {
         const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${payload.taskId}`);
         setState((prev) => recoverAssistantStateFromSnapshot(prev, snapshot, payload));
-      } catch {
-        // ignore persisted task recovery errors
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+          try { window.localStorage.removeItem(ASSISTANT_TASK_RECOVERY_STORAGE_KEY); } catch { /* ignore */ }
+        }
       }
     })();
   }, []);
@@ -2484,8 +2771,18 @@ export function AssistantView({
         try {
           const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${state.taskExecution?.taskId}`);
           setState((prev) => reconcileAssistantTaskFromSnapshot(prev, snapshot));
-        } catch {
-          // ignore polling errors and continue relying on SSE
+        } catch (err) {
+          if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+            setState((prev) => {
+              if (!prev.taskExecution || prev.taskExecution.status !== "running") return prev;
+              return {
+                ...prev,
+                loading: false,
+                taskExecution: { ...prev.taskExecution, status: "failed" },
+                taskPlan: prev.taskPlan ? transitionAssistantTaskPlan(prev.taskPlan, "failed", Date.now()) : null,
+              };
+            });
+          }
         }
       })();
     }, ASSISTANT_TASK_SNAPSHOT_POLL_INTERVAL_MS);
@@ -2512,7 +2809,14 @@ export function AssistantView({
 
   useEffect(() => {
     saveChatHistory(state.messages);
-  }, [state.messages]);
+    upsertAssistantConversationSnapshot({
+      id: activeConversationId,
+      sessionId: assistantSessionIdRef.current,
+      messages: state.messages,
+      currentBookId: chatBookContext?.id ?? null,
+      currentBookTitle: chatBookContext?.title ?? null,
+    });
+  }, [activeConversationId, chatBookContext, state.messages]);
 
   useEffect(() => {
     const memory = buildAssistantSessionMemory(
@@ -2525,7 +2829,7 @@ export function AssistantView({
       sessionId: memory.sessionId,
       data: memory,
     }).catch(() => undefined);
-  }, [chatBookContext, state.messages]);
+  }, [activeConversationId, chatBookContext, state.messages]);
 
   useEffect(() => {
     if (!state.taskExecution || state.taskExecution.status === "running" || !state.taskPlan) {
@@ -2577,10 +2881,14 @@ export function AssistantView({
           ...(chapterResult?.report ? { chapter: chapterResult.report } : {}),
           book: bookReport,
         };
-        const suggestedNextActions = mergeAssistantSuggestedNextActions(
+        const serverSuggestedActions = mergeAssistantSuggestedNextActions(
           chapterResult?.suggestedNextActions ?? [],
           bookResult.suggestedNextActions,
         );
+        const isWriteNextTask = state.taskPlan?.action === "write-next";
+        const suggestedNextActions = isWriteNextTask
+          ? ["write-next"]
+          : serverSuggestedActions;
         setState((prev) => ({
           ...applySuggestedNextActions(prev, suggestedNextActions),
           qualityReport,
@@ -2603,44 +2911,50 @@ export function AssistantView({
     })();
   }, [state.taskExecution, state.taskPlan]);
 
-  const handleRunTemplate = (template: AssistantPromptTemplate) => {
-    if (state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
-      return;
-    }
-    // L0 templates: skip confirmation, route directly through chat
-    if (template.riskLevel === "L0") {
-      sendPrompt(template.prompt, { forceChat: true });
-      return;
-    }
-    // L1 templates need a target book — use context or auto-select if only 1 active book
-    const targetBookIds = chatBookContext ? [chatBookContext.id] : (activeBookIds.length === 1 ? [activeBookIds[0]] : []);
-    if (targetBookIds.length === 0) {
-      setScopeBlockHint("");
-      setState((prev) => submitAssistantInput(prev, template.prompt));
-      setState((prev) => completeAssistantResponse(prev, `请先告诉我你要操作哪本书。当前活跃书籍：${activeBooks.map((b) => `《${b.title}》`).join("、")}。`));
-      return;
-    }
-    const draft = buildAssistantTemplateConfirmationDraft(template, targetBookIds);
-    if (!draft) {
-      setScopeBlockHint(t("assistant.scopeBlocked"));
-      return;
-    }
-    setScopeBlockHint((prev) => {
-      if (template.riskLevel === "L1") {
-        return t("assistant.templateRiskGateHint");
-      }
-      const riskHint = t("assistant.templateRiskGateHint");
-      return prev === riskHint ? "" : prev;
-    });
-    setState((prev) => requestAssistantConfirmation(prev, draft));
-  };
-
   const sendPrompt = (rawPrompt: string, options?: { forceChat?: boolean }) => {
     const normalizedPrompt = rawPrompt.trim();
     if (!normalizedPrompt) {
       return;
     }
 
+    const parsedCommand = parseAssistantOperatorCommand(normalizedPrompt);
+    if (parsedCommand.kind === "command" && parsedCommand.command.name === "approve") {
+      setScopeBlockHint("");
+      const echoed = applyAssistantOperatorCommand(state, normalizedPrompt);
+      if (echoed) {
+        setState(echoed);
+      }
+      const taskExecution = state.taskExecution;
+      if (!taskExecution) {
+        setScopeBlockHint("当前没有可审批的运行任务。");
+        return;
+      }
+      const rawTargetId = parsedCommand.command.targetId.trim();
+      const normalizedTargetId = rawTargetId.toLowerCase();
+      const nodeId = normalizedTargetId === "current" || normalizedTargetId === "checkpoint"
+        ? taskExecution.pendingCheckpoint?.nodeId ?? ""
+        : rawTargetId;
+      if (!nodeId) {
+        setScopeBlockHint("未找到可审批节点。请使用 /approve <nodeId>，或先等待检查点出现。");
+        return;
+      }
+      setState((prev) => ({ ...prev, loading: true }));
+      void (async () => {
+        try {
+          await postApi(`/assistant/tasks/${taskExecution.taskId}/approve/${nodeId}`, {});
+          const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${taskExecution.taskId}`);
+          setState((prev) => reconcileAssistantTaskFromSnapshot({
+            ...prev,
+            loading: false,
+          }, snapshot));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setScopeBlockHint(`审批失败：${message}`);
+          setState((prev) => ({ ...prev, loading: false }));
+        }
+      })();
+      return;
+    }
     const commandState = applyAssistantOperatorCommand(state, normalizedPrompt);
     if (commandState) {
       setScopeBlockHint("");
@@ -2667,12 +2981,6 @@ export function AssistantView({
         setState((prev) => completeAssistantResponse(prev, `你提到的书名匹配到了多本书，请告诉我你指的是哪一本：\n\n${bookList}\n\n你可以直接说书名或序号。`));
         return;
       }
-    }
-
-    // Auto-select if only 1 active book and no context yet
-    if (!resolvedContext && activeBooks.length === 1) {
-      resolvedContext = { id: activeBooks[0].id, title: activeBooks[0].title };
-      setChatBookContext(resolvedContext);
     }
 
     const contextTitles = resolvedContext ? [resolvedContext.title] : activeBooks.map((b) => b.title);
@@ -2709,6 +3017,7 @@ export function AssistantView({
       setScopeBlockHint("");
       setState((prev) => submitAssistantInput(prev, normalizedPrompt));
       chatInFlightRef.current = true;
+      chatIntentionalAbortRef.current = false;
       saveChatPendingState({ loading: true, prompt: normalizedPrompt, startedAt: Date.now(), progressLogs: [] });
       const abortController = new AbortController();
       chatAbortRef.current = abortController;
@@ -2748,6 +3057,11 @@ export function AssistantView({
           });
         },
         onDone: (result) => {
+          if (chatIntentionalAbortRef.current && result.error === "请求已取消") {
+            chatIntentionalAbortRef.current = false;
+            return;
+          }
+          chatIntentionalAbortRef.current = false;
           chatInFlightRef.current = false;
           chatAbortRef.current = null;
           const pending = restoreChatPendingState();
@@ -2915,6 +3229,7 @@ export function AssistantView({
     setScopeBlockHint("");
     setState((prev) => submitAssistantInput(prev, normalizedPrompt));
     chatInFlightRef.current = true;
+    chatIntentionalAbortRef.current = false;
     saveChatPendingState({ loading: true, prompt: normalizedPrompt, startedAt: Date.now(), progressLogs: [] });
 
     const abortController = new AbortController();
@@ -2957,6 +3272,11 @@ export function AssistantView({
         });
       },
       onDone: (result) => {
+        if (chatIntentionalAbortRef.current && result.error === "请求已取消") {
+          chatIntentionalAbortRef.current = false;
+          return;
+        }
+        chatIntentionalAbortRef.current = false;
         chatInFlightRef.current = false;
         chatAbortRef.current = null;
         const pending = restoreChatPendingState();
@@ -3009,6 +3329,8 @@ export function AssistantView({
       const sessionId = `asst_s_${Date.now().toString(36)}`;
       const scope = state.taskPlan.action === "goal-to-book"
         ? { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] }
+        : state.taskPlan.action === "write-next"
+        ? { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] }
         : state.taskPlan.targetBookIds.length === activeBookIds.length
         ? { type: "all-active" as const }
         : { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] };
@@ -3040,6 +3362,7 @@ export function AssistantView({
           sessionId,
           status: "running",
           stepRunIds: executeResult.stepRunIds,
+          pendingCheckpoint: null,
           candidateSelection: null,
           goalToBookProgress: resolveAssistantGoalToBookProgress(snapshot),
           timeline: prev.taskExecution?.taskId === planned.taskId ? prev.taskExecution.timeline : [],
@@ -3061,32 +3384,6 @@ export function AssistantView({
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
   };
 
-  const handleSubmitGoalToBook = () => {
-    const goal = goalToBookGoal.trim();
-    if (!goal || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
-      return;
-    }
-    const targetBookId = chatBookContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null);
-    if (!targetBookId) {
-      const bookList = activeBooks.map((book) => `- 《${book.title}》`).join("\n");
-      setState((prev) => submitAssistantInput(prev, goal));
-      setState((prev) => completeAssistantResponse(
-        prev,
-        activeBooks.length > 0
-          ? `请先告诉我这个目标要落在哪本书上：\n\n${bookList}\n\n选择书籍后我会生成 Goal-to-Book 任务流。`
-          : "当前没有活跃书籍。请先创建一本书，再生成 Goal-to-Book 任务流。",
-      ));
-      return;
-    }
-    const draft = buildGoalToBookConfirmationDraft(goal, [targetBookId]);
-    if (!draft) {
-      return;
-    }
-    setScopeBlockHint("");
-    setGoalToBookGoal("");
-    setState((prev) => requestAssistantConfirmation(prev, draft));
-  };
-
   const handleSelectCandidate = async (nodeId: string, candidateId: string) => {
     if (!state.taskExecution) {
       return;
@@ -3102,6 +3399,26 @@ export function AssistantView({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setScopeBlockHint(`候选选择失败：${message}`);
+      setState((prev) => ({ ...prev, loading: false }));
+    }
+  };
+
+  const handleApproveCheckpoint = async (nodeId: string) => {
+    if (!state.taskExecution) {
+      return;
+    }
+    setScopeBlockHint("");
+    setState((prev) => ({ ...prev, loading: true }));
+    try {
+      await postApi(`/assistant/tasks/${state.taskExecution.taskId}/approve/${nodeId}`, {});
+      const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${state.taskExecution.taskId}`);
+      setState((prev) => reconcileAssistantTaskFromSnapshot({
+        ...prev,
+        loading: false,
+      }, snapshot));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setScopeBlockHint(`审批失败：${message}`);
       setState((prev) => ({ ...prev, loading: false }));
     }
   };
@@ -3143,53 +3460,117 @@ export function AssistantView({
     }
   };
 
-  const showLoading = state.loading && state.messages.length === 0;
+  const showLoading = assistantBusy && state.messages.length === 0;
+  const showLanding = state.messages.length === 0 && !assistantBusy;
 
   return (
-    <div className="h-full min-h-[640px] flex flex-col gap-4">
-      <section className="shrink-0 rounded-xl border border-border/70 bg-card/50 px-4 py-3" data-testid="assistant-context-bar">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm min-w-0">
-            <Sparkles size={16} className="text-primary" />
-            <span className="font-medium">{t("assistant.title")}</span>
-            <span className="text-muted-foreground">· {t("assistant.workspace")}</span>
-          </div>
-          <button onClick={nav.toDashboard} className="text-xs text-muted-foreground hover:text-primary transition-colors">
-            {t("assistant.backHome")}
-          </button>
-        </div>
-        <div className="mt-3 space-y-2" data-testid="assistant-scope-selector">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{t("assistant.scopeLabel")}</span>
-            {chatBookContext ? (
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-primary" data-testid="assistant-scope-summary">
-                《{chatBookContext.title}》
-                <button
-                  onClick={() => setChatBookContext(null)}
-                  className="ml-1 text-muted-foreground hover:text-destructive transition-colors"
-                  title="清除书籍上下文"
-                >
-                  ✕
-                </button>
-              </span>
-            ) : (
-              <span className="text-muted-foreground/60" data-testid="assistant-scope-summary">
-                {activeBooks.length > 0
-                  ? `${activeBooks.length} 本活跃书籍 — 聊天时会自动识别`
-                  : t("assistant.scopeNoBooks")}
-              </span>
-            )}
-          </div>
-          {scopeBlockHint && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive" data-testid="assistant-scope-blocked">
-              {scopeBlockHint}
+    <div className="min-h-full bg-transparent text-foreground">
+      {showLanding ? (
+        <div className="flex min-h-full flex-col">
+          <section className="mx-auto flex min-h-full w-full max-w-[1480px] flex-1 flex-col px-10 pb-10 pt-24">
+            <div className="mb-12 flex items-center justify-between" data-testid="assistant-context-bar">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                NovaScribe Studio
+              </div>
+              <button onClick={nav.toDashboard} className="text-xs text-muted-foreground transition-colors hover:text-foreground">
+                进入作品页
+              </button>
             </div>
-          )}
-        </div>
-      </section>
 
-        <section className="flex-1 min-h-[360px] overflow-y-auto rounded-xl border border-border/70 bg-background/70 p-4" data-testid="assistant-message-list">
-          {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : <MessageList messages={state.messages} loading={state.loading} streamingStatus={state.streamingStatus} streamingProgress={state.streamingProgress} />}
+            <div className="flex flex-1 items-center justify-center pb-12">
+              <section className="flex w-full max-w-[860px] flex-col items-center justify-center px-4">
+                <div className="w-full text-center">
+                  <div data-testid="assistant-message-list" className="sr-only">
+                    <div data-testid="assistant-empty-state">最近聊天为空</div>
+                  </div>
+                  <h1 className="font-sans text-6xl font-semibold tracking-tight text-foreground">
+                    今天想写什么故事？
+                  </h1>
+                  <div className="mt-8 rounded-[32px] border border-border/70 bg-card/80 p-4 shadow-[0_24px_64px_-30px_rgba(0,0,0,0.24)] backdrop-blur-xl" data-testid="assistant-input-panel">
+                    <div className="mb-3 flex items-center gap-2" data-testid="assistant-scope-selector">
+                      <select
+                        value={selectedBookId}
+                        onChange={(event) => handleChangeSelectedBook(event.target.value)}
+                        className="h-11 flex-1 rounded-2xl border border-border bg-background/70 px-4 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/20"
+                        data-testid="assistant-scope-select"
+                      >
+                        <option value="" className="text-black">请选择一本书（单选）</option>
+                        {activeBooks.map((book) => (
+                          <option key={book.id} value={book.id} className="text-black">
+                            《{book.title}》
+                          </option>
+                        ))}
+                      </select>
+                      {chatBookContext && (
+                        <button
+                          type="button"
+                          onClick={() => handleChangeSelectedBook("")}
+                          className="h-11 rounded-2xl border border-white/10 px-4 text-xs text-white/65 hover:text-white"
+                        >
+                          清除
+                        </button>
+                      )}
+                    </div>
+                    {scopeBlockHint && (
+                      <div className="mb-3 rounded-2xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-left text-xs text-red-200 dark:text-red-200">
+                        {scopeBlockHint}
+                      </div>
+                    )}
+                    <div className="rounded-[28px] border border-border/70 bg-background/70 p-4">
+                      <textarea
+                        ref={assistantInputRef}
+                        value={state.input}
+                        onChange={(event) => setState((prev) => applyAssistantInput(prev, event.target.value))}
+                        onInput={resizeAssistantInput}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            sendPrompt(state.input);
+                          }
+                        }}
+                        placeholder="给 NovaScribe 发送消息"
+                        className="min-h-[108px] max-h-[220px] w-full resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground/60"
+                        data-testid="assistant-input"
+                      />
+                      <div className="mt-3 flex items-center justify-between">
+                        <div className="text-muted-foreground/50">+</div>
+                        <button
+                          onClick={() => sendPrompt(state.input)}
+                          disabled={crudBusy || assistantBusy || state.taskPlan?.status === "awaiting-confirm"}
+                          className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground disabled:opacity-50"
+                          data-testid="assistant-send"
+                        >
+                          {assistantBusy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="h-full min-h-[640px] flex flex-col gap-4 px-6 py-6">
+          <section className="shrink-0 rounded-2xl border border-border/70 bg-card/50 px-4 py-3 backdrop-blur-xl" data-testid="assistant-context-bar">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm min-w-0 text-foreground">
+                <Sparkles size={16} className="text-primary" />
+                <span className="font-medium">{t("assistant.title")}</span>
+                <span className="text-muted-foreground">· {t("assistant.workspace")}</span>
+              </div>
+              <button onClick={nav.toDashboard} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                {t("assistant.backHome")}
+              </button>
+            </div>
+          </section>
+
+          <section className="flex-1 min-h-[360px] overflow-y-auto rounded-[28px] border border-border/70 bg-card/40 p-4 backdrop-blur-xl" data-testid="assistant-message-list">
+            {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : (
+            <MessageList
+              messages={state.messages}
+            />
+          )}
           {state.taskPlan && (
             <TaskPlanCard
               t={t}
@@ -3201,11 +3582,26 @@ export function AssistantView({
               onCancel={() => setState((prev) => cancelAssistantPendingAction(prev))}
             />
           )}
+          {assistantBusy && state.messages.length > 0 && (
+            <AssistantThinkingIndicator
+              streamingStatus={assistantBusyStatus}
+              streamingProgress={assistantBusyProgress}
+              startTimestamp={taskStartTimestamp}
+            />
+          )}
           {state.taskExecution?.candidateSelection && (
             <CandidateComparisonCard
               selection={state.taskExecution.candidateSelection}
-              disabled={state.loading}
+              disabled={assistantBusy}
               onSelectCandidate={handleSelectCandidate}
+            />
+          )}
+          {state.taskExecution?.pendingCheckpoint && (
+            <CheckpointApprovalCard
+              nodeId={state.taskExecution.pendingCheckpoint.nodeId}
+              label={state.taskExecution.pendingCheckpoint.label}
+              disabled={assistantBusy}
+              onApprove={handleApproveCheckpoint}
             />
           )}
           {state.qualityReport && (
@@ -3229,79 +3625,89 @@ export function AssistantView({
             onConfirm={handleConfirmDelete}
             onRestore={handleRestoreDelete}
           />
-          <AssistantTimeline entries={state.taskExecution?.timeline ?? []} />
-          {state.taskExecution && state.taskExecution.status !== "running" && (
-            <AssistantTemplateSuggestionCard
-              t={t}
-              taskId={state.taskExecution.taskId}
-              suggestedNextActions={resolveAssistantTemplateSuggestedActions(state.taskPlan, state.suggestedNextActions)}
-              onRunNextAction={handleRunNextAction}
-            />
-          )}
-      </section>
 
-      <section className="shrink-0 rounded-xl border border-border/70 bg-card/40 p-4 space-y-3" data-testid="assistant-input-panel">
-        <GoalToBookWizard
-          value={goalToBookGoal}
-          onChange={setGoalToBookGoal}
-          onSubmit={handleSubmitGoalToBook}
-          disabled={state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
-          activeBookTitle={chatBookContext?.title ?? (activeBooks.length === 1 ? activeBooks[0]?.title : null)}
-          progress={goalToBookProgress}
-        />
-        <div className="space-y-2" data-testid="assistant-template-panel">
-          <div className="text-xs text-muted-foreground">{t("assistant.templateTitle")}</div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {promptTemplates.map((template) => (
+          </section>
+
+          <section className="shrink-0 rounded-[28px] border border-border/70 bg-card/40 p-4 space-y-3 backdrop-blur-xl" data-testid="assistant-input-panel">
+            <div className="space-y-2" data-testid="assistant-scope-selector">
+              <div className="text-xs text-muted-foreground">{t("assistant.scopeLabel")}</div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedBookId}
+                  onChange={(event) => handleChangeSelectedBook(event.target.value)}
+                  className="h-10 flex-1 rounded-2xl border border-border bg-background/70 px-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/20"
+                  data-testid="assistant-scope-select"
+                >
+                  <option value="" className="text-black">请选择一本书（单选）</option>
+                  {activeBooks.map((book) => (
+                    <option key={book.id} value={book.id} className="text-black">
+                      《{book.title}》
+                    </option>
+                  ))}
+                </select>
+                {chatBookContext && (
+                  <button
+                    type="button"
+                    onClick={() => handleChangeSelectedBook("")}
+                    className="h-10 rounded-2xl border border-border px-3 text-xs text-muted-foreground hover:text-destructive"
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+              {!chatBookContext && (
+                <div className="text-xs text-muted-foreground/80" data-testid="assistant-scope-summary">
+                  先选定书籍后，再使用快捷动作。
+                </div>
+              )}
+            </div>
+            {hasSelectedBook && (
+              <div className="flex flex-wrap gap-2">
+                {quickActions.map((action) => (
+                  <button
+                    key={action.id}
+                    onClick={() => sendPrompt(action.prompt)}
+                    className="px-3 py-1.5 rounded-xl text-xs border border-border bg-secondary/40 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {scopeBlockHint && (
+              <div className="rounded-2xl border border-red-400/25 bg-red-400/10 px-3 py-2 text-xs text-red-200 dark:text-red-200" data-testid="assistant-scope-blocked">
+                {scopeBlockHint}
+              </div>
+            )}
+
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={assistantInputRef}
+                value={state.input}
+                onChange={(event) => setState((prev) => applyAssistantInput(prev, event.target.value))}
+                onInput={resizeAssistantInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    sendPrompt(state.input);
+                  }
+                }}
+                placeholder={t("assistant.inputPlaceholder")}
+                className="min-h-10 max-h-40 flex-1 resize-none overflow-y-auto rounded-2xl border border-border bg-background/70 px-3 py-2 text-sm leading-6 text-foreground outline-none focus:ring-2 focus:ring-primary/20 placeholder:text-muted-foreground/60"
+                data-testid="assistant-input"
+              />
               <button
-                key={template.id}
-                onClick={() => handleRunTemplate(template)}
-                className="rounded-lg border border-border bg-background px-3 py-2 text-left text-xs hover:border-primary/40 hover:bg-primary/5"
-                data-testid={`assistant-template-${template.id}`}
-                aria-label={`${t(template.labelKey)} ${t("assistant.templateRiskPrefix")}${template.riskLevel}`}
+                onClick={() => sendPrompt(state.input)}
+                disabled={crudBusy || assistantBusy || state.taskPlan?.status === "awaiting-confirm"}
+                className="h-10 w-10 rounded-full bg-primary text-primary-foreground disabled:opacity-50 flex items-center justify-center"
+                data-testid="assistant-send"
               >
-                <span className="block text-foreground">{t(template.labelKey)}</span>
-                <span className="mt-1 block text-muted-foreground">{t("assistant.templateRiskPrefix")}{template.riskLevel}</span>
+                {assistantBusy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
               </button>
-            ))}
-          </div>
+            </div>
+          </section>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {quickActions.map((action) => (
-            <button
-              key={action.id}
-              onClick={() => sendPrompt(action.prompt)}
-              className="px-3 py-1.5 rounded-lg text-xs bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <input
-            value={state.input}
-            onChange={(event) => setState((prev) => applyAssistantInput(prev, event.target.value))}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                sendPrompt(state.input);
-              }
-            }}
-            placeholder={t("assistant.inputPlaceholder")}
-            className="flex-1 h-10 rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-primary/30"
-            data-testid="assistant-input"
-          />
-          <button
-            onClick={() => sendPrompt(state.input)}
-            disabled={crudBusy || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running"}
-            className="h-10 w-10 rounded-lg bg-primary text-primary-foreground disabled:opacity-50 flex items-center justify-center"
-            data-testid="assistant-send"
-          >
-            {state.loading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-          </button>
-        </div>
-      </section>
+      )}
     </div>
   );
 }

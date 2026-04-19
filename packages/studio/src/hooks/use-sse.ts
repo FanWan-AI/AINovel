@@ -6,7 +6,7 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
-const SSE_MESSAGE_BUFFER_SIZE = 100;
+const SSE_MESSAGE_BUFFER_SIZE = 300;
 
 interface EventSourceLike {
   addEventListener: (type: string, listener: (e: MessageEvent) => void) => void;

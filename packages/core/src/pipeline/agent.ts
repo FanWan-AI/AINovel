@@ -55,13 +55,13 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
   },
   {
     name: "revise_chapter",
-    description: "修订指定章节的文字质量。根据审计问题做局部修正，不改变剧情走向。默认 spot-fix（定点修复最小改动）；也支持 polish(润色)、rewrite(改写)、rework(重写)、anti-detect。注意：不能用来补缺失章节、不能改章节号、不能替代 write_draft。",
+    description: "修订或改写指定章节。支持两类用法：\n1. 微调（不改剧情）：mode=spot-fix(定点修复)、polish(润色表达)、anti-detect(降低AI痕迹)——只优化文字质量，不改变剧情走向。\n2. 改写（可改剧情组织）：mode=rework(轻度改写，优化场景推进和冲突组织，不改主设定和大事件结果)、chapter-redesign(深度改写，允许在保持章节位置和作品主设定一致的前提下，调整剧情组织、人物互动、冲突强度、场景安排和结尾效果)。\n注意：不能用来补缺失章节、不能改章节号、不能替代 write_draft。如果用户要求改剧情走向，应使用 rework 或 chapter-redesign。",
     parameters: {
       type: "object",
       properties: {
         bookId: { type: "string", description: "书籍ID" },
         chapterNumber: { type: "number", description: "章节号（不填则修订最新章）" },
-        mode: { type: "string", enum: ["polish", "rewrite", "rework", "spot-fix", "anti-detect"], description: `修订模式（默认${DEFAULT_REVISE_MODE}）` },
+        mode: { type: "string", enum: ["spot-fix", "polish", "rework", "anti-detect", "chapter-redesign"], description: `修订模式（默认${DEFAULT_REVISE_MODE}）。微调类：spot-fix/polish/anti-detect；改写类：rework/chapter-redesign` },
       },
       required: ["bookId"],
     },

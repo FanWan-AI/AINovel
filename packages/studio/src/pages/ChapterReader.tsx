@@ -1,17 +1,17 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import {
   ChevronLeft,
+  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
   Check,
-  X,
   List,
-  RotateCcw,
   BookOpen,
   CheckCircle2,
-  XCircle,
   Hash,
   Type,
   Clock,
@@ -26,9 +26,24 @@ interface ChapterData {
   readonly content: string;
 }
 
+interface ChapterMeta {
+  readonly number: number;
+  readonly title: string;
+  readonly status: string;
+  readonly wordCount: number;
+}
+
+interface BookDetailData {
+  readonly book: {
+    readonly title: string;
+  };
+  readonly chapters: ReadonlyArray<ChapterMeta>;
+}
+
 interface Nav {
   toBook: (id: string) => void;
   toDashboard: () => void;
+  toChapter: (bookId: string, chapterNumber: number) => void;
 }
 
 export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
@@ -42,9 +57,37 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   const { data, loading, error, refetch } = useApi<ChapterData>(
     `/books/${bookId}/chapters/${chapterNumber}`,
   );
+  const { data: bookData } = useApi<BookDetailData>(`/books/${bookId}`);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [chapterRailOpen, setChapterRailOpen] = useState(false);
+  const [chapterRailLayout, setChapterRailLayout] = useState({ left: 264, panelWidth: 244 });
+  const paperRef = useRef<HTMLDivElement | null>(null);
+  const chapters = [...(bookData?.chapters ?? [])].sort((a, b) => a.number - b.number);
+
+  useEffect(() => {
+    const measureRail = () => {
+      const paperEl = paperRef.current;
+      if (!paperEl) return;
+
+      const sidebarEl = document.querySelector<HTMLElement>("[data-sidebar-shell='app']");
+      const sidebarRight = sidebarEl?.getBoundingClientRect().right ?? 248;
+      const paperLeft = paperEl.getBoundingClientRect().left;
+      const gutterWidth = Math.max(paperLeft - sidebarRight, 160);
+      const panelWidth = Math.max(220, Math.min(320, gutterWidth - 56));
+      const collapsedWidth = 48;
+      const expandedWidth = collapsedWidth + 12 + panelWidth;
+      const activeWidth = chapterRailOpen ? expandedWidth : collapsedWidth;
+      const left = sidebarRight + Math.max((gutterWidth - activeWidth) / 2, 8);
+
+      setChapterRailLayout({ left, panelWidth });
+    };
+
+    measureRail();
+    window.addEventListener("resize", measureRail);
+    return () => window.removeEventListener("resize", measureRail);
+  }, [chapterRailOpen, chapters.length]);
 
   const handleStartEdit = () => {
     if (!data) return;
@@ -98,15 +141,95 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
     nav.toBook(bookId);
   };
 
-  const handleReject = async () => {
-    await postApi(`/books/${bookId}/chapters/${chapterNumber}/reject`);
-    nav.toBook(bookId);
-  };
-
   const paragraphs = body.split(/\n\n+/).filter(Boolean);
+  const currentChapterIndex = chapters.findIndex((chapter) => chapter.number === chapterNumber);
+  const previousChapter = currentChapterIndex > 0 ? chapters[currentChapterIndex - 1] : null;
+  const nextChapter = currentChapterIndex >= 0 && currentChapterIndex < chapters.length - 1
+    ? chapters[currentChapterIndex + 1]
+    : null;
+  const resolvedBookTitle = bookData?.book.title ?? bookId;
+
+  const chapterRailButtonClass = (active: boolean) =>
+    `w-full rounded-2xl border px-3 py-3 text-left transition-all ${
+      active
+        ? "border-primary/30 bg-primary/8 shadow-sm"
+        : "border-border/60 bg-background/92 hover:border-primary/25 hover:bg-background"
+    }`;
+
+  const navigationButtonClass = (enabled: boolean) =>
+    `group inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold transition-all ${
+      enabled
+        ? "border-border/60 bg-background hover:border-primary/30 hover:text-primary hover:shadow-md"
+        : "cursor-not-allowed border-border/40 bg-muted/40 text-muted-foreground/50"
+    }`;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-10 fade-in">
+    <div className="relative max-w-4xl mx-auto space-y-10">
+      <div className="hidden xl:block">
+        <aside
+          className="fixed top-1/2 z-30 -translate-y-1/2"
+          style={{ left: `${chapterRailLayout.left}px` }}
+        >
+          <div className="flex items-start gap-3">
+            <button
+              type="button"
+              onClick={() => setChapterRailOpen((open) => !open)}
+              className="mt-6 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-border/60 bg-background/95 text-muted-foreground shadow-lg backdrop-blur hover:text-primary"
+              title={chapterRailOpen ? "收起章节导航" : "展开章节导航"}
+            >
+              {chapterRailOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+            </button>
+
+            <div
+              className="overflow-hidden rounded-[28px] border border-border/60 bg-background/95 shadow-2xl backdrop-blur transition-all duration-300"
+              style={{
+                width: chapterRailOpen ? `${chapterRailLayout.panelWidth}px` : "0px",
+                opacity: chapterRailOpen ? 1 : 0,
+              }}
+            >
+              <div className="p-5" style={{ width: `${chapterRailLayout.panelWidth}px` }}>
+                <div className="mb-5 flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-muted-foreground">
+                      章节导航
+                    </p>
+                    <h3 className="mt-1 line-clamp-2 text-base font-semibold leading-7 text-foreground">
+                      {resolvedBookTitle}
+                    </h3>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-primary/8 px-3 py-1.5 text-[11px] font-semibold text-primary">
+                    {chapters.length} 章
+                  </span>
+                </div>
+
+                <div className="max-h-[68vh] space-y-2 overflow-y-auto pr-1">
+                  {chapters.map((chapter) => (
+                    <button
+                      key={chapter.number}
+                      type="button"
+                      onClick={() => nav.toChapter(bookId, chapter.number)}
+                      className={chapterRailButtonClass(chapter.number === chapterNumber)}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-bold text-muted-foreground">
+                          第{chapter.number}章
+                        </span>
+                        <span className="rounded-full bg-secondary/70 px-2 py-0.5 text-[10px] text-muted-foreground">
+                          {chapter.wordCount.toLocaleString()}字
+                        </span>
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-sm font-medium leading-6 text-foreground">
+                        {chapter.title}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
       {/* Navigation & Actions */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
         <nav className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
@@ -121,7 +244,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             onClick={() => nav.toBook(bookId)}
             className="hover:text-primary transition-colors truncate max-w-[120px]"
           >
-            {bookId}
+            {resolvedBookTitle}
           </button>
           <span className="text-border">/</span>
           <span className="text-foreground flex items-center gap-1">
@@ -175,18 +298,14 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             <CheckCircle2 size={14} />
             {t("reader.approve")}
           </button>
-          <button
-            onClick={handleReject}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 shadow-sm"
-          >
-            <XCircle size={14} />
-            {t("reader.reject")}
-          </button>
         </div>
       </div>
 
       {/* Manuscript Sheet */}
-      <div className="paper-sheet rounded-2xl p-8 md:p-16 lg:p-24 shadow-2xl shadow-primary/5 min-h-[80vh] relative overflow-hidden">
+      <div
+        ref={paperRef}
+        className="paper-sheet rounded-2xl p-8 md:p-16 lg:p-24 shadow-2xl shadow-primary/5 min-h-[80vh] relative overflow-hidden"
+      >
         {/* Physical Paper Details */}
         <div className="absolute top-0 left-8 w-px h-full bg-primary/5 hidden md:block" />
         <div className="absolute top-0 right-8 w-px h-full bg-primary/5 hidden md:block" />
@@ -240,18 +359,52 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
       </div>
 
       {/* Footer Navigation */}
-      <div className="flex justify-between items-center py-8">
-        {chapterNumber > 1 ? (
+      <div className="flex flex-col gap-4 py-8 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          type="button"
+          disabled={!previousChapter}
+          onClick={() => previousChapter && nav.toChapter(bookId, previousChapter.number)}
+          className={navigationButtonClass(Boolean(previousChapter))}
+          title={previousChapter ? `返回第${previousChapter.number}章` : "没有上一章节"}
+        >
+          <ChevronLeft size={16} />
+          <div className="text-left">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              返回上一章节
+            </div>
+            <div className="max-w-[220px] truncate text-sm">
+              {previousChapter ? `第${previousChapter.number}章 ${previousChapter.title}` : "已是第一章"}
+            </div>
+          </div>
+        </button>
+
+        <div className="flex items-center justify-center">
           <button
             onClick={() => nav.toBook(bookId)}
             className="flex items-center gap-2 text-sm font-bold text-muted-foreground hover:text-primary transition-all group"
           >
-            <RotateCcw size={16} className="group-hover:-rotate-45 transition-transform" />
+            <List size={16} className="group-hover:scale-110 transition-transform" />
             {t("reader.chapterList")}
           </button>
-        ) : (
-          <div />
-        )}
+        </div>
+
+        <button
+          type="button"
+          disabled={!nextChapter}
+          onClick={() => nextChapter && nav.toChapter(bookId, nextChapter.number)}
+          className={`${navigationButtonClass(Boolean(nextChapter))} justify-end text-right`}
+          title={nextChapter ? `进入第${nextChapter.number}章` : "没有下一章节"}
+        >
+          <div className="text-right">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              进入下一章节
+            </div>
+            <div className="max-w-[220px] truncate text-sm">
+              {nextChapter ? `第${nextChapter.number}章 ${nextChapter.title}` : "已是最后一章"}
+            </div>
+          </div>
+          <ChevronRight size={16} />
+        </button>
       </div>
     </div>
   );

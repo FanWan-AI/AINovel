@@ -108,6 +108,32 @@ import type {
 
 type EventHandler = (event: string, data: unknown) => void;
 const subscribers = new Set<EventHandler>();
+
+/**
+ * Subscribe to the broadcast event bus and wait for the first event that
+ * matches `matcher`. Returns whatever `matcher` produces (non-null means
+ * match). The subscription is automatically cleaned up on match or timeout.
+ */
+function waitForBroadcastEvent<T>(
+  matcher: (event: string, data: unknown) => T | null,
+  timeoutMs: number,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      subscribers.delete(handler);
+      reject(new Error("Timed out waiting for broadcast event"));
+    }, timeoutMs);
+    const handler: EventHandler = (event, data) => {
+      const result = matcher(event, data);
+      if (result !== null) {
+        clearTimeout(timer);
+        subscribers.delete(handler);
+        resolve(result);
+      }
+    };
+    subscribers.add(handler);
+  });
+}
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 // Runtime lifecycle actions emitted for human-readable run narration in Studio.
 type RuntimeAction = "revise" | "rewrite" | "anti-detect" | "resync" | "plan" | "compose" | "write-next";
@@ -922,7 +948,7 @@ interface AssistantMetricsResponse {
 
 const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
-const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|继续写|续写|write[-\s]?next|continue\s*writing/iu;
+const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|下一章.*写|继续写|续写|写.*下一章|write[-\s]?next|continue\s*writing/iu;
 const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
 const ASSISTANT_RELEASE_CANDIDATE_PATTERN = /发布候选|release\s*candidate|可发布|候选确认/iu;
 const ASSISTANT_GOAL_TO_BOOK_PATTERN = /(一句话目标|goal[-\s]?to[-\s]?book|目标.*(成书|小说|长篇)|扩展成.*章|写成.*书)/iu;
@@ -940,7 +966,12 @@ const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
 const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
-const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|rewrite|revise|spot-fix|polish|rework|anti-detect/iu;
+const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|深度改写|大幅改写|rewrite|revise|spot-fix|polish|rework|anti-detect|chapter-redesign/iu;
+const ASSISTANT_REVISE_MODE_ANTI_DETECT_PATTERN = /反检测|anti[-\s]?detect/iu;
+const ASSISTANT_REVISE_MODE_POLISH_PATTERN = /润色|文风|措辞|polish/iu;
+const ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN = /深度改写|大幅改写|chapter[-\s]?redesign|换剧情|换场景|改剧情线|重构本章/iu;
+const ASSISTANT_REVISE_MODE_REWRITE_PATTERN = /rewrite|改写/iu;
+const ASSISTANT_REVISE_MODE_REWORK_PATTERN = /重写|重作|改成|剧情|情节|整体改|彻底改|必须改/iu;
 const ASSISTANT_METRICS_DAY_RANGE_VALUES = [7, 30] as const;
 const ASSISTANT_METRICS_DEFAULT_DAY_RANGE = 7;
 const ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT = 400;
@@ -1028,6 +1059,38 @@ function parseAssistantChapterFromInput(input: string): number | undefined {
   const enMatch = input.match(ASSISTANT_CHAPTER_EN_PATTERN);
   if (enMatch?.[1]) return Number.parseInt(enMatch[1], 10);
   return undefined;
+}
+
+function extractAssistantUserRequest(input: string): string {
+  const matched = input.match(/【用户请求】([\s\S]*)$/u);
+  const request = matched?.[1]?.trim() ?? input.trim();
+  return request.length > 0 ? request : input.trim();
+}
+
+function inferAssistantReviseModeFromInput(input: string): "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect" | "chapter-redesign" {
+  if (ASSISTANT_REVISE_MODE_ANTI_DETECT_PATTERN.test(input)) {
+    return "anti-detect";
+  }
+  if (ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN.test(input)) {
+    return "chapter-redesign";
+  }
+  if (ASSISTANT_REVISE_MODE_POLISH_PATTERN.test(input)) {
+    return "polish";
+  }
+  if (ASSISTANT_REVISE_MODE_REWORK_PATTERN.test(input)) {
+    return "rework";
+  }
+  if (ASSISTANT_REVISE_MODE_REWRITE_PATTERN.test(input)) {
+    return "rewrite";
+  }
+  return "spot-fix";
+}
+
+function normalizeAssistantBookTitle(input: string): string {
+  return input
+    .trim()
+    .replace(/[《》「」"'`]/gu, "")
+    .toLowerCase();
 }
 
 function parseAssistantCrudDimensionFromInput(input: string): AssistantCrudReadDimension {
@@ -2385,7 +2448,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   async function waitForAssistantChapterAvailability(
     bookId: string,
     chapterNumber: number,
-    timeoutMs = 30_000,
+    timeoutMs = 20 * 60_000,
   ): Promise<void> {
     const started = Date.now();
     const prefix = `${String(chapterNumber).padStart(4, "0")}_`;
@@ -2562,6 +2625,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             if (!node.bookId) {
               throw new Error("write-next node requires bookId");
             }
+            // Subscribe for the real completion event BEFORE triggering the
+            // write so we never miss a fast completion.
+            const completionPromise = waitForBroadcastEvent<{ ok: boolean; error?: string }>(
+              (event, data) => {
+                const d = data as Record<string, unknown> | null;
+                if (d?.bookId !== node.bookId) return null;
+                if (event === "write-next:success") return { ok: true };
+                if (event === "write-next:fail") return { ok: false, error: typeof d?.error === "string" ? d.error : "write-next failed" };
+                return null;
+              },
+              20 * 60_000, // 20 min timeout — chapters can take a while
+            );
             const response = await app.request(
               `http://localhost/api/books/${node.bookId}/write-next`,
               {
@@ -2575,8 +2650,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             if (!response.ok) {
               throw new Error(await parseApiErrorMessage(response));
             }
-            if (node.chapter !== undefined) {
-              await waitForAssistantChapterAvailability(node.bookId, node.chapter);
+            // The route returns immediately ({ status: "writing" }) while
+            // the pipeline runs in the background. Wait for the real
+            // write-next:success / write-next:fail broadcast event.
+            const result = await completionPromise;
+            if (!result.ok) {
+              throw new Error(result.error ?? "write-next failed");
             }
           },
         };
@@ -2845,8 +2924,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     readonly runIds?: ReadonlyArray<string>;
   }
 
-  function normalizeEvaluateText(value: string | null | undefined, maxLength = 160): string {
-    return (value ?? "").replace(/\s+/gu, " ").trim().slice(0, maxLength);
+  function normalizeEvaluateText(value: string | null | undefined, maxLength = 300): string {
+    return (value ?? "")
+      .replace(/[^\S\n]+/gu, " ")
+      .replace(/\n{3,}/gu, "\n\n")
+      .trim()
+      .slice(0, maxLength);
   }
 
   function mean(values: ReadonlyArray<number>): number {
@@ -3371,6 +3454,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     readonly chapters: ReadonlyArray<AssistantBookEvaluateChapterSample>;
   }): string {
     return JSON.stringify({
+      v: 2,
       story: input.storySources.map((source) => [source.fileName, source.size, Math.round(source.updatedAtMs)]),
       chapters: input.chapters.map((chapter) => [
         chapter.chapter,
@@ -3436,21 +3520,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const evidence: AssistantEvaluateEvidence[] = [
       {
         source: storyBible ? `book-story:${scope.bookId}:story_bible.md` : `book:${scope.bookId}:chapters`,
-        excerpt: normalizeEvaluateText(storyBible?.content ?? chapters[0]?.snippet ?? "暂无主线材料。"),
+        excerpt: normalizeEvaluateText(storyBible?.content ?? chapters[0]?.snippet ?? "暂无主线材料。", 500),
         reason: storyBible
           ? `主线评估基于 story_bible.md，并结合 ${chapters.length} 章的章节覆盖率 ${Math.round(coverage * 100)}%。`
           : "缺少 story_bible.md，主线分数退回到章节片段估算。",
       },
       {
         source: characterMatrix ? `book-story:${scope.bookId}:character_matrix.md` : `book:${scope.bookId}:chapters`,
-        excerpt: normalizeEvaluateText(characterMatrix?.content ?? chapters.at(-1)?.snippet ?? "暂无角色矩阵材料。"),
+        excerpt: normalizeEvaluateText(characterMatrix?.content ?? chapters.at(-1)?.snippet ?? "暂无角色矩阵材料。", 600),
         reason: characterMatrix
           ? "角色评分优先依据 character_matrix.md，并用章节样本校验人物行动是否持续出现。"
           : "缺少角色矩阵，仅能从章节正文推断角色连贯性。",
       },
       {
         source: pendingHooks ? `book-story:${scope.bookId}:pending_hooks.md` : `book:${scope.bookId}:chapters`,
-        excerpt: normalizeEvaluateText(pendingHooks?.content ?? chapters[Math.max(0, Math.floor(chapters.length / 2))]?.snippet ?? "暂无伏笔材料。"),
+        excerpt: normalizeEvaluateText(pendingHooks?.content ?? chapters[Math.max(0, Math.floor(chapters.length / 2))]?.snippet ?? "暂无伏笔材料。", 500),
         reason: pendingHooks
           ? `伏笔评分依据 pending_hooks.md 中识别出的 ${hookCount} 条钩子项。`
           : "缺少 pending_hooks.md，伏笔分数按正文估算。",
@@ -3476,7 +3560,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const blockingIssues = [
       ...(!storyBible ? ["缺少全书主线基线（story_bible.md），全书评估可信度受限。"] : []),
       ...(!characterMatrix ? ["缺少角色矩阵（character_matrix.md），角色线难以校验。"] : []),
-      ...(hookCount > 6 ? [`待回收伏笔较多（${hookCount} 条），建议先梳理 pending_hooks.md。`] : []),
+      ...(hookCount > Math.max(12, chapters.length * 5) ? [`待回收伏笔较多（${hookCount} 条），建议先梳理 pending_hooks.md。`] : []),
       ...(duplicateRatio >= 0.25 ? [`章节片段重复率约 ${Math.round(duplicateRatio * 100)}%，建议去重并拉开桥段差异。`] : []),
       ...(failedRuns > 0 ? [`最新章节运行中有 ${failedRuns} 条失败记录，需先处理阻断问题。`] : []),
     ];
@@ -4904,6 +4988,137 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ ok: true, runId });
   });
 
+  // --- Chapter Versions (built on chapter runs) ---
+
+  app.get("/api/books/:id/chapters/:chapter/versions", async (c) => {
+    const id = c.req.param("id");
+    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    if (Number.isNaN(chapterNum) || chapterNum < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    const runs = await chapterRunStore.listRuns(id, { chapter: chapterNum, limit: 100 });
+    const versions = runs
+      .filter((run) => run.status === "succeeded" && run.decision === "applied")
+      .map((run) => {
+        const diff = parseDiffData(run);
+        return {
+          versionId: run.runId,
+          createdAt: run.finishedAt ?? run.startedAt,
+          actionType: run.actionType,
+          label: run.appliedBrief ?? run.actionType,
+          hasContent: diff.beforeContent !== null || diff.afterContent !== null,
+        };
+      });
+    return c.json({ chapter: chapterNum, versions });
+  });
+
+  app.get("/api/books/:id/chapters/:chapter/versions/:versionId", async (c) => {
+    const id = c.req.param("id");
+    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const versionId = c.req.param("versionId");
+    const run = await chapterRunStore.getRun(id, versionId);
+    if (!run || run.chapter !== chapterNum) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const diff = parseDiffData(run);
+    return c.json({
+      versionId: run.runId,
+      chapter: run.chapter,
+      createdAt: run.finishedAt ?? run.startedAt,
+      actionType: run.actionType,
+      label: run.appliedBrief ?? run.actionType,
+      beforeContent: diff.beforeContent,
+      afterContent: diff.afterContent,
+    });
+  });
+
+  app.get("/api/books/:id/chapters/:chapter/diff", async (c) => {
+    const id = c.req.param("id");
+    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const fromId = c.req.query("from");
+    const toId = c.req.query("to");
+    if (!fromId || !toId) {
+      return c.json({ error: "Both 'from' and 'to' query params required" }, 400);
+    }
+    const [fromRun, toRun] = await Promise.all([
+      chapterRunStore.getRun(id, fromId),
+      chapterRunStore.getRun(id, toId),
+    ]);
+    if (!fromRun || fromRun.chapter !== chapterNum) {
+      return c.json({ error: `Version '${fromId}' not found` }, 404);
+    }
+    if (!toRun || toRun.chapter !== chapterNum) {
+      return c.json({ error: `Version '${toId}' not found` }, 404);
+    }
+    const fromDiff = parseDiffData(fromRun);
+    const toDiff = parseDiffData(toRun);
+    return c.json({
+      chapter: chapterNum,
+      from: {
+        versionId: fromRun.runId,
+        content: fromDiff.afterContent ?? fromDiff.beforeContent,
+      },
+      to: {
+        versionId: toRun.runId,
+        content: toDiff.afterContent ?? toDiff.beforeContent,
+      },
+    });
+  });
+
+  app.post("/api/books/:id/chapters/:chapter/restore/:versionId", async (c) => {
+    const id = c.req.param("id");
+    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const versionId = c.req.param("versionId");
+    const run = await chapterRunStore.getRun(id, versionId);
+    if (!run || run.chapter !== chapterNum) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const diff = parseDiffData(run);
+    const contentToRestore = diff.beforeContent;
+    if (!contentToRestore || contentToRestore.trim().length === 0) {
+      return c.json({ error: "No restorable content in this version" }, 409);
+    }
+
+    const bookDir = state.bookDir(id);
+    const chaptersDir = join(bookDir, "chapters");
+    const chapterPrefix = String(chapterNum).padStart(4, "0");
+    const files = await readdir(chaptersDir);
+    const chapterFile = files.find((file) => file.startsWith(chapterPrefix) && file.endsWith(".md"));
+    if (!chapterFile) {
+      return c.json({ error: `Chapter ${chapterNum} file not found` }, 404);
+    }
+    const chapterPath = join(chaptersDir, chapterFile);
+
+    const beforeRestore = await readFile(chapterPath, "utf-8").catch(() => "");
+    await writeFile(chapterPath, contentToRestore, "utf-8");
+
+    const restoreRun = await chapterRunStore.createRun({
+      bookId: id,
+      chapter: chapterNum,
+      actionType: "revise",
+      appliedBrief: `Restored to version ${versionId}`,
+    });
+    await completeChapterRun({
+      bookId: id,
+      runId: restoreRun.runId,
+      status: "succeeded",
+      decision: "applied",
+      data: {
+        beforeContent: beforeRestore,
+        afterContent: contentToRestore,
+        briefTrace: [],
+        restoredFromVersionId: versionId,
+      },
+    });
+
+    return c.json({
+      ok: true,
+      chapter: chapterNum,
+      restoredFromVersionId: versionId,
+      runId: restoreRun.runId,
+    });
+  });
+
   app.post("/api/runtime/clear", (c) => {
     const cleared = runtimeEvents.length;
     runtimeEvents.splice(0, runtimeEvents.length);
@@ -5054,6 +5269,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
     const payload = body as Record<string, unknown>;
     const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+    const sessionId = typeof payload.sessionId === "string" ? payload.sessionId.trim() : "";
     const scopeBookTitles = Array.isArray(payload.scopeBookTitles)
       ? (payload.scopeBookTitles as unknown[]).filter((t): t is string => typeof t === "string")
       : [];
@@ -5066,6 +5282,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         errors: [{ field: "prompt", message: "prompt must be a non-empty string" }],
       }, 422);
     }
+
+    const resolveScopedBookId = async (): Promise<string | null> => {
+      if (scopeBookIds.length === 1) {
+        return scopeBookIds[0]!;
+      }
+
+      const allBookIds = await state.listBooks();
+
+      if (sessionId.length > 0) {
+        const sessionMemory = await assistantMemoryService.readMemory("session", { sessionId });
+        const currentBookId = typeof (sessionMemory.memory?.data as { currentBookId?: unknown } | undefined)?.currentBookId === "string"
+          ? ((sessionMemory.memory?.data as { currentBookId?: string }).currentBookId ?? "").trim()
+          : "";
+        if (currentBookId && isSafeBookId(currentBookId) && allBookIds.includes(currentBookId)) {
+          return currentBookId;
+        }
+      }
+
+      if (scopeBookTitles.length === 1) {
+        const targetTitle = normalizeAssistantBookTitle(scopeBookTitles[0] ?? "");
+        if (targetTitle.length > 0) {
+          for (const bookId of allBookIds) {
+            try {
+              const book = await state.loadBookConfig(bookId);
+              if (normalizeAssistantBookTitle(book.title ?? "") === targetTitle) {
+                return bookId;
+              }
+            } catch {
+              // ignore unreadable book metadata
+            }
+          }
+        }
+      }
+
+      return null;
+    };
 
     // Short-circuit: model identity
     if (ASSISTANT_MODEL_IDENTITY_PATTERN.test(prompt)) {
@@ -5082,6 +5334,85 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return streamSSE(c, async (stream) => {
         await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: true, response: reply }) });
       });
+    }
+
+    // Deterministic chapter-revise lane:
+    // When user explicitly asks to modify a specific chapter, execute revise directly
+    // instead of letting agent freely chain into write-next or unrelated tools.
+    const userRequest = extractAssistantUserRequest(prompt);
+    const targetChapter = parseAssistantChapterFromInput(userRequest);
+    const shouldDirectRevise = ASSISTANT_REVISE_INTENT_PATTERN.test(userRequest)
+      && !ASSISTANT_WRITE_NEXT_PATTERN.test(userRequest)
+      && targetChapter !== undefined;
+    if (shouldDirectRevise) {
+      const targetBookId = await resolveScopedBookId();
+      if (!targetBookId) {
+        // Fallback to regular agent loop when book scope cannot be resolved
+        // (keeps backward compatibility for generic chat tests and legacy callers).
+      } else {
+      const reviseMode = inferAssistantReviseModeFromInput(userRequest);
+      broadcast("agent:start", { instruction: prompt });
+      return streamSSE(c, async (stream) => {
+        try {
+          await stream.writeSSE({
+            event: "assistant:progress",
+            data: JSON.stringify({ type: "tool_call", tool: "revise_chapter", args: { bookId: targetBookId, chapterNumber: targetChapter, mode: reviseMode } }),
+          });
+          broadcast("log", "工具调用：revise_chapter");
+
+          const reviseResponse = await app.request(`${ASSISTANT_INTERNAL_API_BASE}/api/books/${targetBookId}/revise/${targetChapter}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: reviseMode,
+              brief: userRequest,
+            }),
+          });
+          if (!reviseResponse.ok) {
+            const errorMsg = await parseApiErrorMessage(reviseResponse);
+            await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: false, error: errorMsg }) });
+            broadcast("agent:error", { instruction: prompt, error: errorMsg });
+            return;
+          }
+
+          const revisePayload = await reviseResponse.json().catch(() => null) as Record<string, unknown> | null;
+          const runId = typeof revisePayload?.runId === "string" ? revisePayload.runId : "";
+          if (!runId) {
+            const errorMsg = "修订任务已提交，但未返回 runId。";
+            await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: false, error: errorMsg }) });
+            broadcast("agent:error", { instruction: prompt, error: errorMsg });
+            return;
+          }
+
+          await stream.writeSSE({
+            event: "assistant:progress",
+            data: JSON.stringify({ type: "tool_result", tool: "revise_chapter", preview: `已提交第${targetChapter}章修订，等待完成…` }),
+          });
+
+          const run = await waitForChapterRunCompletion(targetBookId, runId, 12 * 60_000);
+          if (run.status === "failed") {
+            const errorMsg = run.error || "章节修订失败。";
+            await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: false, error: errorMsg }) });
+            broadcast("agent:error", { instruction: prompt, error: errorMsg });
+            return;
+          }
+
+          const decision = run.decision ?? "unknown";
+          const unchangedReason = run.decision === "unchanged"
+            ? (run.unchangedReason ?? NO_REVISIONS_APPLIED_MESSAGE)
+            : "";
+          const response = run.decision === "unchanged"
+            ? `已执行第${targetChapter}章修订（模式：${reviseMode}），结果未改动：${unchangedReason}`
+            : `已按你的要求完成第${targetChapter}章修订（模式：${reviseMode}，决策：${decision}）。`;
+          await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: true, response }) });
+          broadcast("agent:complete", { instruction: prompt, response });
+        } catch (e) {
+          const errorMsg = e instanceof Error ? e.message : String(e);
+          await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: false, error: errorMsg }) });
+          broadcast("agent:error", { instruction: prompt, error: errorMsg });
+        }
+      });
+      }
     }
 
     broadcast("agent:start", { instruction: prompt });
@@ -5583,6 +5914,53 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const taskId = `asst_t_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const resolveFallbackChapterForBook = async (bookId: string): Promise<number | undefined> => {
+      const nextChapter = await state.getNextChapterNumber(bookId);
+      if (!Number.isInteger(nextChapter)) {
+        return undefined;
+      }
+      // Use the latest existing chapter when user says "当前章节" but does not provide a number.
+      return Math.max(1, nextChapter - 1);
+    };
+
+    const hydratePlanChapters = async (plan: AssistantPlanStep[]): Promise<AssistantPlanStep[]> => {
+      const cache = new Map<string, number>();
+      const getFallback = async (bookId: string): Promise<number> => {
+        const cached = cache.get(bookId);
+        if (cached !== undefined) {
+          return cached;
+        }
+        const resolved = await resolveFallbackChapterForBook(bookId);
+        const value = resolved ?? 1;
+        cache.set(bookId, value);
+        return value;
+      };
+
+      const enriched: AssistantPlanStep[] = [];
+      for (const step of plan) {
+        const needsChapter = step.action === "audit" || step.action === "revise" || step.action === "re-audit";
+        if (!needsChapter || step.chapter !== undefined) {
+          enriched.push(step);
+          continue;
+        }
+        const stepBookId = typeof step.bookId === "string"
+          ? step.bookId
+          : (Array.isArray(step.bookIds) && step.bookIds.length === 1 && typeof step.bookIds[0] === "string"
+            ? step.bookIds[0]
+            : undefined);
+        if (!stepBookId) {
+          enriched.push(step);
+          continue;
+        }
+        const fallbackChapter = await getFallback(stepBookId);
+        enriched.push({
+          ...step,
+          chapter: fallbackChapter,
+        });
+      }
+      return enriched;
+    };
+
     if (intent === "goal_to_book") {
       if (parsedScope.scope.type !== "book-list" || parsedScope.scope.bookIds.length !== 1) {
         return c.json({
@@ -5609,15 +5987,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
+    const hydratedPlan = await hydratePlanChapters(drafted.plan);
     const requiresReleaseCandidateCheckpoint = ASSISTANT_RELEASE_CANDIDATE_PATTERN.test(input);
     const graph = requiresReleaseCandidateCheckpoint
-      ? appendAssistantCheckpointAfterLeafTasks(buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level))
-      : buildAssistantTaskGraphFromPlan(taskId, drafted.plan, drafted.risk.level);
+      ? appendAssistantCheckpointAfterLeafTasks(buildAssistantTaskGraphFromPlan(taskId, hydratedPlan, drafted.risk.level))
+      : buildAssistantTaskGraphFromPlan(taskId, hydratedPlan, drafted.risk.level);
     assistantTaskGraphs.set(taskId, graph);
     return c.json({
       taskId,
       intent,
-      plan: drafted.plan,
+      plan: hydratedPlan,
       graph,
       requiresConfirmation: true,
       risk: {
@@ -5742,12 +6121,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     assistantTaskGraphs.set(taskId, graph);
 
     const executableNodes = collectAssistantExecutableNodes(graph);
-    if (executableNodes.length === 0) {
+    const hasAnyTaskNode = graph.nodes.some((node) => node.type === "task");
+    if (!hasAnyTaskNode) {
       return c.json({
         code: "ASSISTANT_EXECUTE_VALIDATION_FAILED",
         errors: [{
           field: "graph",
-          message: "graph must include at least one executable audit/revise/re-audit task node with single book and chapter targets",
+          message: "graph must include at least one executable task node",
         }],
       }, 422);
     }
@@ -5755,7 +6135,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const permissionsInput = permissionsParsed.ok ? permissionsParsed.value : undefined;
     const policyPlan = flattenAssistantPolicyPlanFromGraph(graph);
 
-    const skillAuthorization = authorizeAssistantSkillPlan(executableNodes, permissionsInput);
+    const skillAuthorization = executableNodes.length > 0
+      ? authorizeAssistantSkillPlan(executableNodes, permissionsInput)
+      : { allow: true as const, denied: [] };
     if (!skillAuthorization.allow) {
       const reasons = skillAuthorization.denied.map((item) => item.reason);
       const finalBlockedMessage = reasons.join("; ");
@@ -6433,7 +6815,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const body: { mode?: string; brief?: string } = await c.req
       .json<{ mode?: string; brief?: string }>()
       .catch(() => ({ mode: "spot-fix" }));
-    const reviseMode = (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
+    const reviseMode = (body.mode ?? "spot-fix") as "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect" | "chapter-redesign";
 
     const appliedBrief = normalizeBriefValue(body.brief);
     const briefUsed = appliedBrief !== undefined;

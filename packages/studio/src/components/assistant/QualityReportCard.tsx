@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentPropsWithoutRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export type QualityReportScopeType = "chapter" | "book";
 export type QualityDimensionKey =
@@ -94,6 +96,49 @@ export function resolveQualityEvidence(
   }];
 }
 
+const evidenceMarkdownComponents = {
+  table: (props: ComponentPropsWithoutRef<"table">) => (
+    <div className="overflow-x-auto my-2">
+      <table
+        {...props}
+        className="w-full border-collapse text-xs"
+        style={{ minWidth: "600px" }}
+      />
+    </div>
+  ),
+  thead: (props: ComponentPropsWithoutRef<"thead">) => (
+    <thead {...props} className="bg-muted/60" />
+  ),
+  th: (props: ComponentPropsWithoutRef<"th">) => (
+    <th
+      {...props}
+      className="border border-border bg-muted/60 px-3 py-2 text-left text-xs font-bold text-foreground whitespace-nowrap"
+    />
+  ),
+  td: (props: ComponentPropsWithoutRef<"td">) => (
+    <td
+      {...props}
+      className="border border-border/70 px-3 py-2 text-xs text-foreground/80 align-top"
+      style={{ minWidth: "80px" }}
+    />
+  ),
+  tr: (props: ComponentPropsWithoutRef<"tr">) => (
+    <tr {...props} className="even:bg-muted/15 hover:bg-muted/25 transition-colors" />
+  ),
+  h1: (props: ComponentPropsWithoutRef<"h1">) => (
+    <h1 {...props} className="text-base font-bold mt-2 mb-1 text-foreground" />
+  ),
+  h2: (props: ComponentPropsWithoutRef<"h2">) => (
+    <h2 {...props} className="text-sm font-bold mt-2 mb-1 text-foreground" />
+  ),
+  h3: (props: ComponentPropsWithoutRef<"h3">) => (
+    <h3 {...props} className="text-sm font-semibold mt-1.5 mb-0.5 text-foreground/90" />
+  ),
+  p: (props: ComponentPropsWithoutRef<"p">) => (
+    <p {...props} className="my-1 text-xs leading-relaxed" />
+  ),
+};
+
 export function resolveQualityReportTabs(report: QualityReportBundle): ReadonlyArray<{
   readonly scopeType: QualityReportScopeType;
   readonly label: string;
@@ -107,8 +152,8 @@ export function resolveQualityReportTabs(report: QualityReportBundle): ReadonlyA
 
 export function QualityReportCard({
   report,
-  suggestedNextActions,
-  onRunNextAction,
+  suggestedNextActions: _suggestedNextActions,
+  onRunNextAction: _onRunNextAction,
 }: {
   report: QualityReportBundle;
   suggestedNextActions: ReadonlyArray<string>;
@@ -178,8 +223,10 @@ export function QualityReportCard({
       </div>
       {activeReport.blockingIssues.length > 0 && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-destructive">阻断问题</div>
-          <ul className="list-disc pl-4 space-y-1 text-xs text-destructive/90">
+          <div className={`text-xs font-medium ${_suggestedNextActions.includes("write-next") ? "text-amber-600 dark:text-amber-500" : "text-destructive"}`}>
+            {_suggestedNextActions.includes("write-next") ? "质量提示" : "阻断问题"}
+          </div>
+          <ul className={`list-disc pl-4 space-y-1 text-xs ${_suggestedNextActions.includes("write-next") ? "text-amber-600/90 dark:text-amber-500/90" : "text-destructive/90"}`}>
             {activeReport.blockingIssues.map((issue, index) => (
               <li key={`${issue}-${index}`} data-testid="assistant-quality-blocking-issue">{issue}</li>
             ))}
@@ -190,29 +237,20 @@ export function QualityReportCard({
         <div className="text-xs font-medium">证据</div>
         <ul className="space-y-2 text-xs text-muted-foreground">
           {evidenceRows.map((evidence, index) => (
-            <li key={`${evidence.source}-${index}`} className="rounded-md border border-border/50 px-2 py-2" data-testid="assistant-quality-evidence">
-              <div className="font-mono text-[11px] text-foreground/80">{evidence.source}</div>
-              <div className="mt-1">{evidence.excerpt}</div>
-              <div className="mt-1 text-foreground/80">{evidence.reason}</div>
+            <li key={`${evidence.source}-${index}`} className="rounded-md border border-border/50 px-3 py-2.5" data-testid="assistant-quality-evidence">
+              <div className="font-mono text-[11px] text-muted-foreground/80 mb-1">{evidence.source}</div>
+              <div className="max-h-64 overflow-y-auto overflow-x-auto">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={evidenceMarkdownComponents}>
+                  {evidence.excerpt}
+                </ReactMarkdown>
+              </div>
+              <div className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed italic">
+                {evidence.reason}
+              </div>
             </li>
           ))}
         </ul>
       </div>
-      {suggestedNextActions.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          {suggestedNextActions.map((action) => (
-            <button
-              key={action}
-              onClick={() => onRunNextAction(action)}
-              className="h-8 rounded-md border border-border px-3 text-xs text-muted-foreground hover:text-primary"
-              data-testid="assistant-quality-next-action"
-              aria-label={`执行下一步动作 ${action}`}
-            >
-              下一步：{action}
-            </button>
-          ))}
-        </div>
-      )}
     </section>
   );
 }

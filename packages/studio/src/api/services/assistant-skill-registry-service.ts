@@ -68,6 +68,21 @@ const SKILL_REGISTRY: ReadonlyArray<AssistantSkillRegistryEntry> = [
     actionMatchers: ["revise", "revise:spot-fix", "revise:polish", "revise:rework"],
   },
   {
+    skillId: "builtin.rewrite-in-place",
+    layer: "builtin",
+    metadata: {
+      name: "rewrite-in-place",
+      version: "1.0.0",
+      requiredEnv: [],
+      requiredBins: [],
+      riskLevel: "high",
+      allowedScopes: ["single", "multi"],
+      rollbackSupport: true,
+    },
+    requiredPermissions: ["assistant.execute.rewrite-in-place"],
+    actionMatchers: ["revise:chapter-redesign"],
+  },
+  {
     skillId: "builtin.rewrite",
     layer: "builtin",
     metadata: {

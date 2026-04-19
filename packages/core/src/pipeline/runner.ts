@@ -63,6 +63,7 @@ const INTENT_DRIVEN_BLOCKING_DRIFT_TOLERANCE_BY_MODE: Readonly<Record<ReviseMode
   rewrite: 2,
   rework: 2,
   "anti-detect": 2,
+  "chapter-redesign": 3,
 };
 
 function isSequenceLevelCategory(category: string): boolean {

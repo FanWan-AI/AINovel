@@ -59,10 +59,9 @@ describe("AssistantView", () => {
     expect(html).toContain("assistant-scope-selector");
     expect(html).toContain("assistant-message-list");
     expect(html).toContain("assistant-input-panel");
-    expect(html).toContain("assistant-template-panel");
-    expect(html).toContain("assistant-goal-to-book-wizard");
+    expect(html).not.toContain("assistant-goal-to-book-wizard");
     expect(html).toContain("assistant-empty-state");
-    expect(html).toContain("生成大纲");
+    expect(html).toContain("请选择一本书（单选）");
   });
 
   it("builds a goal-to-book confirmation draft from wizard input", () => {

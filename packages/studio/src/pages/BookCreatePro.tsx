@@ -3,6 +3,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { CreativeBrief } from "../shared/contracts";
 import { useColors } from "../hooks/use-colors";
+import { callConfirmCreate, buildReviewDraft } from "./BookCreateReview";
 import { ProStepIndicator } from "../components/create/ProStepIndicator";
 import {
   ProStepBlueprint,
@@ -99,13 +100,18 @@ export function validateStep(step: ProStep, form: ProFormState): ReturnType<type
 interface Nav {
   toDashboard: () => void;
   toBookCreateEntry: () => void;
+  toBook: (bookId: string) => void;
+}
+
+interface CreateFlowProps {
+  setBrief: (briefId: string, brief: CreativeBrief) => void;
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
+export function BookCreatePro({ nav, theme, t, flow }: { nav: Nav; theme: Theme; t: TFunction; flow: CreateFlowProps }) {
   const c = useColors(theme);
 
   // Restore draft from localStorage — each lazy initializer reads from the same key;
@@ -115,6 +121,8 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
   const [step, setStep] = useState<ProStep>(0);
   const [error, setError] = useState<string | null>(null);
   const [brief, setBrief] = useState<CreativeBrief | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Auto-save draft whenever form or highestValidated changes.
   useEffect(() => {
@@ -197,18 +205,45 @@ export function BookCreatePro({ nav, theme, t }: { nav: Nav; theme: Theme; t: TF
           )}
         </div>
 
+        {submitError && (
+          <div className={`border ${c.error} rounded-md px-4 py-3 text-sm`}>
+            {submitError}
+          </div>
+        )}
+
         <div className="flex gap-3">
           <button
-            onClick={() => { setBrief(null); setStep(0); }}
-            className={`flex-1 px-4 py-3 ${c.btnSecondary} rounded-md font-medium text-base`}
+            onClick={() => { setBrief(null); setStep(0); setSubmitError(null); }}
+            disabled={submitting}
+            className={`flex-1 px-4 py-3 ${c.btnSecondary} rounded-md font-medium text-base disabled:opacity-50`}
           >
             {t("pro.editAgain")}
           </button>
           <button
-            onClick={nav.toDashboard}
-            className={`flex-1 px-4 py-3 ${c.btnPrimary} rounded-md font-medium text-base`}
+            disabled={submitting}
+            onClick={async () => {
+              setSubmitting(true);
+              setSubmitError(null);
+              try {
+                const draft = buildReviewDraft(brief);
+                const response = await callConfirmCreate({
+                  mode: "simple",
+                  briefId: null,
+                  brief,
+                  draft,
+                });
+                clearDraft(PRO_DRAFT_KEY);
+                flow.setBrief(response.bookId, brief);
+                nav.toBook(response.bookId);
+              } catch (e) {
+                setSubmitError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+            className={`flex-1 px-4 py-3 ${c.btnPrimary} rounded-md font-medium text-base disabled:opacity-50`}
           >
-            {t("pro.done")}
+            {submitting ? "创建中…" : t("pro.done")}
           </button>
         </div>
       </div>

@@ -36,7 +36,7 @@ describe("QualityReportCard", () => {
     expect(bookRows.map((row) => row.score)).toEqual([85, 79, 74, 68, 90, 62]);
   });
 
-  it("renders chapter/book toggles, cache badge, evidence and next action triggers", () => {
+  it("renders chapter/book toggles, cache badge and markdown evidence", () => {
     const onRunNextAction = vi.fn();
     const html = renderToStaticMarkup(
       createElement(QualityReportCard, {
@@ -53,7 +53,7 @@ describe("QualityReportCard", () => {
             blockingIssues: ["动机承接偏弱"],
             evidence: [{
               source: "chapter-run:run_01:book:demo-book:chapter:14",
-              excerpt: "冲突目标与行动结果不一致",
+              excerpt: "| 维度 | 观察 |\n| --- | --- |\n| 冲突 | 目标与结果不一致 |",
               reason: "关键冲突未闭环",
             }],
           },
@@ -87,7 +87,8 @@ describe("QualityReportCard", () => {
     expect(html).toContain("已复用 book memory 缓存");
     expect(html).toContain("动机承接偏弱");
     expect(html).toContain("chapter-run:run_01");
-    expect(html).toContain("冲突目标与行动结果不一致");
-    expect(html).toContain("下一步：spot-fix");
+    expect(html).toContain("<table>");
+    expect(html).toContain("目标与结果不一致");
+    expect(html).not.toContain("下一步：spot-fix");
   });
 });
