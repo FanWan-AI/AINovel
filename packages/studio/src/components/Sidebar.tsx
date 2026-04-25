@@ -17,7 +17,7 @@ import {
 } from "../lib/assistant-conversations";
 import {
   BookOpen,
-  Bot,
+  Network,
   Plus,
   Sparkles,
   Settings,
@@ -205,8 +205,8 @@ export function Sidebar({
           onClick={nav.toDashboard}
         />
         <SidebarPrimaryItem
-          label="协作"
-          icon={<Bot size={16} />}
+          label="故事地图"
+          icon={<Network size={16} />}
           active={activePage === "collaboration"}
           onClick={nav.toCollab}
         />

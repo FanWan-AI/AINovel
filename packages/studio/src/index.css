@@ -391,6 +391,140 @@ h3 { font-size: 1.25rem; }
   opacity: 0.92;
 }
 
+/* Story graph: keep the canvas lively without turning labels into noise. */
+.story-graph-shell .react-flow__node {
+  animation: storyNodeIn 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.story-graph-shell .react-flow__edge.animated path {
+  stroke-dasharray: 8 10;
+  animation-duration: 1.8s;
+}
+
+.story-graph-shell .react-flow__edge-path {
+  transition: stroke-opacity 180ms ease, stroke-width 180ms ease;
+}
+
+@keyframes storyNodeIn {
+  from { opacity: 0; filter: blur(2px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+.story-evidence-markdown {
+  font-size: 0.875rem;
+  line-height: 1.75;
+  color: color-mix(in oklch, var(--foreground) 86%, transparent);
+}
+
+.story-evidence-markdown-compact {
+  font-size: 0.83rem;
+  line-height: 1.65;
+}
+
+.story-evidence-markdown p {
+  margin: 0.4rem 0;
+}
+
+.story-evidence-markdown ul,
+.story-evidence-markdown ol {
+  margin: 0.45rem 0;
+  padding-left: 1.15rem;
+}
+
+.story-evidence-markdown li {
+  margin: 0.16rem 0;
+}
+
+.story-evidence-markdown code {
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--secondary) 62%, transparent);
+  padding: 0.1rem 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+}
+
+.story-evidence-markdown table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--card) 82%, transparent);
+}
+
+.story-evidence-markdown th,
+.story-evidence-markdown td {
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 64%, transparent);
+  padding: 0.45rem 0.55rem;
+  vertical-align: top;
+  text-align: left;
+  word-break: break-word;
+}
+
+.story-evidence-markdown th {
+  background: color-mix(in oklch, var(--secondary) 70%, transparent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted-foreground);
+}
+
+.story-evidence-markdown td:first-child {
+  width: 5.5rem;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.story-evidence-markdown tr:last-child td {
+  border-bottom: 0;
+}
+
+.story-evidence-fields {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.story-evidence-fields-compact {
+  gap: 0.4rem;
+}
+
+.story-evidence-field {
+  display: grid;
+  grid-template-columns: minmax(4.8rem, 0.34fr) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--card) 76%, transparent);
+}
+
+.story-evidence-field dt {
+  margin: 0;
+  padding: 0.46rem 0.55rem;
+  border-right: 1px solid color-mix(in oklch, var(--border) 62%, transparent);
+  background: color-mix(in oklch, var(--secondary) 66%, transparent);
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.story-evidence-field dd {
+  margin: 0;
+  padding: 0.46rem 0.58rem;
+  color: color-mix(in oklch, var(--foreground) 88%, transparent);
+  font-size: 0.86rem;
+  line-height: 1.72;
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+.story-evidence-fields-compact .story-evidence-field dd {
+  font-size: 0.82rem;
+  line-height: 1.62;
+}
+
 .paper-sheet {
   background-color: var(--card);
   border: 1px solid var(--border);

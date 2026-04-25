@@ -3716,7 +3716,7 @@ describe("createStudioServer daemon lifecycle", () => {
       expect.anything(),
       "fresh-model",
       expect.any(Array),
-      expect.objectContaining({ maxTokens: 5 }),
+      expect.objectContaining({ maxTokens: 256 }),
     );
   });
 

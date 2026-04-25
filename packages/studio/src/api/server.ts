@@ -70,6 +70,7 @@ import {
   saveSteeringPrefs,
   validateSteeringPrefsInput,
 } from "./services/chapter-steering-service.js";
+import { buildStoryGraph } from "./services/story-graph-service.js";
 import {
   ASSISTANT_MARKET_MEMORY_TTL_MS,
   createAssistantMemoryService,
@@ -3944,6 +3945,61 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  app.get("/api/books/:id/story-graph", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const book = await loadBookConfigWithReleaseCandidateState(id);
+      const chapters = await state.loadChapterIndex(id);
+      const bookDir = state.bookDir(id);
+      const truthFiles: Record<string, string> = {};
+      const storyDir = join(bookDir, "story");
+      const graphSourceFiles = [
+        "author_intent.md",
+        "story_bible.md",
+        "volume_outline.md",
+        "book_rules.md",
+        "current_state.md",
+        "current_focus.md",
+        "pending_hooks.md",
+        "chapter_summaries.md",
+        "subplot_board.md",
+        "emotional_arcs.md",
+        "character_matrix.md",
+        "style_guide.md",
+        "style_profile.json",
+        "parent_canon.md",
+        "fanfic_canon.md",
+      ];
+
+      await Promise.all(graphSourceFiles.map(async (file) => {
+        try {
+          truthFiles[file] = await readFile(join(storyDir, file), "utf-8");
+        } catch {
+          truthFiles[file] = "";
+        }
+      }));
+
+      const graph = buildStoryGraph({
+        bookId: id,
+        title: typeof book.title === "string" ? book.title : id,
+        chapters: chapters.map((chapter) => ({
+          number: chapter.number,
+          title: chapter.title,
+          status: chapter.status,
+          wordCount: chapter.wordCount,
+        })),
+        truthFiles,
+      });
+
+      await mkdir(storyDir, { recursive: true });
+      await writeFile(join(storyDir, "story_graph.json"), JSON.stringify(graph, null, 2), "utf-8");
+
+      return c.json({ graph });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
   app.get("/api/books/:id/release-candidate/evaluate", async (c) => {
     const id = c.req.param("id");
     try {
@@ -6843,7 +6899,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       pipeline.reviseDraft(
         id,
         chapterNum,
-        reviseMode,
+        reviseMode as never,
       ).then(
         async (result) => {
           const decision = inferRunDecision("succeeded", result.applied);
@@ -7776,7 +7832,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const currentConfig = await loadCurrentProjectConfig({ requireApiKey: false });
       const client = createLLMClient(currentConfig.llm);
       const { chatCompletion } = await import("@actalk/inkos-core");
-      await chatCompletion(client, currentConfig.llm.model, [{ role: "user", content: "ping" }], { maxTokens: 5 });
+      await chatCompletion(client, currentConfig.llm.model, [
+        { role: "user", content: "用中文只回复两个字：正常" },
+      ], { maxTokens: 256 });
       checks.llmConnected = true;
     } catch { /* ignore */ }
 

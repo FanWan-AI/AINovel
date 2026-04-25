@@ -438,6 +438,21 @@ async function streamAssistantChat(
               } else if (data.type === "tool_result") {
                 callbacks.onProgress(`${displayName} 完成`);
               }
+            } else if (eventName === "log") {
+              const logMessage = typeof data.message === "string" ? data.message.trim() : "";
+              if (logMessage) {
+                callbacks.onProgress(logMessage);
+              }
+            } else if (eventName === "agent:start") {
+              callbacks.onProgress("任务已开始执行…");
+            } else if (eventName === "agent:complete") {
+              const finalResponse = typeof data.response === "string" ? data.response : lastResponse;
+              callbacks.onDone({ ok: true, response: finalResponse });
+              return;
+            } else if (eventName === "agent:error") {
+              const errorMessage = typeof data.error === "string" ? data.error : "后台执行失败";
+              callbacks.onDone({ ok: false, error: errorMessage });
+              return;
             } else if (eventName === "assistant:message") {
               if (typeof data.content === "string") {
                 lastResponse = data.content;

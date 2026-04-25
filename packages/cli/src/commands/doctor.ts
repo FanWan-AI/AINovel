@@ -191,8 +191,8 @@ export const doctorCommand = new Command("doctor")
         const client = createLLMClient(llmConfig);
         log("\n  [..] Testing API connectivity...");
         const response = await chatCompletion(client, llmConfig.model, [
-          { role: "user", content: "Say OK" },
-        ], { maxTokens: 16 });
+          { role: "user", content: "用中文只回复两个字：正常" },
+        ], { maxTokens: 256 });
 
         checks.push({
           name: "API Connectivity",

@@ -15,6 +15,7 @@ import { StyleManager } from "./pages/StyleManager";
 import { ImportManager } from "./pages/ImportManager";
 import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
+import { StoryGraphView } from "./pages/StoryGraphView";
 import { AssistantView } from "./pages/AssistantView";
 import { ObservabilityDashboard } from "./pages/ObservabilityDashboard";
 import {
@@ -323,10 +324,10 @@ export function App() {
         </header>
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto scroll-smooth">
+        <main className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
           <div className={contentContainerClass}>
             {currentRoute.page === "dashboard" && <Dashboard nav={nav} sse={sse} theme={theme} t={t} />}
-            {currentRoute.page === "collaboration" && <CollaborationBlankPage />}
+            {currentRoute.page === "collaboration" && <StoryGraphView nav={nav} />}
             {currentRoute.page === "assistant" && (
               <AssistantView
                 nav={nav}
@@ -377,10 +378,6 @@ export function App() {
       />
     </div>
   );
-}
-
-function CollaborationBlankPage() {
-  return <div className="min-h-full" data-testid="collaboration-blank-page" />;
 }
 
 function RuntimeEventFeedOnly({

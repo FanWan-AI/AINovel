@@ -103,7 +103,7 @@ interface ChapterRunSummaryData {
   readonly finishedAt: string | null;
 }
 
-type ReviseMode = "spot-fix" | "polish" | "rework" | "anti-detect" | "chapter-redesign";
+type ReviseMode = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "chapter-redesign";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
 type ChapterLifecycleAction = "revise" | "rewrite" | "anti-detect" | "resync";
@@ -202,6 +202,7 @@ export function resolveChapterTaskActionType(kind: ChapterActionKind, mode?: Rev
     if (mode === "chapter-redesign") return "chapter-redesign";
     return "rework";
   }
+  if (mode === "rewrite") return "rewrite";
   if (mode === "polish" || mode === "rework" || mode === "anti-detect" || mode === "chapter-redesign") return mode;
   return "spot-fix";
 }
@@ -430,7 +431,7 @@ export function BookDetail({
     if (data?.bookId !== bookId) return;
     const normalizedEvent = normalizeStudioEventName(recent.event);
 
-    if (normalizedEvent === "write:start") {
+    if (normalizedEvent === "write:start" || normalizedEvent === "write-next:start") {
       setWriteRequestPending(false);
       return;
     }
@@ -848,8 +849,8 @@ export function BookDetail({
             disabled={writing || drafting}
             className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
           >
-            <Zap size={14} />
-            {t("writeNext.quickWrite")}
+            {writing ? <div className="w-3.5 h-3.5 border-2 border-foreground/20 border-t-foreground rounded-full animate-spin" /> : <Zap size={14} />}
+            {writing ? t("dash.writing") : t("writeNext.quickWrite")}
           </button>
         </div>
       </div>

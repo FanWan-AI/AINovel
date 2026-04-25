@@ -317,6 +317,7 @@ export async function runAgentLoop(
       role: "assistant" as const,
       content: result.content || null,
       ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
+      ...(result.reasoningContent ? { reasoningContent: result.reasoningContent } : {}),
     });
 
     if (result.content) {

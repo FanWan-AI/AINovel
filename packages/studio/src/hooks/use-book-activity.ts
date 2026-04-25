@@ -1,10 +1,19 @@
 import type { SSEMessage } from "./use-sse";
 
-const START_EVENTS = new Set(["write:start", "draft:start"]);
-const TERMINAL_EVENTS = new Set(["write:complete", "write:error", "draft:complete", "draft:error"]);
+const START_EVENTS = new Set(["write:start", "write-next:start", "draft:start"]);
+const TERMINAL_EVENTS = new Set([
+  "write:complete",
+  "write:error",
+  "write-next:success",
+  "write-next:fail",
+  "draft:complete",
+  "draft:error",
+]);
 const BOOK_REFRESH_EVENTS = new Set([
   "write:complete",
   "write:error",
+  "write-next:success",
+  "write-next:fail",
   "draft:complete",
   "draft:error",
   "rewrite:complete",
@@ -23,6 +32,8 @@ const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
   "book:error",
   "write:complete",
   "write:error",
+  "write-next:success",
+  "write-next:fail",
   "draft:complete",
   "draft:error",
   "rewrite:complete",
@@ -87,14 +98,17 @@ export function deriveBookActivity(messages: ReadonlyArray<SSEMessage>, bookId: 
 
     switch (message.event) {
       case "write:start":
+      case "write-next:start":
         writing = true;
         lastError = null;
         break;
       case "write:complete":
+      case "write-next:success":
         writing = false;
         lastError = null;
         break;
       case "write:error":
+      case "write-next:fail":
         writing = false;
         lastError = typeof data?.error === "string" ? data.error : "Unknown error";
         break;

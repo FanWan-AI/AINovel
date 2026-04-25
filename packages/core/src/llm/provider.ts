@@ -101,12 +101,18 @@ export interface ToolCall {
 export type AgentMessage =
   | { readonly role: "system"; readonly content: string }
   | { readonly role: "user"; readonly content: string }
-  | { readonly role: "assistant"; readonly content: string | null; readonly toolCalls?: ReadonlyArray<ToolCall> }
+  | {
+      readonly role: "assistant";
+      readonly content: string | null;
+      readonly toolCalls?: ReadonlyArray<ToolCall>;
+      readonly reasoningContent?: string;
+    }
   | { readonly role: "tool"; readonly toolCallId: string; readonly content: string };
 
 export interface ChatWithToolsResult {
   readonly content: string;
   readonly toolCalls: ReadonlyArray<ToolCall>;
+  readonly reasoningContent?: string;
 }
 
 // === Factory ===
@@ -196,9 +202,11 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
 
 function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; readonly model?: string }): Error {
   const msg = String(error);
+  const providerMessage = extractProviderErrorMessage(error);
   const ctxLine = context
     ? `\n  (baseUrl: ${context.baseUrl}, model: ${context.model})`
     : "";
+  const providerLine = providerMessage ? `\n  提供方原始信息：${providerMessage}` : "";
 
   if (msg.includes("400")) {
     return new Error(
@@ -206,7 +214,7 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `  1. 模型名称不正确（检查 INKOS_LLM_MODEL）\n` +
       `  2. 提供方不支持某些参数（如 max_tokens、stream）\n` +
       `  3. 消息格式不兼容（部分提供方不支持 system role）\n` +
-      `  建议：检查提供方文档，确认该接口要求流式开启、流式关闭，还是根本不支持 stream${ctxLine}`,
+      `  建议：检查提供方文档，确认该接口要求流式开启、流式关闭，还是根本不支持 stream${ctxLine}${providerLine}`,
     );
   }
   if (msg.includes("403")) {
@@ -228,7 +236,14 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `API 返回 429 (请求过多)。请稍后重试，或检查 API 配额。${ctxLine}`,
     );
   }
-  if (msg.includes("Connection error") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND") || msg.includes("fetch failed")) {
+  if (
+    msg.includes("Connection error") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("fetch failed") ||
+    msg.includes("Premature close") ||
+    msg.includes("Invalid response body")
+  ) {
     return new Error(
       `无法连接到 API 服务。可能原因：\n` +
       `  1. baseUrl 地址不正确（当前：${context?.baseUrl ?? "未知"}）\n` +
@@ -238,6 +253,16 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
     );
   }
   return error instanceof Error ? error : new Error(msg);
+}
+
+function extractProviderErrorMessage(error: unknown): string {
+  const maybeError = error as {
+    readonly error?: { readonly message?: unknown };
+    readonly message?: unknown;
+  };
+  const raw = maybeError.error?.message ?? maybeError.message;
+  if (typeof raw !== "string") return "";
+  return raw.replace(/\s+/gu, " ").trim().slice(0, 500);
 }
 
 function wrapStreamRequiredError(
@@ -279,53 +304,88 @@ export async function chatCompletion(
   };
   const onStreamProgress = options?.onStreamProgress;
   const errorCtx = { baseUrl: client._openai?.baseURL ?? "(anthropic)", model };
+  const maxAttempts = 3;
 
-  try {
-    if (client.provider === "anthropic") {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (client.provider === "anthropic") {
+        return client.stream
+          ? await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onStreamProgress)
+          : await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+      }
+      if (client.apiFormat === "responses") {
+        return client.stream
+          ? await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress)
+          : await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
+      }
       return client.stream
-        ? await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onStreamProgress)
-        : await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
-    }
-    if (client.apiFormat === "responses") {
-      return client.stream
-        ? await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress)
-        : await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
-    }
-    return client.stream
-      ? await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress)
-      : await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
-  } catch (error) {
-    // Stream interrupted but partial content is usable — return truncated response
-    if (error instanceof PartialResponseError) {
-      return {
-        content: error.partialContent,
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      };
-    }
+        ? await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress)
+        : await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
+    } catch (error) {
+      // Stream interrupted but partial content is usable — return truncated response
+      if (error instanceof PartialResponseError) {
+        return {
+          content: error.partialContent,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        };
+      }
 
-    // Auto-fallback: if streaming failed, retry with sync (many proxies don't support SSE)
-    if (client.stream) {
-      const isStreamRelated = isLikelyStreamError(error);
-      if (isStreamRelated) {
-        try {
-          if (client.provider === "anthropic") {
-            return await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+      let finalError = error;
+
+      // Auto-fallback: if streaming failed, retry with sync (many proxies don't support SSE)
+      if (client.stream) {
+        const isStreamRelated = isLikelyStreamError(error);
+        if (isStreamRelated) {
+          try {
+            if (client.provider === "anthropic") {
+              return await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+            }
+            if (client.apiFormat === "responses") {
+              return await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
+            }
+            return await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
+          } catch (syncError) {
+            if (isStreamRequiredError(syncError)) {
+              throw wrapStreamRequiredError(error, syncError, errorCtx);
+            }
+            finalError = syncError;
           }
-          if (client.apiFormat === "responses") {
-            return await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
-          }
-          return await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
-        } catch (syncError) {
-          if (isStreamRequiredError(syncError)) {
-            throw wrapStreamRequiredError(error, syncError, errorCtx);
-          }
-          throw wrapLLMError(syncError, errorCtx);
         }
       }
-    }
 
-    throw wrapLLMError(error, errorCtx);
+      if (attempt < maxAttempts && isRetryableLLMError(finalError)) {
+        await delay(750 * attempt);
+        continue;
+      }
+
+      throw wrapLLMError(finalError, errorCtx);
+    }
   }
+
+  throw new Error("LLM request failed after retries.");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableLLMError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return (
+    msg.includes("connection error") ||
+    msg.includes("fetch failed") ||
+    msg.includes("invalid response body") ||
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("etimedout") ||
+    msg.includes("timeout") ||
+    msg.includes("terminated") ||
+    msg.includes("premature close") ||
+    msg.includes("socket") ||
+    msg.includes("502") ||
+    msg.includes("503") ||
+    msg.includes("504")
+  );
 }
 
 function isLikelyStreamError(error: unknown): boolean {
@@ -507,11 +567,14 @@ async function chatWithToolsOpenAIChat(
   });
 
   let content = "";
+  let reasoningContent = "";
   const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
 
   for await (const chunk of stream) {
     const delta = chunk.choices[0]?.delta;
     if (delta?.content) content += delta.content;
+    const reasoningDelta = (delta as { reasoning_content?: unknown } | undefined)?.reasoning_content;
+    if (typeof reasoningDelta === "string") reasoningContent += reasoningDelta;
     if (delta?.tool_calls) {
       for (const tc of delta.tool_calls) {
         const existing = toolCallMap.get(tc.index);
@@ -529,7 +592,7 @@ async function chatWithToolsOpenAIChat(
   }
 
   const toolCalls: ToolCall[] = [...toolCallMap.values()];
-  return { content, toolCalls };
+  return { content, toolCalls, ...(reasoningContent ? { reasoningContent } : {}) };
 }
 
 function agentMessagesToOpenAIChat(
@@ -547,10 +610,13 @@ function agentMessagesToOpenAIChat(
       continue;
     }
     if (msg.role === "assistant") {
-      const assistantMsg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam = {
+      const assistantMsg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {
         role: "assistant",
         content: msg.content ?? null,
       };
+      if (msg.reasoningContent) {
+        assistantMsg.reasoning_content = msg.reasoningContent;
+      }
       if (msg.toolCalls && msg.toolCalls.length > 0) {
         assistantMsg.tool_calls = msg.toolCalls.map((tc) => ({
           id: tc.id,
@@ -706,6 +772,7 @@ async function chatWithToolsOpenAIResponses(
   });
 
   let content = "";
+  let reasoningContent = "";
   const toolCalls: ToolCall[] = [];
 
   for await (const event of stream) {
@@ -721,7 +788,7 @@ async function chatWithToolsOpenAIResponses(
     }
   }
 
-  return { content, toolCalls };
+  return { content, toolCalls, ...(reasoningContent ? { reasoningContent } : {}) };
 }
 
 function agentMessagesToResponsesInput(
