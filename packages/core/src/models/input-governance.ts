@@ -57,6 +57,43 @@ export const HookAgendaSchema = z.object({
 
 export type HookAgenda = z.infer<typeof HookAgendaSchema>;
 
+export const ChapterSteeringPrioritySchema = z.enum(["soft", "normal", "hard"]);
+export type ChapterSteeringPriority = z.infer<typeof ChapterSteeringPrioritySchema>;
+
+export const ChapterSteeringContractSchema = z.object({
+  goal: z.string().min(1).optional(),
+  mustInclude: z.array(z.string().min(1)).default([]),
+  mustAvoid: z.array(z.string().min(1)).default([]),
+  sceneBeats: z.array(z.string().min(1)).default([]),
+  payoffRequired: z.string().min(1).optional(),
+  endingHook: z.string().min(1).optional(),
+  priority: ChapterSteeringPrioritySchema.default("normal"),
+  rawRequest: z.string().min(1).optional(),
+});
+
+export type ChapterSteeringContract = z.infer<typeof ChapterSteeringContractSchema>;
+
+export const ChapterBlueprintSceneSchema = z.object({
+  beat: z.string().min(1),
+  conflict: z.string().min(1),
+  informationGap: z.string().min(1),
+  turn: z.string().min(1),
+  payoff: z.string().min(1),
+  cost: z.string().min(1),
+});
+
+export type ChapterBlueprintScene = z.infer<typeof ChapterBlueprintSceneSchema>;
+
+export const ChapterBlueprintSchema = z.object({
+  openingHook: z.string().min(1),
+  scenes: z.array(ChapterBlueprintSceneSchema).min(1).max(8),
+  payoffRequired: z.string().min(1),
+  endingHook: z.string().min(1),
+  contractSatisfaction: z.array(z.string().min(1)).default([]),
+});
+
+export type ChapterBlueprint = z.infer<typeof ChapterBlueprintSchema>;
+
 export const ChapterIntentSchema = z.object({
   chapter: z.number().int().min(1),
   goal: z.string().min(1),
@@ -68,6 +105,8 @@ export const ChapterIntentSchema = z.object({
   mustKeep: z.array(z.string()).default([]),
   mustAvoid: z.array(z.string()).default([]),
   styleEmphasis: z.array(z.string()).default([]),
+  steeringContract: ChapterSteeringContractSchema.optional(),
+  blueprint: ChapterBlueprintSchema.optional(),
   conflicts: z.array(ChapterConflictSchema).default([]),
   hookAgenda: HookAgendaSchema.default({
     pressureMap: [],

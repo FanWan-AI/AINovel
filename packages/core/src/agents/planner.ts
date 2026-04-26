@@ -3,7 +3,15 @@ import { join } from "node:path";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
-import { ChapterIntentSchema, type ChapterConflict, type ChapterIntent } from "../models/input-governance.js";
+import {
+  ChapterBlueprintSchema,
+  ChapterIntentSchema,
+  ChapterSteeringContractSchema,
+  type ChapterBlueprint,
+  type ChapterConflict,
+  type ChapterIntent,
+  type ChapterSteeringContract,
+} from "../models/input-governance.js";
 import {
   parseChapterSummariesMarkdown,
   renderHookSnapshot,
@@ -67,10 +75,18 @@ export class PlannerAgent extends BaseAgent {
 
     const outlineNode = this.findOutlineNode(volumeOutline, input.chapterNumber);
     const matchedOutlineAnchor = this.hasMatchedOutlineAnchor(volumeOutline, input.chapterNumber);
-    const goal = this.deriveGoal(input.externalContext, currentFocus, authorIntent, outlineNode, input.chapterNumber);
+    const steeringContract = this.parseExternalSteeringContract(input.externalContext);
+    const goal = steeringContract?.goal
+      ?? this.deriveGoal(input.externalContext, currentFocus, authorIntent, outlineNode, input.chapterNumber);
     const parsedRules = parseBookRules(bookRulesRaw);
-    const mustKeep = this.collectMustKeep(currentState, storyBible);
-    const mustAvoid = this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions);
+    const mustKeep = this.unique([
+      ...this.collectMustKeep(currentState, storyBible),
+      ...(steeringContract?.mustInclude ?? []),
+    ]).slice(0, 10);
+    const mustAvoid = this.unique([
+      ...this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions),
+      ...(steeringContract?.mustAvoid ?? []),
+    ]).slice(0, 12);
     const styleEmphasis = this.collectStyleEmphasis(authorIntent, currentFocus);
     const conflicts = this.collectConflicts(input.externalContext, currentFocus, outlineNode, volumeOutline);
     const planningAnchor = conflicts.length > 0 ? undefined : outlineNode;
@@ -99,6 +115,17 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries,
     });
 
+    const blueprint = this.buildChapterBlueprint({
+      language: input.book.language ?? "zh",
+      goal,
+      outlineNode,
+      steeringContract,
+      sceneDirective: directives.sceneDirective,
+      hookAgendaSummary: hookAgenda.mustAdvance.length > 0
+        ? hookAgenda.mustAdvance.join(", ")
+        : undefined,
+    });
+
     const intent = ChapterIntentSchema.parse({
       chapter: input.chapterNumber,
       goal,
@@ -107,6 +134,8 @@ export class PlannerAgent extends BaseAgent {
       mustKeep,
       mustAvoid,
       styleEmphasis,
+      ...(steeringContract ? { steeringContract } : {}),
+      blueprint,
       conflicts,
       hookAgenda,
     });
@@ -188,6 +217,194 @@ export class PlannerAgent extends BaseAgent {
     return `Advance chapter ${chapterNumber} with clear narrative focus.`;
   }
 
+  private stripMetaCommand(text: string): string {
+    const stripped = text
+      .replace(/^(?:请\s*)?(?:写|续写|继续写)(?:下一章|第.{0,4}章|一章|章节)?[，,。\s：:]+/u, "")
+      .trim();
+    return stripped.length > 0 ? stripped : text.trim();
+  }
+
+  private extractImplicitRequirements(text: string): string[] {
+    const items: string[] = [];
+    // Match clauses containing 必须/一定要: capture up to ~20 chars around the marker
+    const re = /([^，。；,.！!?？\n]{0,10}(?:必须(?:要)?|一定要)[^，。；,.！!?？\n]{0,15})/gu;
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const clause = match[1].replace(/^[，。；,.\s]+|[，。；,.\s]+$/gu, "").trim();
+      if (clause.length > 2 && !items.includes(clause)) items.push(clause);
+    }
+    return items.slice(0, 5);
+  }
+
+  private extractImplicitAvoidances(text: string): string[] {
+    const items: string[] = [];
+    const re = /(?:不要|不能|别(?![人说的])|避免)([^，。；,.！!?？\n]{2,15})/gu;
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const item = match[1].trim();
+      if (item.length > 1 && !items.includes(item)) items.push(item);
+    }
+    return items.slice(0, 5);
+  }
+
+  private parseExternalSteeringContract(externalContext?: string): ChapterSteeringContract | undefined {
+    if (!externalContext || externalContext.trim().length === 0) return undefined;
+
+    const rawGoal = this.extractSectionFirstDirective(externalContext, [
+      "chapter goal",
+      "goal",
+      "本章目标",
+      "章节目标",
+      "author brief",
+      "brief",
+      "创作简述",
+      "用户建议",
+    ]) ?? this.extractFirstDirective(externalContext);
+    const goal = rawGoal ? this.stripMetaCommand(rawGoal) : undefined;
+
+    const sectionMustInclude = this.extractSectionList(externalContext, [
+      "must include",
+      "include",
+      "必须包含",
+      "必须出现",
+      "一定要写",
+    ]);
+    const mustInclude = sectionMustInclude.length > 0
+      ? sectionMustInclude
+      : this.extractImplicitRequirements(externalContext);
+
+    const sectionMustAvoid = this.extractSectionList(externalContext, [
+      "must avoid",
+      "avoid",
+      "避免元素",
+      "避免",
+      "不要写",
+    ]);
+    const mustAvoid = sectionMustAvoid.length > 0
+      ? sectionMustAvoid
+      : this.extractImplicitAvoidances(externalContext);
+    const sceneBeats = this.extractSectionList(externalContext, [
+      "scene beats",
+      "beats",
+      "场景节拍",
+      "剧情节拍",
+      "场景安排",
+    ]);
+    const payoffRequired = this.extractSectionFirstDirective(externalContext, [
+      "payoff required",
+      "payoff",
+      "爽点",
+      "回报",
+      "兑现",
+    ]);
+    const endingHook = this.extractSectionFirstDirective(externalContext, [
+      "ending hook",
+      "hook",
+      "章尾钩子",
+      "结尾钩子",
+      "悬念",
+    ]);
+    const priorityText = this.extractSectionFirstDirective(externalContext, [
+      "priority",
+      "优先级",
+    ]);
+    const priority = /hard|必须|强制|硬约束/i.test(priorityText ?? externalContext)
+      ? "hard"
+      : /soft|参考|可选/i.test(priorityText ?? "")
+        ? "soft"
+        : "normal";
+
+    return ChapterSteeringContractSchema.parse({
+      ...(goal ? { goal } : {}),
+      mustInclude,
+      mustAvoid,
+      sceneBeats,
+      ...(payoffRequired ? { payoffRequired } : {}),
+      ...(endingHook ? { endingHook } : {}),
+      priority,
+      rawRequest: externalContext.trim(),
+    });
+  }
+
+  private buildChapterBlueprint(input: {
+    readonly language: "zh" | "en";
+    readonly goal: string;
+    readonly outlineNode?: string;
+    readonly steeringContract?: ChapterSteeringContract;
+    readonly sceneDirective?: string;
+    readonly hookAgendaSummary?: string;
+  }): ChapterBlueprint {
+    const isEn = input.language === "en";
+    const contract = input.steeringContract;
+    const mustIncludeItems = contract?.mustInclude ?? [];
+
+    const defaultSceneSeeds = isEn
+      ? [
+          `Open on a concrete pressure point tied to: ${input.goal}`,
+          mustIncludeItems.length > 0
+            ? `Force the protagonist to directly confront: ${mustIncludeItems[0]}—no detours`
+            : "Force the protagonist to make an active choice under incomplete information.",
+          mustIncludeItems.length > 1
+            ? `Build toward: ${mustIncludeItems.slice(1).join(", ")}, with resistance from a capable opponent`
+            : "Introduce resistance from a competent opponent or ally with their own agenda.",
+          "Land a visible payoff, reversal, or cost before the chapter ends.",
+        ]
+      : [
+          `用一个具体压力点开场，直接指向：${input.goal}`,
+          mustIncludeItems.length > 0
+            ? `主角必须直面：${mustIncludeItems[0]}，不能回避或绕路`
+            : "让主角在信息不完整时做出主动选择。",
+          mustIncludeItems.length > 1
+            ? `推进至：${mustIncludeItems.slice(1).join("、")}，对手或盟友制造直接阻力`
+            : "让有能力的对手或盟友制造阻力，体现其独立诉求。",
+          "章内必须落下一个可见爽点、反转或代价。",
+        ];
+
+    const sceneSeeds = contract?.sceneBeats.length
+      ? contract.sceneBeats.slice(0, 6)
+      : defaultSceneSeeds;
+
+    const payoff = contract?.payoffRequired
+      ?? (isEn
+        ? "Give the reader a concrete change in leverage, knowledge, relationship, or resources."
+        : "给读者一个具体可感的变化：筹码、信息、关系或资源必须至少改变一项。");
+    const endingHook = contract?.endingHook
+      ?? (isEn
+        ? "End on a renewed question created by the payoff, not on vague atmosphere."
+        : "章尾钩子必须由本章兑现后的新问题自然产生，不能只靠氛围句收尾。");
+
+    return ChapterBlueprintSchema.parse({
+      openingHook: contract?.goal ?? input.goal,
+      scenes: sceneSeeds.map((beat, index) => ({
+        beat,
+        conflict: isEn
+          ? (index < mustIncludeItems.length
+              ? `Confront "${mustIncludeItems[index]}" directly—no summary-only progress.`
+              : `Scene ${index + 1} must contain direct resistance, not summary-only progress.`)
+          : (index < mustIncludeItems.length
+              ? `围绕"${mustIncludeItems[index]}"直接交锋，不能模糊带过`
+              : `第${index + 1}个场景必须有直接阻力，不能只用总结推进。`),
+        informationGap: input.hookAgendaSummary
+          ? (isEn ? `Use hook pressure: ${input.hookAgendaSummary}` : `利用伏笔压力：${input.hookAgendaSummary}`)
+          : (input.outlineNode ?? input.sceneDirective ?? input.goal),
+        turn: isEn
+          ? "Make the situation meaningfully different by the end of the beat."
+          : "该节拍结束时，局势必须发生可见变化。",
+        payoff,
+        cost: isEn
+          ? "Attach a cost, exposure, debt, or new risk to the gain."
+          : "收益必须伴随代价、暴露、欠债或新风险。",
+      })),
+      payoffRequired: payoff,
+      endingHook,
+      contractSatisfaction: [
+        ...(contract?.goal ? [isEn ? `Goal: ${contract.goal}` : `目标：${contract.goal}`] : []),
+        ...((contract?.mustInclude ?? []).map((item) => isEn ? `Must include: ${item}` : `必须包含：${item}`)),
+        ...((contract?.mustAvoid ?? []).map((item) => isEn ? `Must avoid: ${item}` : `必须避免：${item}`)),
+      ],
+    });
+  }
+
   private collectMustKeep(currentState: string, storyBible: string): string[] {
     return this.unique([
       ...this.extractListItems(currentState, 2),
@@ -216,6 +433,23 @@ export class PlannerAgent extends BaseAgent {
         .filter((line): line is string => Boolean(line));
 
     return this.unique([...focusAvoids, ...prohibitions]).slice(0, 6);
+  }
+
+  private extractSectionFirstDirective(content: string, headings: ReadonlyArray<string>): string | undefined {
+    const section = this.extractSection(content, headings);
+    return this.extractFirstDirective(section ?? "");
+  }
+
+  private extractSectionList(content: string, headings: ReadonlyArray<string>): string[] {
+    const section = this.extractSection(content, headings);
+    if (!section) return [];
+    const listed = this.extractListItems(section, 12);
+    if (listed.length > 0) return listed;
+    return section
+      .split(/\n|；|;|，|,/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#") && !this.isTemplatePlaceholder(line))
+      .slice(0, 8);
   }
 
   private collectStyleEmphasis(authorIntent: string, currentFocus: string): string[] {
@@ -660,6 +894,46 @@ export class PlannerAgent extends BaseAgent {
     const styleEmphasis = intent.styleEmphasis.length > 0
       ? intent.styleEmphasis.map((item) => `- ${item}`).join("\n")
       : "- none";
+    const steeringContract = intent.steeringContract
+      ? [
+          intent.steeringContract.rawRequest ? `- rawRequest: ${intent.steeringContract.rawRequest}` : undefined,
+          intent.steeringContract.goal ? `- goal: ${intent.steeringContract.goal}` : undefined,
+          `- priority: ${intent.steeringContract.priority}`,
+          intent.steeringContract.mustInclude.length > 0
+            ? `- mustInclude: ${intent.steeringContract.mustInclude.join("；")}`
+            : undefined,
+          intent.steeringContract.mustAvoid.length > 0
+            ? `- mustAvoid: ${intent.steeringContract.mustAvoid.join("；")}`
+            : undefined,
+          intent.steeringContract.sceneBeats.length > 0
+            ? `- sceneBeats: ${intent.steeringContract.sceneBeats.join("；")}`
+            : undefined,
+          intent.steeringContract.payoffRequired ? `- payoffRequired: ${intent.steeringContract.payoffRequired}` : undefined,
+          intent.steeringContract.endingHook ? `- endingHook: ${intent.steeringContract.endingHook}` : undefined,
+        ].filter(Boolean).join("\n")
+      : "- none";
+    const blueprint = intent.blueprint
+      ? [
+          `- openingHook: ${intent.blueprint.openingHook}`,
+          `- payoffRequired: ${intent.blueprint.payoffRequired}`,
+          `- endingHook: ${intent.blueprint.endingHook}`,
+          "",
+          "### Scene Beats",
+          ...intent.blueprint.scenes.map((scene, index) => [
+            `${index + 1}. ${scene.beat}`,
+            `   - conflict: ${scene.conflict}`,
+            `   - informationGap: ${scene.informationGap}`,
+            `   - turn: ${scene.turn}`,
+            `   - payoff: ${scene.payoff}`,
+            `   - cost: ${scene.cost}`,
+          ].join("\n")),
+          "",
+          "### Contract Satisfaction",
+          intent.blueprint.contractSatisfaction.length > 0
+            ? intent.blueprint.contractSatisfaction.map((item) => `- ${item}`).join("\n")
+            : "- none",
+        ].join("\n")
+      : "- none";
     const directives = [
       intent.arcDirective ? `- arc: ${intent.arcDirective}` : undefined,
       intent.sceneDirective ? `- scene: ${intent.sceneDirective}` : undefined,
@@ -707,6 +981,12 @@ export class PlannerAgent extends BaseAgent {
       "",
       "## Style Emphasis",
       styleEmphasis,
+      "",
+      "## Steering Contract",
+      steeringContract,
+      "",
+      "## Chapter Blueprint",
+      blueprint,
       "",
       "## Structured Directives",
       directives,

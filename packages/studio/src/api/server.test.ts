@@ -5354,6 +5354,39 @@ describe("runtimeEventStore integration via server broadcast", () => {
       bookId: "demo-book",
       chapterNumber: 1,
     });
+    expect(planChapterMock).toHaveBeenCalledWith("demo-book", "聚焦师债");
+    expect(pipelineConfigs.some((config) =>
+      typeof (config as { externalContext?: unknown }).externalContext === "string"
+      && ((config as { externalContext: string }).externalContext.includes("聚焦师债")
+        || (config as { externalContext: string }).externalContext.includes("主角发现线索")),
+    )).toBe(true);
+  });
+
+  it("assistant write-next task carries the user prompt into planInput and write-next", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const prompt = "请写下一章，必须让林清雪主动找万凡，并出现一次误判反转";
+
+    const planResponse = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "session-1",
+        input: prompt,
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+
+    expect(planResponse.status).toBe(200);
+    const planned = await planResponse.json() as {
+      graph: { nodes: Array<{ action: string; planInput?: string; brief?: string; mode?: string }> };
+    };
+    const writeNode = planned.graph.nodes.find((node) => node.action === "write-next");
+    expect(writeNode).toMatchObject({
+      mode: "ai-plan",
+      planInput: prompt,
+      brief: prompt,
+    });
   });
 
   it("rewrite and resync emit success/fail events without silent failures", async () => {

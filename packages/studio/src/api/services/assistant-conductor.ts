@@ -18,6 +18,8 @@ export interface TaskNode {
   readonly chapter?: number;
   readonly mode?: string;
   readonly parallelCandidates?: number;
+  readonly planInput?: string;
+  readonly brief?: string;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly maxRetries?: number;
   readonly checkpoint?: CheckpointState;
@@ -46,6 +48,8 @@ export interface TaskNodeRuntimeState {
   readonly chapter?: number;
   readonly mode?: string;
   readonly parallelCandidates?: number;
+  readonly planInput?: string;
+  readonly brief?: string;
   readonly maxRetries: number;
   readonly attempts: number;
   readonly status: TaskNodeStatus;
@@ -136,6 +140,8 @@ interface MutableTaskNodeRuntimeState {
   chapter?: number;
   mode?: string;
   parallelCandidates?: number;
+  planInput?: string;
+  brief?: string;
   maxRetries: number;
   attempts: number;
   status: TaskNodeStatus;
@@ -352,6 +358,8 @@ export class AssistantConductor {
           ...(node.chapter !== undefined ? { chapter: node.chapter } : {}),
           ...(node.mode ? { mode: node.mode } : {}),
           ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
+          ...(node.planInput ? { planInput: node.planInput } : {}),
+          ...(node.brief ? { brief: node.brief } : {}),
           maxRetries: Math.max(node.maxRetries ?? 0, 0),
           attempts: 0,
           status: "pending",

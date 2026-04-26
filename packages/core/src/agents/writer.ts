@@ -875,6 +875,9 @@ ${traceNotes}
 
 ${varianceBlock}
 ${lengthRequirementBlock}
+- Treat the Chapter Blueprint as the chapter's scene contract. Do not replace it with generic continuation.
+- PRE_WRITE_CHECK must name how the Steering Contract and Chapter Blueprint will be satisfied.
+- The prose must contain at least one active protagonist choice, one resistance-bearing exchange, one visible payoff, and one cost/risk.
 - Output PRE_WRITE_CHECK first, then the chapter
 - Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks`;
     }
@@ -902,6 +905,9 @@ ${traceNotes}
 
 ${varianceBlock}
 ${lengthRequirementBlock}
+- 把 Chapter Blueprint 当作本章场景契约，不得用泛泛续写替代。
+- PRE_WRITE_CHECK 必须说明 Steering Contract 与 Chapter Blueprint 如何落地。
+- 正文必须至少包含：一次主角主动选择、一轮带阻力的直接交锋、一个可见爽点/回报、一个代价/风险。
 - 先输出写作自检表，再写正文
 - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }

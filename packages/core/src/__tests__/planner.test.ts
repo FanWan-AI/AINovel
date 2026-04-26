@@ -253,6 +253,49 @@ describe("PlannerAgent", () => {
     ]));
   });
 
+  it("turns write-next steering sections into a hard visible contract and blueprint", async () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+      externalContext: [
+        "## Chapter Goal",
+        "下一章必须让林清雪主动找万凡，并出现一次误判反转。",
+        "",
+        "## Must Include",
+        "- 林清雪主动联系万凡",
+        "- 万凡做出一次主动选择",
+        "",
+        "## Must Avoid",
+        "- 不要只写搜集资料",
+        "",
+        "## Scene Beats",
+        "- 林清雪带着错误判断试探万凡",
+        "- 万凡用行动证明她判断有偏差",
+        "",
+        "## Payoff Required",
+        "关系推进必须可见。",
+      ].join("\n"),
+    });
+
+    expect(result.intent.goal).toContain("林清雪主动找万凡");
+    expect(result.intent.mustKeep).toEqual(expect.arrayContaining([
+      "林清雪主动联系万凡",
+      "万凡做出一次主动选择",
+    ]));
+    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining(["不要只写搜集资料"]));
+    expect(result.intent.steeringContract?.mustInclude).toContain("林清雪主动联系万凡");
+    expect(result.intent.blueprint?.scenes[0]?.beat).toContain("林清雪");
+    await expect(readFile(result.runtimePath, "utf-8")).resolves.toContain("## Chapter Blueprint");
+  });
+
   it("emits structured directives when fallback planning, chapter type repetition, and title collapse stack up", async () => {
     book = {
       ...book,

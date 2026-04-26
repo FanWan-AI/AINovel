@@ -101,6 +101,8 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
     return `## Input Governance Contract
 
 - Chapter-specific steering comes from the provided chapter intent and composed context package.
+- If a Chapter Blueprint is present, treat it as the mandatory scene design for this chapter: every scene beat needs direct resistance, a turn, a visible payoff, and an attached cost/risk.
+- If a Steering Contract is present, satisfy every must-include item and avoid every must-avoid item unless a hard canon constraint makes it impossible.
 - The outline is the default plan, not unconditional global supremacy.
 - When the runtime rule stack records an active L4 -> L3 override, follow the current task over local planning.
 - Keep hard guardrails compact: canon, continuity facts, and explicit prohibitions still win.
@@ -114,6 +116,8 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
   return `## 输入治理契约
 
 - 本章具体写什么，以提供给你的 chapter intent 和 composed context package 为准。
+- 如果出现 Chapter Blueprint，必须把它当作本章强制场景设计：每个场景节拍都要有直接阻力、局势转折、可见爽点，以及对应代价/风险。
+- 如果出现 Steering Contract，必须满足所有 mustInclude，并避开所有 mustAvoid；除非硬设定明确不允许，否则不得擅自忽略用户要求。
 - 卷纲是默认规划，不是全局最高规则。
 - 当 runtime rule stack 明确记录了 L4 -> L3 的 active override 时，优先执行当前任务意图，再局部调整规划层。
 - 真正不能突破的只有硬护栏：世界设定、连续性事实、显式禁令。

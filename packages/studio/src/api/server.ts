@@ -514,6 +514,8 @@ interface AssistantPlanStep {
   readonly chapter?: number;
   readonly mode?: string;
   readonly parallelCandidates?: number;
+  readonly planInput?: string;
+  readonly brief?: string;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly maxRetries?: number;
 }
@@ -544,6 +546,8 @@ interface AssistantTaskNodeSnapshot {
   readonly runId?: string;
   readonly status: TaskNodeStatus;
   readonly parallelCandidates?: number;
+  readonly planInput?: string;
+  readonly brief?: string;
   readonly attempts: number;
   readonly maxRetries: number;
   readonly startedAt?: string;
@@ -688,6 +692,8 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
     ...(typeof payload.chapter === "number" && Number.isInteger(payload.chapter) && payload.chapter > 0 ? { chapter: payload.chapter } : {}),
     ...(typeof payload.mode === "string" ? { mode: payload.mode } : {}),
     ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
+    ...(typeof payload.planInput === "string" && payload.planInput.trim().length > 0 ? { planInput: payload.planInput.trim() } : {}),
+    ...(typeof payload.brief === "string" && payload.brief.trim().length > 0 ? { brief: payload.brief.trim() } : {}),
     ...(dependsOn.length > 0 ? { dependsOn } : {}),
     ...(maxRetries !== undefined ? { maxRetries } : {}),
     ...(checkpoint ? { checkpoint } : {}),
@@ -1380,7 +1386,7 @@ function buildAssistantPlanDraft(
   if (intent === "generate_structure") {
     return {
       plan: [
-        { stepId: "s1", action: "plan-next", ...bookTarget },
+        { stepId: "s1", action: "plan-next", ...bookTarget, planInput: input },
       ],
       risk: {
         level: "medium",
@@ -1391,8 +1397,8 @@ function buildAssistantPlanDraft(
 
   return {
     plan: [
-      { stepId: "s1", action: "plan-next", ...bookTarget },
-      { stepId: "s2", action: "write-next", ...bookTarget },
+      { stepId: "s1", action: "plan-next", ...bookTarget, planInput: input },
+      { stepId: "s2", action: "write-next", ...bookTarget, mode: "ai-plan", planInput: input, brief: input },
     ],
     risk: {
       level: "low",
@@ -1526,6 +1532,8 @@ function buildAssistantTaskGraphFromPlan(
       ...(typeof step.chapter === "number" ? { chapter: step.chapter } : {}),
       ...(typeof step.mode === "string" ? { mode: step.mode } : {}),
       ...(typeof step.parallelCandidates === "number" ? { parallelCandidates: Math.max(1, Math.min(3, Math.trunc(step.parallelCandidates))) } : {}),
+      ...(typeof step.planInput === "string" && step.planInput.trim().length > 0 ? { planInput: step.planInput.trim() } : {}),
+      ...(typeof step.brief === "string" && step.brief.trim().length > 0 ? { brief: step.brief.trim() } : {}),
       ...(Array.isArray(step.dependsOn) && step.dependsOn.length > 0 ? { dependsOn: [...step.dependsOn] } : {}),
       maxRetries: Math.max(step.maxRetries ?? 0, 0),
     });
@@ -2609,7 +2617,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({}),
+                body: JSON.stringify(node.planInput ? { brief: node.planInput } : {}),
               },
             );
             if (!response.ok) {
@@ -2645,6 +2653,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   ...(node.mode ? { mode: node.mode } : {}),
+                  ...(node.planInput ? { planInput: node.planInput } : {}),
+                  ...(node.brief ? { brief: node.brief } : {}),
                 }),
               },
             );
@@ -4316,7 +4326,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const { wordCount, mode, planInput, ...steeringInput } = validation.value;
     const directBrief = normalizeBriefValue((steeringInput as { brief?: unknown }).brief);
     const planBrief = normalizeBriefValue(planInput);
-    const briefUsed = directBrief !== undefined || planBrief !== undefined;
+    const hasStructuredSteering = Boolean(
+      directBrief !== undefined
+      || planBrief !== undefined
+      || steeringInput.chapterGoal
+      || (steeringInput.mustInclude && steeringInput.mustInclude.length > 0)
+      || (steeringInput.mustAvoid && steeringInput.mustAvoid.length > 0)
+      || steeringInput.pace
+      || steeringInput.steeringContract,
+    );
+    const briefUsed = hasStructuredSteering;
     const chapterNumber = await resolveNextChapterNumber(id);
     const resolvePlanOrFallbackChapterNumber = (plan: { chapterNumber?: unknown }): number | undefined =>
       typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber;
@@ -4378,7 +4397,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         chapterNumber,
         briefUsed: planBrief !== undefined,
       });
-      planPipeline.planChapter(id, planInput)
+      planPipeline.planChapter(id, planInput ?? directBrief)
         .then(async (plan) => {
           const planChapterNumber = resolvePlanOrFallbackChapterNumber(plan);
           emitActionEvent("plan", "success", {
@@ -4404,7 +4423,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           throw e;
         })
         .then(onWriteComplete, onWriteError);
-    } else if (mode === "quick") {
+    } else if (mode === "quick" && !hasStructuredSteering) {
       // Quick mode: write directly without any context injection.
       const pipeline = new PipelineRunner(await buildPipelineConfig());
       emitActionEvent("compose", "start", {
@@ -4414,7 +4433,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
       pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
     } else {
-      // manual-plan or legacy (no mode): build externalContext from steering fields.
+      // manual-plan, legacy (no mode), or quick with steering: build externalContext from steering fields.
       const externalContext = buildWriteNextExternalContext(steeringInput);
       const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
       emitActionEvent("compose", "start", {

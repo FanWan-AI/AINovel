@@ -19,6 +19,15 @@ export interface WriteNextInput {
   readonly pace?: WriteNextPace;
   /** Natural-language context fed to the AI planner when mode="ai-plan". */
   readonly planInput?: string;
+  readonly steeringContract?: {
+    readonly goal?: string;
+    readonly mustInclude?: string[];
+    readonly mustAvoid?: string[];
+    readonly sceneBeats?: string[];
+    readonly payoffRequired?: string;
+    readonly endingHook?: string;
+    readonly priority?: "soft" | "normal" | "hard";
+  };
 }
 
 export interface WriteNextValidationError {
@@ -42,6 +51,7 @@ export type WriteNextValidation =
 
 const VALID_PACES: ReadonlySet<string> = new Set(["slow", "balanced", "fast"]);
 const VALID_MODES: ReadonlySet<string> = new Set(["ai-plan", "manual-plan", "quick"]);
+const VALID_PRIORITIES: ReadonlySet<string> = new Set(["soft", "normal", "hard"]);
 
 function validateOptionalNonEmptyString(
   field: string,
@@ -129,6 +139,35 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
   // planInput: optional non-empty string (used when mode="ai-plan")
   validateOptionalNonEmptyString("planInput", raw["planInput"], errors);
 
+  let steeringContract: WriteNextInput["steeringContract"];
+  if (raw["steeringContract"] !== undefined && raw["steeringContract"] !== null) {
+    if (typeof raw["steeringContract"] !== "object" || Array.isArray(raw["steeringContract"])) {
+      errors.push({ field: "steeringContract", message: "steeringContract must be an object" });
+    } else {
+      const contract = raw["steeringContract"] as Record<string, unknown>;
+      validateOptionalNonEmptyString("steeringContract.goal", contract["goal"], errors);
+      validateOptionalStringArray("steeringContract.mustInclude", contract["mustInclude"], errors);
+      validateOptionalStringArray("steeringContract.mustAvoid", contract["mustAvoid"], errors);
+      validateOptionalStringArray("steeringContract.sceneBeats", contract["sceneBeats"], errors);
+      validateOptionalNonEmptyString("steeringContract.payoffRequired", contract["payoffRequired"], errors);
+      validateOptionalNonEmptyString("steeringContract.endingHook", contract["endingHook"], errors);
+      if (contract["priority"] !== undefined && contract["priority"] !== null) {
+        if (typeof contract["priority"] !== "string" || !VALID_PRIORITIES.has(contract["priority"])) {
+          errors.push({ field: "steeringContract.priority", message: 'priority must be one of "soft", "normal", or "hard"' });
+        }
+      }
+      steeringContract = {
+        goal: contract["goal"] as string | undefined,
+        mustInclude: contract["mustInclude"] as string[] | undefined,
+        mustAvoid: contract["mustAvoid"] as string[] | undefined,
+        sceneBeats: contract["sceneBeats"] as string[] | undefined,
+        payoffRequired: contract["payoffRequired"] as string | undefined,
+        endingHook: contract["endingHook"] as string | undefined,
+        priority: contract["priority"] as "soft" | "normal" | "hard" | undefined,
+      };
+    }
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -144,6 +183,7 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
       mustAvoid: raw["mustAvoid"] as string[] | undefined,
       pace: raw["pace"] as WriteNextPace | undefined,
       planInput: raw["planInput"] as string | undefined,
+      ...(steeringContract ? { steeringContract } : {}),
     },
   };
 }
