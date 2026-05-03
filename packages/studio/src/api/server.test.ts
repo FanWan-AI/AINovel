@@ -5019,6 +5019,200 @@ describe("createStudioServer daemon lifecycle", () => {
     const config = pipelineConfigs.at(-1) as Record<string, unknown>;
     expect(config["externalContext"]).toBeUndefined();
   });
+
+  it("write-next with mustInclude steeringContract emits write-next:verification with graphPatchConsumption when graph patch with mustAvoid is present", async () => {
+    // Pre-create a chapter file so readChapterContentSnapshot succeeds
+    // Chapter content does NOT violate mustAvoid ("危险动作") and DOES satisfy mustInclude ("理性分析")
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    // Use a longer text body to ensure chapterSnippet is non-empty and readChapterContentSnapshot returns content
+    // IMPORTANT: must not contain any sub-grams of "危险动作" (危险, 险动, 动作, etc.) — otherwise
+    // checkAbsence would find a match and incorrectly report the mustAvoid as violated.
+    const cleanChapterContent = "林清雪翻开泛黄的古籍，指尖轻触书页，眼神专注。室内静谧，只有墨香弥漫。主角进行了理性分析，得出正确结论。".repeat(5);
+    await writeFile(join(chapterDir, "0001_test.md"), cleanChapterContent, "utf-8");
+
+    // Pre-create a graph patch that has mustAvoid via impactAnalysis
+    const patchesDir = join(root, "books", "demo-book", "runtime");
+    await mkdir(patchesDir, { recursive: true });
+    const patchWithMustAvoid = {
+      patchId: "patch-avoid-test",
+      bookId: "demo-book",
+      createdAt: new Date().toISOString(),
+      createdBy: "user",
+      status: "applied",
+      reason: "avoid-test",
+      operations: [],
+      impactAnalysis: {
+        impactedNodes: [],
+        affectedChapters: [],
+        nextChapterSteeringHints: {
+          mustInclude: [],
+          mustAvoid: ["危险动作"],
+          sceneBeats: [],
+        },
+      },
+    };
+    await writeFile(join(patchesDir, "narrative_graph_patches.jsonl"), JSON.stringify(patchWithMustAvoid) + "\n", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Override mock to return chapterNumber: 1 so readChapterContentSnapshot finds "0001_test.md"
+    writeNextChapterMock.mockResolvedValueOnce({
+      chapterNumber: 1, title: "Test Chapter", wordCount: 1200,
+      revised: false, status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    // write-next with an explicit mustInclude (so hasContract=true) in addition to graph-derived mustAvoid
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["理性分析"] }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    // Wait for write-next:verification event to appear in runtime events
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const verData = verEvent!.data as Record<string, unknown>;
+      // graphPatchConsumption should have patches array
+      const gpc = verData.graphPatchConsumption as Record<string, unknown> | undefined;
+      expect(gpc).toBeDefined();
+      const patches = gpc!.patches as Array<{ patchId: string; status: string; reason: string; satisfiedRequirements: string[]; missingRequirements: string[] }>;
+      expect(patches).toBeDefined();
+      // The mustAvoid-only patch must be present in the event
+      const avoidPatch = patches.find((p) => p.patchId === "patch-avoid-test");
+      expect(avoidPatch).toBeDefined();
+      // Clean chapter does NOT violate mustAvoid → patch must be fully consumed
+      expect(avoidPatch!.status).toBe("consumed");
+      expect(avoidPatch!.satisfiedRequirements).toContain("危险动作");
+      expect(avoidPatch!.missingRequirements).toHaveLength(0);
+    }, { timeout: 8000 });
+  }, 10000);
+
+  it("write-next with mustAvoid patch consumed=false when chapter violates the avoid", async () => {
+    // Pre-create a chapter file that DOES violate mustAvoid ("暴力动作")
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    // Repeat content to ensure it's a substantial chapter (not empty/snippet-only)
+    const violatingContent = "主角大打出手，发动了强烈的暴力动作，场面激烈混乱。整个战斗充满了暴力动作，无法控制。".repeat(5);
+    await writeFile(join(chapterDir, "0001_violate.md"), violatingContent, "utf-8");
+
+    const patchesDir = join(root, "books", "demo-book", "runtime");
+    await mkdir(patchesDir, { recursive: true });
+    const patchWithMustAvoid = {
+      patchId: "patch-avoid-violated",
+      bookId: "demo-book",
+      createdAt: new Date().toISOString(),
+      createdBy: "user",
+      status: "applied",
+      reason: "avoid-violated-test",
+      operations: [],
+      impactAnalysis: {
+        impactedNodes: [],
+        affectedChapters: [],
+        nextChapterSteeringHints: {
+          mustInclude: [],
+          mustAvoid: ["暴力动作"],
+          sceneBeats: [],
+        },
+      },
+    };
+    await writeFile(join(patchesDir, "narrative_graph_patches.jsonl"), JSON.stringify(patchWithMustAvoid) + "\n", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Override mock to return chapterNumber: 1 so readChapterContentSnapshot finds "0001_violate.md"
+    writeNextChapterMock.mockResolvedValueOnce({
+      chapterNumber: 1, title: "Violated Chapter", wordCount: 1200,
+      revised: false, status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["主角"] }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const verData = verEvent!.data as Record<string, unknown>;
+      const gpc = verData.graphPatchConsumption as Record<string, unknown> | undefined;
+      expect(gpc).toBeDefined();
+      const patches = gpc!.patches as Array<{ patchId: string; status: string; reason: string; satisfiedRequirements: string[]; missingRequirements: string[] }>;
+      const avoidPatch = patches.find((p) => p.patchId === "patch-avoid-violated");
+      expect(avoidPatch).toBeDefined();
+      // mustAvoid violated → patch must remain pending with the violation recorded
+      expect(avoidPatch!.status).toBe("pending");
+      expect(avoidPatch!.missingRequirements).toContain("暴力动作");
+      expect(avoidPatch!.satisfiedRequirements).toHaveLength(0);
+      expect(avoidPatch!.reason).toContain("mustAvoid 被违反");
+    }, { timeout: 8000 });
+  }, 10000);
+
+  it("prepareNode write-next cleans up verificationListenerHandler when completionPromise times out", async () => {
+    // Pipeline never resolves → write-next:success/fail broadcast never fires
+    // → completionPromise should timeout after 20 minutes and reject.
+    // The fix: .catch() on completionPromise ensures cleanupVerificationListener()
+    // is called even on rejection, preventing a stale subscriber leak.
+    // A no-op .catch() is also pre-attached in production code to prevent the
+    // rejection from being "unhandled" if the timeout fires before the cleanup
+    // .catch() is reached.
+    writeNextChapterMock.mockImplementation(() => new Promise<never>(() => {}));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Enable fake timers BEFORE the execute request so the 20-min timeout inside
+    // waitForBroadcastEvent is registered as a fake timer (not a real 20-min wait).
+    vi.useFakeTimers();
+    try {
+      const executeResponse = await app.request("http://localhost/api/assistant/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId: "asst_t_cleanup_timeout_001",
+          sessionId: "asst_s_cleanup_timeout_001",
+          approved: true,
+          plan: [{ stepId: "w1", action: "write-next", bookId: "demo-book", mode: "quick" }],
+        }),
+      });
+      expect(executeResponse.status).toBe(200);
+
+      // Drain pending microtasks so the background execute() chain advances
+      // to `await completionPromise.catch(...)` before we fire the fake timer.
+      // (Promise microtasks are not faked; each iteration yields one tick.)
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      // Advance past the 20-minute completionPromise timeout so waitForBroadcastEvent
+      // rejects. The no-op .catch() in production code ensures the rejection is
+      // immediately marked "handled" even if the cleanup .catch() isn't attached yet.
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000 + 1000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The task runner must catch the rejection and mark the task as failed.
+    await vi.waitFor(async () => {
+      const taskResponse = await app.request(
+        "http://localhost/api/assistant/tasks/asst_t_cleanup_timeout_001",
+      );
+      const taskData = (await taskResponse.json()) as { status: string };
+      expect(taskData.status).toBe("failed");
+    }, { timeout: 5000 });
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -5610,5 +5804,933 @@ describe("runtimeEventStore integration via server broadcast", () => {
         publishQualityGate: 90,
       },
     });
+  });
+});
+
+describe("normalizeAssistantTaskNode steering field persistence", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-studio-normalize-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify({
+      version: 1,
+      rootDir: root,
+      booksDir: join(root, "books"),
+      outputDir: join(root, "output"),
+      llm: { provider: "openai", model: "gpt-4o", apiKey: "test-key", maxTokens: 4096, temperature: 0.7 },
+    }, null, 2), "utf-8");
+    writeNextChapterMock.mockReset();
+    planChapterMock.mockReset();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("persisted task graph preserves steeringContract, blueprint, and sourceArtifactIds on write-next node", async () => {
+    const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    const contract = { mustInclude: ["主角决断"], mustAvoid: [], sceneBeats: ["决战前夜"] };
+    const blueprint = { volumes: 1 };
+    const sourceArtifactIds = ["art-steering-001"];
+
+    // Simulate a snapshot that was persisted mid-run (graph.nodes contains steering fields
+    // written by createAssistantTaskNodesSnapshot)
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      tasks: [
+        {
+          taskId: "asst_t_steer_persist_001",
+          sessionId: "asst_s_steer_persist_001",
+          status: "running",
+          steps: {},
+          nodes: {
+            w1: {
+              nodeId: "w1",
+              type: "task",
+              action: "write-next",
+              status: "running",
+              attempts: 1,
+              maxRetries: 0,
+              steeringContract: contract,
+              blueprint,
+              sourceArtifactIds,
+            },
+          },
+          graph: {
+            taskId: "asst_t_steer_persist_001",
+            nodes: [
+              {
+                nodeId: "w1",
+                type: "task",
+                action: "write-next",
+                bookId: "demo-book",
+                steeringContract: contract,
+                blueprint,
+                sourceArtifactIds,
+              },
+            ],
+            edges: [],
+          },
+          lastUpdatedAt: new Date().toISOString(),
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer({ version: 1, rootDir: root, booksDir: join(root, "books"), outputDir: join(root, "output"), llm: { provider: "openai", model: "gpt-4o", apiKey: "test-key", maxTokens: 4096, temperature: 0.7 } } as never, root);
+
+    const taskResponse = await app.request("http://localhost/api/assistant/tasks/asst_t_steer_persist_001");
+    expect(taskResponse.status).toBe(200);
+    const taskData = await taskResponse.json() as {
+      graph?: { nodes: Array<{ nodeId: string; action: string; steeringContract?: unknown; blueprint?: unknown; sourceArtifactIds?: unknown }> };
+    };
+
+    const restoredNode = taskData.graph?.nodes.find((n: { action: string }) => n.action === "write-next");
+    expect(restoredNode).toBeDefined();
+    expect(restoredNode?.steeringContract).toEqual(contract);
+    expect(restoredNode?.blueprint).toEqual(blueprint);
+    expect(restoredNode?.sourceArtifactIds).toEqual(sourceArtifactIds);
+  });
+
+  it("normalizeAssistantTaskNodeSnapshot round-trips steeringContract through snapshot store", async () => {
+    const storePath = join(root, ".inkos", "assistant-task-snapshots.json");
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    const contract = { mustInclude: ["林清雪出场"], mustAvoid: ["暴力场景"], sceneBeats: ["相遇咖啡厅"] };
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      tasks: [
+        {
+          taskId: "asst_t_round_trip_001",
+          sessionId: "asst_s_round_trip_001",
+          status: "running",
+          steps: {},
+          nodes: {
+            w1: {
+              nodeId: "w1",
+              type: "task",
+              action: "write-next",
+              status: "pending",
+              attempts: 0,
+              maxRetries: 0,
+              steeringContract: contract,
+              blueprint: { volumes: 2 },
+              sourceArtifactIds: ["art-round-trip"],
+            },
+          },
+          graph: {
+            taskId: "asst_t_round_trip_001",
+            nodes: [
+              {
+                nodeId: "w1",
+                type: "task",
+                action: "write-next",
+                bookId: "demo-book",
+                steeringContract: contract,
+                blueprint: { volumes: 2 },
+                sourceArtifactIds: ["art-round-trip"],
+              },
+            ],
+            edges: [],
+          },
+          lastUpdatedAt: new Date().toISOString(),
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer({ version: 1, rootDir: root, booksDir: join(root, "books"), outputDir: join(root, "output"), llm: { provider: "openai", model: "gpt-4o", apiKey: "test-key", maxTokens: 4096, temperature: 0.7 } } as never, root);
+
+    const taskResponse = await app.request("http://localhost/api/assistant/tasks/asst_t_round_trip_001");
+    expect(taskResponse.status).toBe(200);
+    const taskData = await taskResponse.json() as {
+      nodes?: Record<string, { steeringContract?: unknown; blueprint?: unknown; sourceArtifactIds?: unknown }>;
+      graph?: { nodes: Array<{ action: string; steeringContract?: unknown; blueprint?: unknown; sourceArtifactIds?: unknown }> };
+    };
+    // Both the node snapshot and graph node should preserve the fields
+    expect(taskData.nodes?.["w1"]?.steeringContract).toEqual(contract);
+    expect(taskData.nodes?.["w1"]?.blueprint).toEqual({ volumes: 2 });
+    expect(taskData.nodes?.["w1"]?.sourceArtifactIds).toEqual(["art-round-trip"]);
+    const graphNode = taskData.graph?.nodes.find((n) => n.action === "write-next");
+    expect(graphNode?.steeringContract).toEqual(contract);
+    expect(graphNode?.sourceArtifactIds).toEqual(["art-round-trip"]);
+  });
+});
+
+// ── Blueprint productization API tests ──────────────────────────────────
+
+describe("blueprint preview / edit / confirm API (P2)", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-bp-api-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("POST /api/assistant/blueprint/preview returns blueprint with status=draft, version=1", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const contract = {
+      goal: "林清雪决定出击",
+      mustInclude: ["林清雪主动出击", "误判反转"],
+      mustAvoid: ["万凡被动等"],
+      sceneBeats: ["开场压力", "信息差揭露", "反转发生", "代价付出", "章尾钩子"],
+      payoffRequired: "万凡反制成功",
+      endingHook: "新悬念引入",
+      priority: "hard",
+      sourceArtifactIds: [],
+      rawRequest: "按照剧情分析写下一章",
+    };
+
+    const res = await app.request("http://localhost/api/assistant/blueprint/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_001", bookId: "demo-book", contract }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      blueprint: { status: string; version: number; scenes: unknown[]; openingHook: string; artifactId: string };
+      artifactIds: { contract: string; blueprint: string };
+    };
+    expect(data.blueprint.status).toBe("draft");
+    expect(data.blueprint.version).toBe(1);
+    expect(Array.isArray(data.blueprint.scenes)).toBe(true);
+    expect(data.blueprint.scenes.length).toBeGreaterThanOrEqual(1);
+    expect(typeof data.blueprint.openingHook).toBe("string");
+    expect(typeof data.artifactIds.blueprint).toBe("string");
+    expect(typeof data.artifactIds.contract).toBe("string");
+    expect(data.artifactIds.blueprint).toMatch(/^art_/);
+    expect(data.artifactIds.contract).toMatch(/^art_/);
+    // P2.5: blueprint payload must be self-describing (artifactId embedded)
+    expect(data.blueprint.artifactId).toBe(data.artifactIds.blueprint);
+  });
+
+  it("POST /api/assistant/blueprint/preview returns 422 when contract is missing", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const res = await app.request("http://localhost/api/assistant/blueprint/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_002" }),
+    });
+
+    expect(res.status).toBe(422);
+  });
+
+  it("PUT /api/assistant/blueprint/:id returns updated blueprint with status=edited, version+1", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // First create a blueprint artifact
+    const contract = {
+      goal: "初始目标",
+      mustInclude: ["初始要求"],
+      mustAvoid: [],
+      sceneBeats: ["场景1", "场景2", "场景3", "场景4", "场景5"],
+      payoffRequired: "初始兑现",
+      endingHook: "初始钩子",
+      priority: "normal",
+      sourceArtifactIds: [],
+      rawRequest: "创建蓝图",
+    };
+
+    const previewRes = await app.request("http://localhost/api/assistant/blueprint/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_edit_001", contract }),
+    });
+    expect(previewRes.status).toBe(200);
+    const previewData = await previewRes.json() as { artifactIds: { blueprint: string }; blueprint: unknown };
+    const blueprintArtifactId = previewData.artifactIds.blueprint;
+
+    // Now edit the blueprint
+    const patch = { openingHook: "修改后的开场钩子", endingHook: "修改后的章尾钩子" };
+    const editRes = await app.request(`http://localhost/api/assistant/blueprint/${blueprintArtifactId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_test_bp_edit_001",
+        patch,
+      }),
+    });
+
+    expect(editRes.status).toBe(200);
+    const editData = await editRes.json() as {
+      blueprint: { status: string; version: number; openingHook: string; endingHook: string };
+      artifactId: string;
+    };
+    expect(editData.blueprint.status).toBe("edited");
+    expect(editData.blueprint.version).toBe(2);
+    expect(editData.blueprint.openingHook).toBe("修改后的开场钩子");
+    expect(editData.blueprint.endingHook).toBe("修改后的章尾钩子");
+  });
+
+  it("PUT /api/assistant/blueprint/:id returns 404 for unknown artifactId", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const res = await app.request("http://localhost/api/assistant/blueprint/art_notexist123", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_404", patch: { openingHook: "test" } }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /api/assistant/blueprint/:id/confirm returns confirmed blueprint with version+1", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const contract = {
+      goal: "主角出场",
+      mustInclude: ["主角出场"],
+      mustAvoid: [],
+      sceneBeats: ["场景1", "场景2", "场景3", "场景4", "场景5"],
+      payoffRequired: "完成",
+      endingHook: "结尾",
+      priority: "normal",
+      sourceArtifactIds: [],
+      rawRequest: "写下一章",
+    };
+
+    const previewRes = await app.request("http://localhost/api/assistant/blueprint/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_confirm_001", contract }),
+    });
+    expect(previewRes.status).toBe(200);
+    const previewData = await previewRes.json() as { artifactIds: { blueprint: string } };
+    const blueprintArtifactId = previewData.artifactIds.blueprint;
+
+    const confirmRes = await app.request(`http://localhost/api/assistant/blueprint/${blueprintArtifactId}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_test_bp_confirm_001" }),
+    });
+
+    expect(confirmRes.status).toBe(200);
+    const confirmData = await confirmRes.json() as {
+      blueprint: { status: string; version: number };
+      artifactId: string;
+    };
+    expect(confirmData.blueprint.status).toBe("confirmed");
+    expect(confirmData.blueprint.version).toBe(2);
+    expect(confirmData.artifactId).toBe(blueprintArtifactId);
+  });
+
+  it("POST /api/assistant/blueprint/:id/confirm returns 404 for unknown artifactId", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const res = await app.request("http://localhost/api/assistant/blueprint/art_unknown999/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_confirm_404" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("blueprint-confirm checkpoint in plan route (P2)", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-bp-plan-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("POST /api/assistant/plan with plan_next_from_previous_analysis includes blueprint-confirm checkpoint", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Pre-seed a plot_critique artifact so routeAssistantIntent returns plan_next_from_previous_analysis
+    // AND a draft blueprint artifact so the checkpoint is bound to it
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+    const plotCritiqueArtifact = {
+      artifactId: "art_testplot_plan_001",
+      sessionId: "sess_bp_plan_001",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "剧情分析",
+      searchableText: "test",
+    };
+    const draftBlueprintArtifact = {
+      artifactId: "art_testbp_plan_001",
+      sessionId: "sess_bp_plan_001",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "test",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "test",
+        contractSatisfaction: [],
+        status: "draft",
+        version: 1,
+        artifactId: "art_testbp_plan_001",
+      },
+      summary: "Blueprint v1: draft",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_bp_plan_001.jsonl"),
+      JSON.stringify(plotCritiqueArtifact) + "\n" + JSON.stringify(draftBlueprintArtifact) + "\n",
+      "utf-8",
+    );
+
+    // Input matches PLAN_NEXT_FROM_PREV_PATTERNS + has recent plot_critique
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_bp_plan_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ nodeId: string; type: string; mode?: string }> };
+    };
+    const checkpointNode = data.graph?.nodes.find(
+      (n) => n.type === "checkpoint" && n.mode === "blueprint-confirm",
+    );
+    expect(checkpointNode).toBeDefined();
+  });
+
+  it("POST /api/assistant/plan with write_next_with_user_plot includes blueprint-confirm checkpoint", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Pre-seed a draft blueprint so that the checkpoint is inserted (P2.5: requires blueprint artifact)
+    const artifactsDir002 = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir002, { recursive: true });
+    const draftBp002 = {
+      artifactId: "art_testbp_plan_002",
+      sessionId: "sess_bp_plan_002",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "test",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "test",
+        contractSatisfaction: [],
+        status: "draft",
+        version: 1,
+        artifactId: "art_testbp_plan_002",
+      },
+      summary: "Blueprint v1: draft",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir002, "sess_bp_plan_002.jsonl"),
+      JSON.stringify(draftBp002) + "\n",
+      "utf-8",
+    );
+
+    // Input matches WRITE_NEXT_PATTERNS without GRAPH_EDIT_PATTERNS → write_next_with_user_plot
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_bp_plan_002",
+        input: "写下一章，让林清雪在第5章主动出击，必须包含误判反转",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ nodeId: string; type: string; mode?: string }> };
+    };
+    const checkpointNode = data.graph?.nodes.find(
+      (n) => n.type === "checkpoint" && n.mode === "blueprint-confirm",
+    );
+    expect(checkpointNode).toBeDefined();
+  });
+});
+
+describe("P2.5 — steering SSE blueprint card has artifactId/status/version", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-p25-sse-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("POST /api/assistant/steering SSE done event blueprint card includes artifactId, status=draft, version=1", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Use /api/assistant/chat with NOVELOS_MUST_RE prompt + scoped bookId
+    const res = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_p25_sse_001",
+        prompt: "下一章让主角在迷雾中遭遇伏击，必须包含误判反转",
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+
+    // Find the assistant:done SSE event
+    const doneEventMatch = body.match(/event: assistant:done\s*\ndata: ({.+})/);
+    expect(doneEventMatch).not.toBeNull();
+    const doneData = JSON.parse(doneEventMatch![1]) as {
+      ok: boolean;
+      cards?: Array<{ type: string; payload: Record<string, unknown> }>;
+    };
+    expect(doneData.ok).toBe(true);
+    const blueprintCard = doneData.cards?.find((c) => c.type === "blueprint");
+    expect(blueprintCard).toBeDefined();
+    expect(typeof blueprintCard!.payload.artifactId).toBe("string");
+    expect((blueprintCard!.payload.artifactId as string).length).toBeGreaterThan(0);
+    expect(blueprintCard!.payload.status).toBe("draft");
+    expect(blueprintCard!.payload.version).toBe(1);
+  });
+});
+
+describe("P2.5 — loadLatestSteeringArtifacts only injects confirmed blueprint", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-p25-confirmed-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("write-next node in plan does NOT get blueprint injected when session has only draft blueprint", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // Seed a draft blueprint artifact
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+    const draftBlueprint = {
+      artifactId: "art_draft_bp_001",
+      sessionId: "sess_draft_bp_001",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "test",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "test",
+        contractSatisfaction: [],
+        status: "draft",
+        version: 1,
+        artifactId: "art_draft_bp_001",
+      },
+      summary: "Blueprint v1: draft",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_draft_bp_001.jsonl"),
+      JSON.stringify(draftBlueprint) + "\n",
+      "utf-8",
+    );
+
+    // Plot critique so we can trigger plan_next_from_previous_analysis
+    const plotCritique = {
+      artifactId: "art_draft_crit_001",
+      sessionId: "sess_draft_bp_001",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "test",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_draft_bp_001.jsonl"),
+      JSON.stringify(plotCritique) + "\n" + JSON.stringify(draftBlueprint) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_draft_bp_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ action: string; blueprint?: unknown }> };
+    };
+    const writeNextNode = data.graph?.nodes.find((n) => n.action === "write-next");
+    // Draft blueprint should NOT be injected into write-next
+    expect(writeNextNode?.blueprint).toBeUndefined();
+  });
+
+  it("write-next node in plan gets blueprint injected when session has confirmed blueprint", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+
+    // Seed a confirmed blueprint artifact
+    const confirmedBlueprint = {
+      artifactId: "art_confirmed_bp_001",
+      sessionId: "sess_confirmed_bp_001",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "confirmed opening",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "confirmed ending",
+        contractSatisfaction: [],
+        status: "confirmed",
+        version: 2,
+        artifactId: "art_confirmed_bp_001",
+      },
+      summary: "Blueprint v2: confirmed",
+      searchableText: "test",
+    };
+    const plotCritique2 = {
+      artifactId: "art_confirmed_crit_001",
+      sessionId: "sess_confirmed_bp_001",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "test",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_confirmed_bp_001.jsonl"),
+      JSON.stringify(plotCritique2) + "\n" + JSON.stringify(confirmedBlueprint) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_confirmed_bp_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ action: string; blueprint?: unknown }> };
+    };
+    const writeNextNode = data.graph?.nodes.find((n) => n.action === "write-next");
+    // Confirmed blueprint SHOULD be injected
+    expect(writeNextNode?.blueprint).toBeDefined();
+  });
+});
+
+describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked without confirmed blueprint", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-p25-approve-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("blueprint-confirm checkpoint node in graph has blueprintArtifactId when blueprint artifact exists in session", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+
+    // Seed a draft blueprint (unconfirmed) to trigger checkpoint insertion with binding
+    const draftBpForCheckpoint = {
+      artifactId: "art_bp_checkpoint_001",
+      sessionId: "sess_bp_checkpoint_001",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "test",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "test",
+        contractSatisfaction: [],
+        status: "draft",
+        version: 1,
+        artifactId: "art_bp_checkpoint_001",
+      },
+      summary: "Blueprint v1: draft",
+      searchableText: "test",
+    };
+    const critiqueForCheckpoint = {
+      artifactId: "art_crit_checkpoint_001",
+      sessionId: "sess_bp_checkpoint_001",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "test",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_bp_checkpoint_001.jsonl"),
+      JSON.stringify(critiqueForCheckpoint) + "\n" + JSON.stringify(draftBpForCheckpoint) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_bp_checkpoint_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ nodeId: string; type: string; mode?: string; checkpoint?: { blueprintArtifactId?: string } }> };
+    };
+    const cpNode = data.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    expect(cpNode).toBeDefined();
+    expect(cpNode?.checkpoint?.blueprintArtifactId).toBe("art_bp_checkpoint_001");
+  });
+
+  it("blueprint-confirm checkpoint IS auto-inserted even when no blueprint artifact exists in session (auto-generates draft)", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+
+    // Seed ONLY plot_critique (no blueprint) — plan route should auto-generate a draft blueprint
+    const critiqueOnly = {
+      artifactId: "art_crit_no_bp_001",
+      sessionId: "sess_no_bp_001",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "test",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_no_bp_001.jsonl"),
+      JSON.stringify(critiqueOnly) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_no_bp_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ type: string; mode?: string; checkpoint?: { blueprintArtifactId?: string } }> };
+    };
+    const cpNode = data.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    // Auto-generated draft blueprint → checkpoint IS inserted and bound to the new artifact
+    expect(cpNode).toBeDefined();
+    expect(typeof cpNode?.checkpoint?.blueprintArtifactId).toBe("string");
+    expect(cpNode?.checkpoint?.blueprintArtifactId).toMatch(/^art_/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2.5 end-to-end: approve blocked without confirmed blueprint; confirm → approve succeeds
+// ---------------------------------------------------------------------------
+describe("P2.5 — full blueprint confirm/approve flow", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-p25-flow-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+  });
+
+  afterEach(async () => {
+    try { await rm(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("approve blueprint-confirm checkpoint returns 409 when blueprint is not yet confirmed", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // 1. Plan — auto-generates draft blueprint + checkpoint
+    const planRes = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_flow_001",
+        input: "写下一章，让林清雪主动出击，必须包含误判反转",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(planRes.status).toBe(200);
+    const planData = await planRes.json() as {
+      taskId: string;
+      graph?: { nodes: Array<{ nodeId: string; type: string; mode?: string; checkpoint?: { blueprintArtifactId?: string } }> };
+    };
+    const cpNode = planData.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    expect(cpNode).toBeDefined();
+    expect(cpNode?.checkpoint?.blueprintArtifactId).toMatch(/^art_/);
+
+    // 2. Execute the plan (starts the task running; checkpoint blocks before write-next)
+    const execRes = await app.request("http://localhost/api/assistant/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskId: planData.taskId,
+        sessionId: "sess_flow_001",
+        approved: false,
+      }),
+    });
+    expect(execRes.status).toBe(200);
+
+    // 3. Approve without confirming the blueprint → 409.
+    // The endpoint must reject by artifact status even if this checkpoint has not
+    // yet become the currently waiting node in the runtime graph.
+    const approveRes = await app.request(
+      `http://localhost/api/assistant/tasks/${planData.taskId}/approve/${cpNode!.nodeId}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+    );
+    expect(approveRes.status).toBe(409);
+    const approveErr = await approveRes.json() as { error?: { code?: string } };
+    expect(approveErr.error?.code).toBe("BLUEPRINT_NOT_CONFIRMED");
+  });
+
+  it("approve succeeds after confirming blueprint, and re-plan injects confirmed blueprint into write-next", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // 1. Create blueprint via preview endpoint
+    const contract = {
+      goal: "主角出击",
+      mustInclude: ["林清雪主动出击", "误判反转"],
+      mustAvoid: [],
+      sceneBeats: ["开场", "推进", "反转", "代价", "钩子"],
+      payoffRequired: "反制成功",
+      endingHook: "新悬念",
+      priority: "hard",
+      sourceArtifactIds: [],
+      rawRequest: "写下一章必须包含误判反转",
+    };
+    const previewRes = await app.request("http://localhost/api/assistant/blueprint/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_flow_002", bookId: "demo-book", contract }),
+    });
+    expect(previewRes.status).toBe(200);
+    const previewData = await previewRes.json() as {
+      blueprint: { artifactId: string; status: string };
+      artifactIds: { blueprint: string };
+    };
+    // Verify self-describing payload
+    expect(previewData.blueprint.artifactId).toBe(previewData.artifactIds.blueprint);
+    expect(previewData.blueprint.status).toBe("draft");
+    const bpArtifactId = previewData.artifactIds.blueprint;
+
+    // 2. Confirm the blueprint
+    const confirmRes = await app.request(`http://localhost/api/assistant/blueprint/${bpArtifactId}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "sess_flow_002", bookId: "demo-book" }),
+    });
+    expect(confirmRes.status).toBe(200);
+    const confirmData = await confirmRes.json() as { blueprint: { status: string }; artifactId: string };
+    expect(confirmData.blueprint.status).toBe("confirmed");
+
+    // 3. Plan — confirmed blueprint is available, checkpoint should be bound to it
+    const planRes = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_flow_002",
+        input: "写下一章，让林清雪主动出击，必须包含误判反转",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(planRes.status).toBe(200);
+    const planData = await planRes.json() as {
+      taskId: string;
+      graph?: {
+        nodes: Array<{
+          nodeId: string;
+          type: string;
+          mode?: string;
+          action?: string;
+          checkpoint?: { blueprintArtifactId?: string };
+          blueprint?: Record<string, unknown>;
+        }>;
+      };
+    };
+    const cpNode = planData.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    expect(cpNode).toBeDefined();
+    expect(cpNode?.checkpoint?.blueprintArtifactId).toBe(bpArtifactId);
+
+    // write-next node gets the confirmed blueprint injected
+    const writeNextNode = planData.graph?.nodes.find((n) => n.action === "write-next");
+    expect(writeNextNode?.blueprint).toBeDefined();
   });
 });

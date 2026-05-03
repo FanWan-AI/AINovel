@@ -51,6 +51,9 @@ export {
   type RuleStackSections,
   type RuleStack,
   type ChapterTrace,
+  type ChapterBlueprintScene,
+  type ChapterBlueprint,
+  type ChapterBlueprintStatus,
   ChapterConflictSchema,
   HookMovementSchema,
   HookPressureLevelSchema,
@@ -65,7 +68,17 @@ export {
   RuleStackSectionsSchema,
   RuleStackSchema,
   ChapterTraceSchema,
+  ChapterBlueprintSceneSchema,
+  ChapterBlueprintSchema,
+  ChapterBlueprintStatusSchema,
 } from "./models/input-governance.js";
+export {
+  normalizeBlueprint,
+  validateBlueprint,
+  type NormalizedBlueprint,
+  type NormalizedBlueprintScene,
+  type BlueprintValidationResult,
+} from "./utils/blueprint-utils.js";
 export { PlannerAgent, type PlanChapterInput, type PlanChapterOutput } from "./agents/planner.js";
 export { ComposerAgent, type ComposeChapterInput, type ComposeChapterOutput } from "./agents/composer.js";
 

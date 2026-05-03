@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { parseAssistantOperatorCommand } from "../api/services/assistant-command-parser";
 import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
+import { ContractVerificationCard } from "../components/assistant/ContractVerificationCard";
 import type { TFunction } from "../hooks/use-i18n";
 import {
   ASSISTANT_PROMPT_TEMPLATES,
@@ -10,6 +11,7 @@ import {
   AssistantTemplateSuggestionCard,
   AssistantTimeline,
   AssistantView,
+  NovelosMessageCards,
   applyAssistantInput,
   applyAssistantIncomingPrompt,
   applyAssistantOperatorCommand,
@@ -36,6 +38,7 @@ import {
   reconcileAssistantTaskFromSnapshot,
   recoverAssistantStateFromSnapshot,
   resolveAssistantCandidateSelection,
+  resolveAssistantPendingCheckpoint,
   resolveAssistantGoalToBookProgress,
   resolveAssistantScopeBookIds,
   resolveAssistantAgentOutcomeFromRuntimeEvents,
@@ -47,6 +50,57 @@ import {
 } from "./AssistantView";
 
 describe("AssistantView", () => {
+  it("preserves blueprint artifact metadata for pending blueprint checkpoints", () => {
+    const pending = resolveAssistantPendingCheckpoint({
+      taskId: "asst_t_bp_pending",
+      sessionId: "asst_s_bp_pending",
+      status: "running",
+      awaitingApproval: { type: "checkpoint", nodeId: "cp1" },
+      steps: {},
+      nodes: {
+        cp1: {
+          nodeId: "cp1",
+          type: "checkpoint",
+          action: "checkpoint",
+          status: "waiting_approval",
+          attempts: 1,
+          maxRetries: 0,
+          checkpoint: {
+            nodeId: "cp1",
+            requiredApproval: true,
+            blueprintArtifactId: "art_bp_pending_001",
+            requiredBlueprintStatus: "confirmed",
+          },
+        },
+      },
+      graph: {
+        taskId: "asst_t_bp_pending",
+        nodes: [{
+          nodeId: "cp1",
+          type: "checkpoint",
+          action: "checkpoint",
+          mode: "blueprint-confirm",
+          checkpoint: {
+            nodeId: "cp1",
+            requiredApproval: true,
+            blueprintArtifactId: "art_bp_pending_001",
+            requiredBlueprintStatus: "confirmed",
+          },
+        }],
+        edges: [],
+      },
+      lastUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(pending).toEqual({
+      nodeId: "cp1",
+      mode: "blueprint-confirm",
+      label: "蓝图确认",
+      blueprintArtifactId: "art_bp_pending_001",
+      requiredBlueprintStatus: "confirmed",
+    });
+  });
+
   it("renders three-section layout with context bar, message area and input panel", () => {
     const tMock: TFunction = (key) => String(key);
     const html = renderToStaticMarkup(createElement(AssistantView, {
@@ -431,6 +485,58 @@ describe("AssistantView", () => {
     expect(done.taskPlan?.status).toBe("succeeded");
   });
 
+  it("preserves blueprint checkpoint metadata from live SSE waiting event", () => {
+    const draft = buildAssistantConfirmationDraft("重写第13章", ["book-1"]);
+    const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 8100);
+    const running = confirmAssistantPendingAction(pending, 8101);
+    const withTask = {
+      ...running,
+      taskExecution: {
+        taskId: "asst_t_203defdb74c54774",
+        sessionId: "asst_s_mop82npg",
+        status: "running" as const,
+        pendingCheckpoint: null,
+        candidateSelection: null,
+        goalToBookProgress: null,
+        timeline: [],
+        lastSyncedAt: 8101,
+        nextSequence: 0,
+      },
+    };
+
+    const next = applyAssistantTaskEventFromSSE(withTask, {
+      event: "assistant:step:start",
+      data: {
+        taskId: "asst_t_203defdb74c54774",
+        sessionId: "asst_s_mop82npg",
+        stepId: "cp1",
+        nodeId: "cp1",
+        nodeType: "checkpoint",
+        nodeStatus: "waiting_approval",
+        action: "checkpoint",
+        mode: "blueprint-confirm",
+        checkpoint: {
+          nodeId: "cp1",
+          requiredApproval: true,
+          blueprintArtifactId: "art_25b300baf52b97ff",
+          requiredBlueprintStatus: "confirmed",
+        },
+        timestamp: "2026-05-03T03:40:01.616Z",
+      },
+      timestamp: 8102,
+    });
+
+    expect(next.taskExecution?.status).toBe("waiting_approval");
+    expect(next.taskExecution?.pendingCheckpoint).toEqual({
+      nodeId: "cp1",
+      mode: "blueprint-confirm",
+      label: "蓝图确认",
+      blueprintArtifactId: "art_25b300baf52b97ff",
+      requiredBlueprintStatus: "confirmed",
+    });
+    expect(next.loading).toBe(false);
+  });
+
   it("reconciles timeline from task snapshot when sse events are missing", () => {
     const draft = buildAssistantConfirmationDraft("审计第3章", ["book-1"]);
     const pending = requestAssistantConfirmation(createAssistantInitialState(), draft!, 9000);
@@ -727,5 +833,317 @@ describe("AssistantView", () => {
     expect(shouldKeepPendingOnChatDisconnect("upstream timeout")).toBe(true);
     expect(shouldKeepPendingOnChatDisconnect("连接中断（可能是请求耗时过长或代理超时），请重试")).toBe(true);
     expect(shouldKeepPendingOnChatDisconnect("401 Unauthorized")).toBe(false);
+  });
+
+  it("appends verification card message when write-next:verification SSE event is received", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 3,
+        report: {
+          satisfactionRate: 0.8,
+          items: [
+            { requirement: "必须包含：林清雪主动找万凡", status: "satisfied", reason: "匹配" },
+          ],
+          shouldRewrite: false,
+        },
+        contractSatisfaction: 0.8,
+        missingRequirements: [],
+        satisfiedRequirements: ["必须包含：林清雪主动找万凡"],
+        sourceArtifactIds: ["art-001"],
+      },
+      timestamp: 1234567890,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]!.role).toBe("assistant");
+    expect(next.messages[0]!.content).toBe("章节契约验证完成");
+    expect(next.messages[0]!.cards).toHaveLength(1);
+    expect(next.messages[0]!.cards![0]!.type).toBe("verification");
+    expect(next.messages[0]!.cards![0]!.payload.satisfactionRate).toBe(0.8);
+    expect(next.messages[0]!.cards![0]!.payload.shouldRewrite).toBe(false);
+    expect(next.messages[0]!.cards![0]!.payload.contractSatisfaction).toBe(0.8);
+    expect((next.messages[0]!.cards![0]!.payload.sourceArtifactIds as string[])).toContain("art-001");
+    expect(next.nextMessageId).toBe(initial.nextMessageId + 1);
+  });
+
+  it("appends verification card with warning when shouldRewrite indicators present", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 5,
+        report: {
+          satisfactionRate: 0.4,
+          items: [{ requirement: "必须包含：关键反转", status: "missing", reason: "未找到" }],
+          shouldRewrite: true,
+        },
+        contractSatisfaction: 0.4,
+        missingRequirements: ["必须包含：关键反转"],
+        satisfiedRequirements: [],
+        graphPatchConsumption: { consumed: [], pending: ["patch-001"] },
+        warning: "硬性用户要求未全部满足，建议修订",
+      },
+      timestamp: 9999999,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next.messages[0]!.cards![0]!.payload.warning).toBe("硬性用户要求未全部满足，建议修订");
+    expect((next.messages[0]!.cards![0]!.payload.graphPatchConsumption as { pending: string[] }).pending).toContain("patch-001");
+  });
+
+  it("ignores write-next:verification event with no payload", () => {
+    const initial = createAssistantInitialState();
+    const message = { event: "write-next:verification", data: null, timestamp: 1000 };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next).toBe(initial);
+  });
+
+  it("returns unchanged state for unknown SSE events", () => {
+    const initial = createAssistantInitialState();
+    const message = { event: "some-unknown-event", data: { bookId: "book-1" }, timestamp: 1000 };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next).toBe(initial);
+  });
+
+  it("appends pending verification card when write-next:success has verificationPending=true", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:success",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 5,
+        details: { verificationPending: true, status: "succeeded", title: "第五章", wordCount: 2000 },
+      },
+      timestamp: 1000,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]!.content).toBe("章节已生成，正在验证用户契约");
+    expect(next.messages[0]!.cards![0]!.type).toBe("verification");
+    expect(next.messages[0]!.cards![0]!.payload.pending).toBe(true);
+    expect(next.messages[0]!.cards![0]!.payload.bookId).toBe("book-1");
+    expect(next.messages[0]!.cards![0]!.payload.chapterNumber).toBe(5);
+  });
+
+  it("does not append pending card when write-next:success has verificationPending=false", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:success",
+      data: { bookId: "book-1", chapterNumber: 5, details: { verificationPending: false } },
+      timestamp: 1000,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next.messages).toHaveLength(0);
+    expect(next).toBe(initial);
+  });
+
+  it("does not append duplicate pending verification card for same bookId/chapterNumber", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:success",
+      data: { bookId: "book-1", chapterNumber: 5, details: { verificationPending: true } },
+      timestamp: 1000,
+    };
+    const after1 = applyAssistantTaskEventFromSSE(initial, message);
+    const after2 = applyAssistantTaskEventFromSSE(after1, message);
+    expect(after2.messages).toHaveLength(1);
+  });
+
+  it("replaces pending verification card when write-next:verification arrives for same bookId/chapterNumber", () => {
+    const initial = createAssistantInitialState();
+    // First: add pending card
+    const successMsg = {
+      event: "write-next:success",
+      data: { bookId: "book-1", chapterNumber: 5, details: { verificationPending: true } },
+      timestamp: 1000,
+    };
+    const withPending = applyAssistantTaskEventFromSSE(initial, successMsg);
+    expect(withPending.messages).toHaveLength(1);
+    expect(withPending.messages[0]!.cards![0]!.payload.pending).toBe(true);
+
+    // Then: verification arrives → should replace the pending card
+    const verificationMsg = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 5,
+        report: {
+          satisfactionRate: 0.9,
+          items: [{ requirement: "必须包含：主角决断", status: "satisfied", reason: "匹配" }],
+          shouldRewrite: false,
+        },
+        contractSatisfaction: 0.9,
+        satisfiedRequirements: ["必须包含：主角决断"],
+        missingRequirements: [],
+      },
+      timestamp: 2000,
+    };
+    const after = applyAssistantTaskEventFromSSE(withPending, verificationMsg);
+    // Message count stays at 1 (replaced, not appended)
+    expect(after.messages).toHaveLength(1);
+    expect(after.messages[0]!.content).toBe("章节契约验证完成");
+    expect(after.messages[0]!.cards![0]!.type).toBe("verification");
+    // pending flag removed (replaced by real payload)
+    expect(after.messages[0]!.cards![0]!.payload.pending).toBeUndefined();
+    expect(after.messages[0]!.cards![0]!.payload.satisfactionRate).toBe(0.9);
+    // nextMessageId should NOT have incremented (no new message added)
+    expect(after.nextMessageId).toBe(withPending.nextMessageId);
+  });
+
+  it("appends new verification card when no pending card matches bookId/chapterNumber", () => {
+    const initial = createAssistantInitialState();
+    // Add pending card for chapter 5
+    const successMsg = {
+      event: "write-next:success",
+      data: { bookId: "book-1", chapterNumber: 5, details: { verificationPending: true } },
+      timestamp: 1000,
+    };
+    const withPending = applyAssistantTaskEventFromSSE(initial, successMsg);
+
+    // Verification arrives for a different chapter (no matching pending)
+    const verificationMsg = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 7,
+        report: { satisfactionRate: 0.8, items: [], shouldRewrite: false },
+        contractSatisfaction: 0.8,
+        satisfiedRequirements: [],
+        missingRequirements: [],
+      },
+      timestamp: 2000,
+    };
+    const after = applyAssistantTaskEventFromSSE(withPending, verificationMsg);
+    // New message appended (no matching pending for chapter 7)
+    expect(after.messages).toHaveLength(2);
+    expect(after.nextMessageId).toBe(withPending.nextMessageId + 1);
+  });
+
+  it("pending verification card renders without crash via ContractVerificationCard", () => {
+    const initial = createAssistantInitialState();
+    const successMsg = {
+      event: "write-next:success",
+      data: { bookId: "book-1", chapterNumber: 5, details: { verificationPending: true } },
+      timestamp: 1000,
+    };
+    const withPending = applyAssistantTaskEventFromSSE(initial, successMsg);
+    const pendingCard = withPending.messages[0]!.cards![0]!;
+    expect(pendingCard.type).toBe("verification");
+    // Render via ContractVerificationCard — should not throw
+    expect(() => {
+      renderToStaticMarkup(createElement(ContractVerificationCard, { report: pendingCard.payload as never }));
+    }).not.toThrow();
+    const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report: pendingCard.payload as never }));
+    expect(html).toContain("正在验证");
+  });
+});
+
+describe("NovelosMessageCards — blueprint confirm/edit integration (P2.5)", () => {
+  const blueprintBase = {
+    openingHook: "开场",
+    scenes: [{ beat: "场景一", conflict: "冲突", turn: "转折", payoff: "回报", cost: "代价" }],
+    payoffRequired: "必须爽点",
+    endingHook: "结尾钩子",
+    contractSatisfaction: ["契约满足1"],
+  };
+
+  it("shows confirm button for draft blueprint when sessionId + onBlueprintUpdate provided", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [{
+        type: "blueprint",
+        payload: { ...blueprintBase, artifactId: "art_p25_001", status: "draft", version: 1 },
+      }],
+      sessionId: "sess_p25_001",
+      bookId: "book-1",
+      onBlueprintUpdate: vi.fn(),
+    }));
+    expect(html).toContain("blueprint-confirm-button");
+    expect(html).toContain("确认蓝图");
+    expect(html).toContain("blueprint-status-badge");
+    expect(html).toContain("草稿");
+  });
+
+  it("does NOT show confirm button for confirmed blueprint even with callbacks", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [{
+        type: "blueprint",
+        payload: { ...blueprintBase, artifactId: "art_p25_002", status: "confirmed", version: 2 },
+      }],
+      sessionId: "sess_p25_001",
+      bookId: "book-1",
+      onBlueprintUpdate: vi.fn(),
+    }));
+    expect(html).not.toContain("blueprint-confirm-button");
+    expect(html).toContain("已确认");
+  });
+
+  it("does NOT show confirm button when no sessionId provided (legacy card without API context)", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [{
+        type: "blueprint",
+        payload: { ...blueprintBase, artifactId: "art_p25_003", status: "draft", version: 1 },
+      }],
+      // no sessionId → no API context → no confirm button
+    }));
+    expect(html).not.toContain("blueprint-confirm-button");
+  });
+
+  it("does NOT show confirm button when no artifactId in payload (legacy blueprints before P2)", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [{
+        type: "blueprint",
+        payload: { ...blueprintBase },
+        // No artifactId in payload
+      }],
+      sessionId: "sess_p25_001",
+      onBlueprintUpdate: vi.fn(),
+    }));
+    expect(html).not.toContain("blueprint-confirm-button");
+  });
+
+  it("shows edit button for blueprint with callbacks and artifactId", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [{
+        type: "blueprint",
+        payload: { ...blueprintBase, artifactId: "art_p25_004", status: "edited", version: 3 },
+      }],
+      sessionId: "sess_p25_001",
+      onBlueprintUpdate: vi.fn(),
+    }));
+    expect(html).toContain("blueprint-edit-button");
+    expect(html).toContain("编辑蓝图");
+    expect(html).toContain("已编辑");
+  });
+
+  it("renders non-blueprint cards normally alongside blueprint cards", () => {
+    const html = renderToStaticMarkup(createElement(NovelosMessageCards, {
+      cards: [
+        {
+          type: "contract",
+          payload: {
+            artifactId: "art_12345678",
+            goal: "test goal",
+            mustInclude: [],
+            mustAvoid: [],
+            sceneBeats: [],
+            priority: "normal",
+            rawRequest: "test",
+            sourceArtifactIds: [],
+          },
+        },
+        {
+          type: "blueprint",
+          payload: { ...blueprintBase, artifactId: "art_p25_005", status: "draft", version: 1 },
+        },
+      ],
+      sessionId: "sess_p25_002",
+      onBlueprintUpdate: vi.fn(),
+    }));
+    expect(html).toContain("contract-card");
+    expect(html).toContain("blueprint-preview-card");
+    expect(html).toContain("blueprint-confirm-button");
   });
 });

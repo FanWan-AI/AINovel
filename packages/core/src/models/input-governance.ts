@@ -76,20 +76,28 @@ export type ChapterSteeringContract = z.infer<typeof ChapterSteeringContractSche
 export const ChapterBlueprintSceneSchema = z.object({
   beat: z.string().min(1),
   conflict: z.string().min(1),
-  informationGap: z.string().min(1),
+  informationGap: z.string().optional(),
   turn: z.string().min(1),
   payoff: z.string().min(1),
   cost: z.string().min(1),
+  mustIncludeRefs: z.array(z.string()).optional(),
+  graphPatchRefs: z.array(z.string()).optional(),
 });
 
 export type ChapterBlueprintScene = z.infer<typeof ChapterBlueprintSceneSchema>;
 
+export const ChapterBlueprintStatusSchema = z.enum(["draft", "confirmed", "edited"]);
+export type ChapterBlueprintStatus = z.infer<typeof ChapterBlueprintStatusSchema>;
+
 export const ChapterBlueprintSchema = z.object({
   openingHook: z.string().min(1),
-  scenes: z.array(ChapterBlueprintSceneSchema).min(1).max(8),
+  scenes: z.array(ChapterBlueprintSceneSchema).min(5).max(8),
   payoffRequired: z.string().min(1),
   endingHook: z.string().min(1),
   contractSatisfaction: z.array(z.string().min(1)).default([]),
+  status: ChapterBlueprintStatusSchema.optional(),
+  version: z.number().int().positive().optional(),
+  sourceArtifactIds: z.array(z.string()).optional(),
 });
 
 export type ChapterBlueprint = z.infer<typeof ChapterBlueprintSchema>;

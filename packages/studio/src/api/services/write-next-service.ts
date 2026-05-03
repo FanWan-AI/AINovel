@@ -48,6 +48,14 @@ export function buildWriteNextExternalContext(input: WriteNextInput): string | u
     sections.push(`## Pace\n${PACE_LABELS[input.pace] ?? input.pace}`);
   }
 
+  if (input.sourceArtifactIds && input.sourceArtifactIds.length > 0) {
+    sections.push(`## Source Artifacts\n${input.sourceArtifactIds.map((id) => `- ${id}`).join("\n")}`);
+  }
+
+  if (input.blueprint) {
+    sections.push(formatBlueprint(input.blueprint));
+  }
+
   if (sections.length === 0) {
     return undefined;
   }
@@ -62,7 +70,7 @@ export function buildWriteNextExternalContext(input: WriteNextInput): string | u
  */
 export function buildWriteNextContextFromPlan(
   plan: { readonly goal: string; readonly conflicts: ReadonlyArray<string> },
-  input: Pick<WriteNextInput, "brief" | "chapterGoal" | "mustInclude" | "mustAvoid" | "pace" | "steeringContract">,
+  input: Pick<WriteNextInput, "brief" | "chapterGoal" | "mustInclude" | "mustAvoid" | "pace" | "steeringContract" | "blueprint" | "sourceArtifactIds">,
 ): string {
   const sections: string[] = [];
 
@@ -99,7 +107,38 @@ export function buildWriteNextContextFromPlan(
     sections.push(`## Pace\n${PACE_LABELS[input.pace] ?? input.pace}`);
   }
 
+  if (input.sourceArtifactIds && input.sourceArtifactIds.length > 0) {
+    sections.push(`## Source Artifacts\n${input.sourceArtifactIds.map((id) => `- ${id}`).join("\n")}`);
+  }
+
+  if (input.blueprint) {
+    sections.push(formatBlueprint(input.blueprint));
+  }
+
   return sections.join("\n\n");
+}
+
+function formatBlueprint(blueprint: NonNullable<WriteNextInput["blueprint"]>): string {
+  const lines: string[] = ["## Chapter Blueprint"];
+  if (blueprint.openingHook) lines.push(`### Opening Hook\n${blueprint.openingHook.trim()}`);
+  if (blueprint.scenes && blueprint.scenes.length > 0) {
+    lines.push("### Scenes");
+    for (const [i, scene] of blueprint.scenes.entries()) {
+      const parts = [`Beat: ${scene.beat}`];
+      if (scene.conflict) parts.push(`Conflict: ${scene.conflict}`);
+      if (scene.turn) parts.push(`Turn: ${scene.turn}`);
+      if (scene.payoff) parts.push(`Payoff: ${scene.payoff}`);
+      if (scene.cost) parts.push(`Cost: ${scene.cost}`);
+      lines.push(`${i + 1}. ${parts.join(" | ")}`);
+    }
+  }
+  if (blueprint.payoffRequired) lines.push(`### Payoff Required\n${blueprint.payoffRequired.trim()}`);
+  if (blueprint.endingHook) lines.push(`### Ending Hook\n${blueprint.endingHook.trim()}`);
+  if (blueprint.contractSatisfaction && blueprint.contractSatisfaction.length > 0) {
+    lines.push("### Contract Satisfaction");
+    for (const item of blueprint.contractSatisfaction) lines.push(`- ${item}`);
+  }
+  return lines.join("\n\n");
 }
 
 function formatSteeringContract(contract: NonNullable<WriteNextInput["steeringContract"]>): string {

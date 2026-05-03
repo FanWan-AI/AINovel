@@ -72,6 +72,35 @@ import {
 } from "./services/chapter-steering-service.js";
 import { buildStoryGraph } from "./services/story-graph-service.js";
 import {
+  AssistantArtifactService,
+  type AssistantArtifactType,
+} from "./services/assistant-artifact-service.js";
+import { routeAssistantIntent } from "./services/intent-router-service.js";
+import { resolveContext } from "./services/context-resolver-service.js";
+import { generatePlotCritique } from "./services/plot-critique-service.js";
+import { compileSteeringContract } from "./services/steering-contract-service.js";
+import { verifyContractSatisfaction } from "./services/contract-verifier-service.js";
+import { NarrativeGraphService } from "./services/narrative-graph-service.js";
+import { compileGraphPatchesToSteering, enrichSteeringInputWithGraphPatches, type PatchRequirements } from "./services/graph-to-steering-compiler.js";
+import { evaluateChapterDrama } from "./services/developmental-editor-service.js";
+
+/** Per-patch consumption result included in the write-next:verification broadcast. */
+interface GraphPatchConsumptionEntry {
+  patchId: string;
+  status: "consumed" | "pending" | "partially_consumed";
+  reason: string;
+  satisfiedRequirements: string[];
+  missingRequirements: string[];
+}
+
+interface GraphPatchConsumption {
+  patches: GraphPatchConsumptionEntry[];
+  consumed: string[];
+  pending: string[];
+  partiallyConsumed: string[];
+}
+import type { NarrativeGraphOperation } from "./schemas/narrative-graph-schema.js";
+import {
   ASSISTANT_MARKET_MEMORY_TTL_MS,
   createAssistantMemoryService,
   type AssistantMemoryLayer,
@@ -134,6 +163,38 @@ function waitForBroadcastEvent<T>(
     };
     subscribers.add(handler);
   });
+}
+
+/**
+ * Like waitForBroadcastEvent but returns a cancel function.
+ * Call cancel() to clean up the subscription when the result is no longer needed.
+ */
+function waitForBroadcastEventCancellable<T>(
+  matcher: (event: string, data: unknown) => T | null,
+  timeoutMs: number,
+): { promise: Promise<T>; cancel: () => void } {
+  let handlerRef: EventHandler | null = null;
+  let timerRef: ReturnType<typeof setTimeout> | null = null;
+  const promise = new Promise<T>((resolve, reject) => {
+    timerRef = setTimeout(() => {
+      if (handlerRef) subscribers.delete(handlerRef);
+      reject(new Error("Timed out waiting for broadcast event"));
+    }, timeoutMs);
+    handlerRef = (event, data) => {
+      const result = matcher(event, data);
+      if (result !== null) {
+        if (timerRef !== null) clearTimeout(timerRef);
+        if (handlerRef) subscribers.delete(handlerRef);
+        resolve(result);
+      }
+    };
+    subscribers.add(handlerRef);
+  });
+  const cancel = () => {
+    if (timerRef !== null) clearTimeout(timerRef);
+    if (handlerRef) subscribers.delete(handlerRef);
+  };
+  return { promise, cancel };
 }
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 // Runtime lifecycle actions emitted for human-readable run narration in Studio.
@@ -548,6 +609,9 @@ interface AssistantTaskNodeSnapshot {
   readonly parallelCandidates?: number;
   readonly planInput?: string;
   readonly brief?: string;
+  readonly steeringContract?: Record<string, unknown>;
+  readonly blueprint?: Record<string, unknown>;
+  readonly sourceArtifactIds?: ReadonlyArray<string>;
   readonly attempts: number;
   readonly maxRetries: number;
   readonly startedAt?: string;
@@ -641,6 +705,15 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
   const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
     ? payload.checkpoint as CheckpointState
     : undefined;
+  const steeringContract = typeof payload.steeringContract === "object" && payload.steeringContract !== null && !Array.isArray(payload.steeringContract)
+    ? payload.steeringContract as Record<string, unknown>
+    : undefined;
+  const blueprint = typeof payload.blueprint === "object" && payload.blueprint !== null && !Array.isArray(payload.blueprint)
+    ? payload.blueprint as Record<string, unknown>
+    : undefined;
+  const sourceArtifactIds = Array.isArray(payload.sourceArtifactIds)
+    ? (payload.sourceArtifactIds as unknown[]).filter((v): v is string => typeof v === "string")
+    : undefined;
   return {
     nodeId,
     type,
@@ -650,6 +723,9 @@ function normalizeAssistantTaskNodeSnapshot(input: unknown, fallbackNodeId?: str
     ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(typeof payload.action === "string" ? { action: payload.action } : {}),
     ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
+    ...(steeringContract ? { steeringContract } : {}),
+    ...(blueprint ? { blueprint } : {}),
+    ...(sourceArtifactIds && sourceArtifactIds.length > 0 ? { sourceArtifactIds } : {}),
     ...(typeof payload.startedAt === "string" ? { startedAt: payload.startedAt } : {}),
     ...(typeof payload.finishedAt === "string" ? { finishedAt: payload.finishedAt } : {}),
     ...(typeof payload.error === "string" ? { error: payload.error } : {}),
@@ -683,6 +759,15 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
   const checkpoint = typeof payload.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
     ? payload.checkpoint as CheckpointState
     : undefined;
+  const steeringContract = typeof payload.steeringContract === "object" && payload.steeringContract !== null && !Array.isArray(payload.steeringContract)
+    ? payload.steeringContract as Record<string, unknown>
+    : undefined;
+  const blueprint = typeof payload.blueprint === "object" && payload.blueprint !== null && !Array.isArray(payload.blueprint)
+    ? payload.blueprint as Record<string, unknown>
+    : undefined;
+  const sourceArtifactIds = Array.isArray(payload.sourceArtifactIds)
+    ? (payload.sourceArtifactIds as unknown[]).filter((v): v is string => typeof v === "string")
+    : undefined;
   return {
     nodeId,
     type,
@@ -694,6 +779,9 @@ function normalizeAssistantTaskNode(input: unknown, fallbackNodeId?: string): Ta
     ...(parallelCandidates !== undefined ? { parallelCandidates } : {}),
     ...(typeof payload.planInput === "string" && payload.planInput.trim().length > 0 ? { planInput: payload.planInput.trim() } : {}),
     ...(typeof payload.brief === "string" && payload.brief.trim().length > 0 ? { brief: payload.brief.trim() } : {}),
+    ...(steeringContract ? { steeringContract } : {}),
+    ...(blueprint ? { blueprint } : {}),
+    ...(sourceArtifactIds && sourceArtifactIds.length > 0 ? { sourceArtifactIds } : {}),
     ...(dependsOn.length > 0 ? { dependsOn } : {}),
     ...(maxRetries !== undefined ? { maxRetries } : {}),
     ...(checkpoint ? { checkpoint } : {}),
@@ -956,6 +1044,7 @@ interface AssistantMetricsResponse {
 const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
 const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|下一章.*写|继续写|续写|写.*下一章|write[-\s]?next|continue\s*writing/iu;
+const ASSISTANT_DRAFT_PATTERN = /write[\s_-]?draft|写.*草稿|草稿|执行.*write/iu;
 const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
 const ASSISTANT_RELEASE_CANDIDATE_PATTERN = /发布候选|release\s*candidate|可发布|候选确认/iu;
 const ASSISTANT_GOAL_TO_BOOK_PATTERN = /(一句话目标|goal[-\s]?to[-\s]?book|目标.*(成书|小说|长篇)|扩展成.*章|写成.*书)/iu;
@@ -1060,6 +1149,158 @@ function buildAssistantModelIdentityReply(config: ProjectConfig): string {
   return `当前项目真实配置是 provider=${provider}，model=${model}${endpointHint}${overrideHint}。`;
 }
 
+function buildPlotCritiqueResponse(
+  critique: { strengths: ReadonlyArray<string>; weaknesses: ReadonlyArray<string>; nextChapterOpportunities: ReadonlyArray<{ title: string; why: string }> },
+  bookTitle: string,
+  artifactId: string,
+): { text: string } {
+  const lines: string[] = ["# 📊 《" + bookTitle + "》剧情诊断报告\n"];
+  if (critique.strengths.length > 0 && !(critique.strengths.length === 1 && critique.strengths[0].includes("暂无"))) {
+    lines.push("## ✅ 优势");
+    for (const s of critique.strengths) lines.push("- " + s);
+    lines.push("");
+  }
+  if (critique.weaknesses.length > 0 && !(critique.weaknesses.length === 1 && critique.weaknesses[0].includes("暂无"))) {
+    lines.push("## ❌ 问题");
+    for (const w of critique.weaknesses) lines.push("- " + w);
+    lines.push("");
+  }
+  if (critique.nextChapterOpportunities.length > 0) {
+    lines.push("## 🎯 下一章机会");
+    for (const [i, opp] of critique.nextChapterOpportunities.entries()) {
+      lines.push((i + 1) + ". **" + opp.title + "** — " + opp.why);
+    }
+    lines.push("");
+  }
+  lines.push("\n---\n\n📄 已保存为 artifact（" + artifactId.slice(0, 12) + "…），你可以接着说「按照你刚才说的优缺点规划下一章」来生成契约。");
+  return { text: lines.join("\n") };
+}
+
+function buildBlueprintFromContract(
+  contract: { goal?: string; mustInclude: ReadonlyArray<string>; mustAvoid: ReadonlyArray<string>; sceneBeats: ReadonlyArray<string>; payoffRequired?: string; endingHook?: string },
+  _bookId: string,
+): { openingHook: string; scenes: Array<{ beat: string; conflict: string; informationGap: string; turn: string; payoff: string; cost: string }>; payoffRequired: string; endingHook: string; contractSatisfaction: string[] } {
+  const isEn = false;
+  const mustIncludeItems = contract.mustInclude;
+  const sceneSeeds = contract.sceneBeats.length >= 5
+    ? contract.sceneBeats.slice(0, 6)
+    : [
+        ...(contract.sceneBeats.length > 0 ? contract.sceneBeats : []),
+        `用一个具体压力点开场，直接指向：${contract.goal ?? "本章目标"}`,
+        mustIncludeItems.length > 0
+          ? `主角必须直面：${mustIncludeItems[0]}，不能回避或绕路`
+          : "让主角在信息不完整时做出主动选择。",
+        mustIncludeItems.length > 1
+          ? `推进至：${mustIncludeItems.slice(1).join("、")}，对手或盟友制造直接阻力`
+          : "让有能力的对手或盟友制造阻力，体现其独立诉求。",
+        "章内必须落下一个可见爽点、反转或代价。",
+        "章尾用兑现后的自然新问题制造悬念，不能只靠氛围句收尾。",
+      ].slice(0, 6);
+  const payoff = contract.payoffRequired ?? "给读者一个具体可感的变化：筹码、信息、关系或资源必须至少改变一项。";
+  const endingHook = contract.endingHook ?? "章尾钩子必须由本章兑现后的新问题自然产生，不能只靠氛围句收尾。";
+  return {
+    openingHook: contract.goal ?? "本章目标",
+    scenes: sceneSeeds.map((beat, i) => ({
+      beat,
+      conflict: i < mustIncludeItems.length
+        ? `围绕"${mustIncludeItems[i]}"直接交锋，不能模糊带过`
+        : `第${i + 1}个场景必须有直接阻力，不能只用总结推进。`,
+      informationGap: contract.goal ?? beat,
+      turn: "该节拍结束时，局势必须发生可见变化。",
+      payoff,
+      cost: "收益必须伴随代价、暴露、欠债或新风险。",
+    })),
+    payoffRequired: payoff,
+    endingHook,
+    contractSatisfaction: [
+      ...(contract.goal ? [`目标：${contract.goal}`] : []),
+      ...contract.mustInclude.map((item) => `必须包含：${item}`),
+      ...contract.mustAvoid.map((item) => `必须避免：${item}`),
+    ],
+  };
+}
+
+function buildSteeringResponseText(
+  contract: { mustInclude: ReadonlyArray<string>; mustAvoid: ReadonlyArray<string>; priority: string; sourceArtifactIds: ReadonlyArray<string> },
+  blueprint: { scenes: ReadonlyArray<unknown> },
+  resolved: { resolvedReferences: ReadonlyArray<{ phrase: string }> },
+): string {
+  const lines: string[] = ["# 📋 下一章写作契约\n"];
+  if (resolved.resolvedReferences.length > 0) {
+    lines.push("**引用来源**: " + resolved.resolvedReferences.map((r) => r.phrase).join("、"));
+    lines.push("");
+  }
+  if (contract.mustInclude.length > 0) {
+    lines.push("## ✅ 必须包含");
+    for (const item of contract.mustInclude) lines.push(`- ${item}`);
+    lines.push("");
+  }
+  if (contract.mustAvoid.length > 0) {
+    lines.push("## 🚫 必须避免");
+    for (const item of contract.mustAvoid) lines.push(`- ${item}`);
+    lines.push("");
+  }
+  lines.push(`**约束等级**: ${contract.priority === "hard" ? "🔴 硬约束" : contract.priority === "soft" ? "🔵 软约束" : "🟡 普通"}`);
+  lines.push(`**场景节数**: ${blueprint.scenes.length}`);
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  lines.push("以上契约和蓝图已保存。你可以直接说「执行 write_draft 写下一章」来生成正文，我会严格按契约执行。");
+  return lines.join("\n");
+}
+
+// Load latest contract + blueprint artifacts for auto-injection into write-next
+async function loadLatestSteeringArtifacts(
+  svc: AssistantArtifactService,
+  sessionId: string,
+  bookId?: string,
+): Promise<{
+  contract: Record<string, unknown> | undefined;
+  blueprint: Record<string, unknown> | undefined;
+  /** artifactId of the confirmed blueprint (only set when blueprint is present). */
+  blueprintArtifactId: string | undefined;
+  sourceArtifactIds: string[];
+  /** artifactId of an unconfirmed (draft/edited) blueprint, if no confirmed one found. */
+  pendingBlueprintArtifactId: string | undefined;
+  /** Status of the pending blueprint (e.g. "draft" or "edited"). */
+  pendingBlueprintStatus: string | undefined;
+}> {
+  const result = {
+    contract: undefined as Record<string, unknown> | undefined,
+    blueprint: undefined as Record<string, unknown> | undefined,
+    blueprintArtifactId: undefined as string | undefined,
+    sourceArtifactIds: [] as string[],
+    pendingBlueprintArtifactId: undefined as string | undefined,
+    pendingBlueprintStatus: undefined as string | undefined,
+  };
+  try {
+    const artifacts = sessionId ? await svc.listRecentSessionArtifacts(sessionId, 50) : [];
+    for (const art of artifacts) {
+      if (art.type === "chapter_steering_contract" && !result.contract) {
+        const full = await svc.getById(art.artifactId, sessionId, bookId);
+        if (full) { result.contract = full.payload; result.sourceArtifactIds.push(art.artifactId); }
+      }
+      if (art.type === "chapter_blueprint" && !result.blueprint && !result.pendingBlueprintArtifactId) {
+        const full = await svc.getById(art.artifactId, sessionId, bookId);
+        if (full) {
+          if (full.payload.status === "confirmed") {
+            result.blueprint = full.payload;
+            result.blueprintArtifactId = art.artifactId;
+            result.sourceArtifactIds.push(art.artifactId);
+          } else {
+            // Blueprint exists but is not yet confirmed — track it for the checkpoint binding
+            result.pendingBlueprintArtifactId = art.artifactId;
+            result.pendingBlueprintStatus = typeof full.payload.status === "string" ? full.payload.status : "draft";
+          }
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+  return result;
+}
+
 function parseAssistantChapterFromInput(input: string): number | undefined {
   const zhMatch = input.match(ASSISTANT_CHAPTER_ZH_PATTERN);
   if (zhMatch?.[1]) return Number.parseInt(zhMatch[1], 10);
@@ -1114,8 +1355,8 @@ function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   if (ASSISTANT_GOAL_TO_BOOK_PATTERN.test(normalized)) {
     return "goal_to_book";
   }
-  // "写下一章" takes priority — "自审" in a write context means write+audit, not audit-only
-  if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized)) {
+  // "写下一章" and "write_draft" both map to write_next
+  if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized) || ASSISTANT_DRAFT_PATTERN.test(normalized)) {
     return "write_next";
   }
   if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
@@ -1577,8 +1818,10 @@ function nextAssistantCheckpointNodeId(graph: TaskGraph): string {
 }
 
 function stripAssistantCheckpoints(graph: TaskGraph): TaskGraph {
+  // Only strip generic (autopilot-policy) checkpoints; preserve product-mandatory ones
+  // such as "blueprint-confirm" which must survive into execution.
   const checkpointIds = new Set(
-    graph.nodes.filter((node) => node.type === "checkpoint").map((node) => node.nodeId),
+    graph.nodes.filter((node) => node.type === "checkpoint" && node.mode !== "blueprint-confirm").map((node) => node.nodeId),
   );
   if (checkpointIds.size === 0) {
     return {
@@ -1604,7 +1847,7 @@ function stripAssistantCheckpoints(graph: TaskGraph): TaskGraph {
   }
   return {
     ...graph,
-    nodes: graph.nodes.filter((node) => node.type !== "checkpoint"),
+    nodes: graph.nodes.filter((node) => !checkpointIds.has(node.nodeId)),
     edges: dedupeAssistantTaskEdges(rewiredEdges),
   };
 }
@@ -1754,8 +1997,8 @@ function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dime
     errors.push({ field: "dimension", message: "dimension must be one of book/volume/chapter/character/hook" });
   }
   if (!bookId) errors.push({ field: "bookId", message: "bookId must be a non-empty string" });
-  if (dimension === "chapter" && (!Number.isInteger(chapter) || chapter < 1)) {
-    errors.push({ field: "chapter", message: "chapter must be a positive integer when dimension is chapter" });
+  if (dimension === "chapter" && chapter !== undefined && (!Number.isInteger(chapter) || chapter < 1)) {
+    errors.push({ field: "chapter", message: "chapter must be a positive integer when provided" });
   }
   if (errors.length > 0) return { ok: false, errors };
   return {
@@ -1811,6 +2054,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const state = new StateManager(root);
   const chapterRunStore = new ChapterRunStore((bookId) => state.bookDir(bookId));
   const assistantMemoryService = createAssistantMemoryService(root);
+  const artifactService = new AssistantArtifactService({
+    artifactsRoot: join(root, ".inkos", "assistant-artifacts"),
+    booksRoot: join(root, "books"),
+  });
+  const narrativeGraphService = new NarrativeGraphService({
+    booksRoot: join(root, "books"),
+  });
   let cachedConfig = initialConfig;
 
   // --- Runtime event log ---
@@ -2020,6 +2270,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 }),
             ...(typeof payload.error === "string" ? { error: payload.error } : previousNode?.error ? { error: previousNode.error } : {}),
             ...(checkpoint ? { checkpoint } : {}),
+            ...(previousNode?.steeringContract ? { steeringContract: previousNode.steeringContract } : {}),
+            ...(previousNode?.blueprint ? { blueprint: previousNode.blueprint } : {}),
+            ...(previousNode?.sourceArtifactIds && previousNode.sourceArtifactIds.length > 0 ? { sourceArtifactIds: previousNode.sourceArtifactIds } : {}),
             ...(previousNode?.candidateDecision ? { candidateDecision: previousNode.candidateDecision } : {}),
           } satisfies AssistantTaskNodeSnapshot,
         }
@@ -2492,6 +2745,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         attempts: 0,
         maxRetries: Math.max(node.maxRetries ?? 0, 0),
         ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
+        ...(node.steeringContract ? { steeringContract: node.steeringContract } : {}),
+        ...(node.blueprint ? { blueprint: node.blueprint } : {}),
+        ...(node.sourceArtifactIds && node.sourceArtifactIds.length > 0 ? { sourceArtifactIds: node.sourceArtifactIds } : {}),
         ...(node.checkpoint ? { checkpoint: node.checkpoint } : {}),
       } satisfies AssistantTaskNodeSnapshot,
     ]));
@@ -2636,37 +2892,136 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             }
             // Subscribe for the real completion event BEFORE triggering the
             // write so we never miss a fast completion.
-            const completionPromise = waitForBroadcastEvent<{ ok: boolean; error?: string }>(
+            const completionPromise = waitForBroadcastEvent<{ ok: boolean; error?: string; verificationPending?: boolean; chapterNumber?: number }>(
               (event, data) => {
                 const d = data as Record<string, unknown> | null;
                 if (d?.bookId !== node.bookId) return null;
-                if (event === "write-next:success") return { ok: true };
+                if (event === "write-next:success") {
+                  const details = typeof d?.details === "object" && d.details !== null ? d.details as Record<string, unknown> : null;
+                  return {
+                    ok: true,
+                    verificationPending: details?.verificationPending === true,
+                    chapterNumber: typeof d?.chapterNumber === "number" ? d.chapterNumber : undefined,
+                  };
+                }
                 if (event === "write-next:fail") return { ok: false, error: typeof d?.error === "string" ? d.error : "write-next failed" };
                 return null;
               },
               20 * 60_000, // 20 min timeout — chapters can take a while
             );
+            // Pre-attach a no-op rejection handler so that if the 20-min timeout fires
+            // before the cleanup .catch() below is reached (e.g. while execute() is still
+            // awaiting the internal HTTP response), the rejection is never "unhandled".
+            // The real cleanup and re-throw happen in the .catch() chain further below.
+            void completionPromise.catch(() => {});
+            // Buffered verification listener — registered BEFORE the HTTP request to avoid
+            // the race where write-next:verification fires before we start waiting.
+            // The timeout (3 min) only starts AFTER write-next:success with verificationPending=true,
+            // so long chapter generation does NOT cause the verification listener to pre-expire.
+            // Bug 3 fix: events without chapterNumber are ignored; we match by chapterNumber
+            // after the success event reveals which chapter was written.
+            type VerificationResult = { contractSatisfaction: number; shouldRewrite: boolean; missingRequirements: string[]; chapterNumber: number };
+            const verificationBuffer: VerificationResult[] = [];
+            let pendingVerificationResolver: ((r: VerificationResult) => void) | null = null;
+            let pendingVerificationRejecter: ((e: Error) => void) | null = null;
+            let pendingVerificationChapter: number | null = null;
+            let verificationListenerTimer: ReturnType<typeof setTimeout> | null = null;
+            let verificationListenerHandler: EventHandler | null = null;
+            const cleanupVerificationListener = () => {
+              if (verificationListenerHandler) subscribers.delete(verificationListenerHandler);
+              if (verificationListenerTimer !== null) clearTimeout(verificationListenerTimer);
+              verificationListenerHandler = null;
+              verificationListenerTimer = null;
+              pendingVerificationResolver = null;
+              pendingVerificationRejecter = null;
+              pendingVerificationChapter = null;
+            };
+            verificationListenerHandler = (event, data) => {
+              const d = data as Record<string, unknown> | null;
+              if (event !== "write-next:verification" || d?.bookId !== node.bookId) return;
+              // Bug 3: ignore events that carry no chapterNumber
+              const chNum = typeof d?.chapterNumber === "number" ? d.chapterNumber : null;
+              if (chNum === null) return;
+              const cs = typeof d?.contractSatisfaction === "number" ? d.contractSatisfaction : 1;
+              const sr = (typeof d?.report === "object" && d.report !== null ? (d.report as Record<string, unknown>).shouldRewrite : false) === true;
+              const missing = Array.isArray(d?.missingRequirements) ? d.missingRequirements as string[] : [];
+              const verResult: VerificationResult = { contractSatisfaction: cs, shouldRewrite: sr, missingRequirements: missing, chapterNumber: chNum };
+              // If a resolver is waiting for this exact chapter, resolve immediately
+              if (pendingVerificationChapter !== null && chNum === pendingVerificationChapter && pendingVerificationResolver !== null) {
+                const resolver = pendingVerificationResolver;
+                cleanupVerificationListener();
+                resolver(verResult);
+                return;
+              }
+              // Otherwise buffer (may be for a different chapter or arrive before success)
+              verificationBuffer.push(verResult);
+            };
+            subscribers.add(verificationListenerHandler);
+
             const response = await app.request(
               `http://localhost/api/books/${node.bookId}/write-next`,
               {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                  sessionId: context.sessionId,
                   ...(node.mode ? { mode: node.mode } : {}),
                   ...(node.planInput ? { planInput: node.planInput } : {}),
                   ...(node.brief ? { brief: node.brief } : {}),
+                  ...(node.steeringContract ? { steeringContract: node.steeringContract } : {}),
+                  ...(node.blueprint ? { blueprint: node.blueprint } : {}),
+                  ...(node.sourceArtifactIds ? { sourceArtifactIds: node.sourceArtifactIds } : {}),
                 }),
               },
             );
             if (!response.ok) {
+              cleanupVerificationListener();
               throw new Error(await parseApiErrorMessage(response));
             }
             // The route returns immediately ({ status: "writing" }) while
             // the pipeline runs in the background. Wait for the real
             // write-next:success / write-next:fail broadcast event.
-            const result = await completionPromise;
+            // Synchronously chain .catch() so the rejection is never "unhandled"
+            // (avoids Node.js unhandled-rejection warnings when the 20-min timeout
+            // fires before the awaiting microtask processes it).
+            const result = await completionPromise.catch((e: unknown) => {
+              cleanupVerificationListener();
+              throw e;
+            });
             if (!result.ok) {
+              cleanupVerificationListener();
               throw new Error(result.error ?? "write-next failed");
+            }
+            // If verification is pending, wait for it and fail the node if requirements unmet.
+            // Bug 2 fix: 3-minute timeout starts HERE (after chapter generation), not at registration.
+            if (result.verificationPending && result.chapterNumber !== undefined) {
+              const targetChapter = result.chapterNumber;
+              // Check if the verification event already arrived (buffered)
+              const bufferedIdx = verificationBuffer.findIndex((v) => v.chapterNumber === targetChapter);
+              let verResult: VerificationResult;
+              if (bufferedIdx >= 0) {
+                verResult = verificationBuffer[bufferedIdx]!;
+                cleanupVerificationListener();
+              } else {
+                // Wait with 3-minute timeout starting NOW (after success)
+                verResult = await new Promise<VerificationResult>((resolve, reject) => {
+                  pendingVerificationChapter = targetChapter;
+                  pendingVerificationResolver = resolve;
+                  pendingVerificationRejecter = reject;
+                  verificationListenerTimer = setTimeout(() => {
+                    cleanupVerificationListener();
+                    reject(new Error("Timed out waiting for verification result"));
+                  }, 3 * 60_000);
+                });
+              }
+              if (verResult.contractSatisfaction < 0.7 || verResult.shouldRewrite) {
+                const missingText = verResult.missingRequirements.length
+                  ? `缺失要求：${verResult.missingRequirements.slice(0, 3).join("；")}`
+                  : "硬性要求未满足";
+                throw new Error(`契约验证不通过（${Math.round(verResult.contractSatisfaction * 100)}%）—— ${missingText}`);
+              }
+            } else {
+              cleanupVerificationListener();
             }
           },
         };
@@ -3757,6 +4112,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...(previousNode?.finishedAt ? { finishedAt: previousNode.finishedAt } : {}),
         ...(previousNode?.error ? { error: previousNode.error } : {}),
         ...(previousNode?.checkpoint ? { checkpoint: previousNode.checkpoint } : {}),
+        ...(previousNode?.steeringContract ? { steeringContract: previousNode.steeringContract } : {}),
+        ...(previousNode?.blueprint ? { blueprint: previousNode.blueprint } : {}),
+        ...(previousNode?.sourceArtifactIds && previousNode.sourceArtifactIds.length > 0 ? { sourceArtifactIds: previousNode.sourceArtifactIds } : {}),
         candidateDecision,
       } satisfies AssistantTaskNodeSnapshot,
     };
@@ -4333,10 +4691,46 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       || (steeringInput.mustInclude && steeringInput.mustInclude.length > 0)
       || (steeringInput.mustAvoid && steeringInput.mustAvoid.length > 0)
       || steeringInput.pace
-      || steeringInput.steeringContract,
+      || steeringInput.steeringContract
+      || steeringInput.blueprint
+      || (steeringInput.sourceArtifactIds && steeringInput.sourceArtifactIds.length > 0),
     );
     const briefUsed = hasStructuredSteering;
     const chapterNumber = await resolveNextChapterNumber(id);
+
+    // Pre-write: merge narrative graph patches into steering
+    let mergedMustInclude = [...(steeringInput.mustInclude ?? [])];
+    let mergedMustAvoid = [...(steeringInput.mustAvoid ?? [])];
+    let mergedSceneBeats = [...(steeringInput.steeringContract?.sceneBeats ?? [])];
+    let mergedSourceArtifactIds = [...(steeringInput.sourceArtifactIds ?? [])];
+    // Track graph-derived items separately so we can do conditional patch consumption
+    let graphDerivedPatchIds: string[] = [];
+    let graphDerivedPatchRequirements: PatchRequirements[] = [];
+    try {
+      const unconsumedPatches = await narrativeGraphService.getUnconsumedPatches(id);
+      if (unconsumedPatches.length > 0) {
+        const graphSteering = compileGraphPatchesToSteering(unconsumedPatches);
+        mergedMustInclude = [...mergedMustInclude, ...graphSteering.mustInclude];
+        mergedMustAvoid = [...mergedMustAvoid, ...graphSteering.mustAvoid];
+        mergedSceneBeats = [...mergedSceneBeats, ...graphSteering.sceneBeats];
+        mergedSourceArtifactIds = [...mergedSourceArtifactIds, ...graphSteering.sourcePatchIds];
+        graphDerivedPatchIds = [...graphSteering.sourcePatchIds];
+        graphDerivedPatchRequirements = [...graphSteering.patchRequirements];
+      }
+    } catch { /* best-effort */ }
+
+    // Build effective steeringInput with merged values
+    const effectiveSteeringInput = {
+      ...steeringInput,
+      mustInclude: mergedMustInclude.length > 0 ? mergedMustInclude : undefined,
+      mustAvoid: mergedMustAvoid.length > 0 ? mergedMustAvoid : undefined,
+      sourceArtifactIds: mergedSourceArtifactIds.length > 0 ? mergedSourceArtifactIds : undefined,
+      steeringContract: steeringInput.steeringContract
+        ? { ...steeringInput.steeringContract, sceneBeats: mergedSceneBeats, mustInclude: mergedMustInclude, mustAvoid: mergedMustAvoid }
+        : mergedMustInclude.length > 0 || mergedMustAvoid.length > 0 || mergedSceneBeats.length > 0
+          ? { mustInclude: mergedMustInclude, mustAvoid: mergedMustAvoid, sceneBeats: mergedSceneBeats, priority: "normal" as const }
+          : undefined,
+    };
     const resolvePlanOrFallbackChapterNumber = (plan: { chapterNumber?: unknown }): number | undefined =>
       typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber;
     emitActionEvent("write-next", "start", {
@@ -4348,43 +4742,179 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Shared SSE callbacks used by all mode branches.
     type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
     const onWriteComplete = async (result: WriteResult): Promise<void> => {
-      emitActionEvent("compose", "success", {
-        bookId: id,
-        chapterNumber: result.chapterNumber,
-        briefUsed,
-        details: { status: result.status, title: result.title, wordCount: result.wordCount },
-      });
+      const baseDetails = { status: result.status, title: result.title, wordCount: result.wordCount };
+      const hasContract = Boolean(effectiveSteeringInput.steeringContract || (effectiveSteeringInput.mustInclude && effectiveSteeringInput.mustInclude.length > 0) || mergedSceneBeats.length > 0);
+      // Emit compose:success synchronously; write-next:success includes verification metadata.
+      emitActionEvent("compose", "success", { bookId: id, chapterNumber: result.chapterNumber, briefUsed, details: baseDetails });
+      // Success payload includes steering metadata so the frontend can display intent context
+      // before the async verification report arrives via write-next:verification.
       emitActionEvent("write-next", "success", {
         bookId: id,
         chapterNumber: result.chapterNumber,
         briefUsed,
-        details: { status: result.status, title: result.title, wordCount: result.wordCount },
+        details: {
+          ...baseDetails,
+          sourceArtifactIds: mergedSourceArtifactIds.length > 0 ? mergedSourceArtifactIds : undefined,
+          verificationPending: hasContract,
+        },
       });
-      // Returning the async chain here lets Promise.then adopt it, so memory sync stays ordered with the write result.
       const chapterSnippet = await readLatestChapterSnippet(id, result.chapterNumber);
-      if (!chapterSnippet) {
-        return;
+      if (chapterSnippet) {
+        await refreshBookMemory(id, result.chapterNumber, "write-next", baseDetails, chapterSnippet);
       }
-      await refreshBookMemory(id, result.chapterNumber, "write-next", {
-        status: result.status,
-        title: result.title,
-        wordCount: result.wordCount,
-      }, chapterSnippet);
+      // Post-success: verification + selective graph patch consumption (best-effort)
+      if (hasContract) {
+        const sessId = typeof rawBody === "object" && rawBody !== null && typeof (rawBody as Record<string, unknown>)?.sessionId === "string" ? (rawBody as Record<string, unknown>).sessionId as string : "";
+        // Build a fallback graphPatchConsumption with all patches as pending (used on error paths)
+        const buildEmptyPatchConsumption = (): GraphPatchConsumption => ({
+          patches: graphDerivedPatchIds.map((patchId) => ({ patchId, status: "pending" as const, reason: "验证未执行", satisfiedRequirements: [], missingRequirements: [] })),
+          consumed: [],
+          pending: [...graphDerivedPatchIds],
+          partiallyConsumed: [],
+        });
+        try {
+          const fullContent = await readChapterContentSnapshot(id, result.chapterNumber) ?? chapterSnippet;
+          if (!fullContent) {
+            broadcast("write-next:verification", {
+              bookId: id,
+              chapterNumber: result.chapterNumber,
+              report: { satisfactionRate: 0, items: [], shouldRewrite: true },
+              contractSatisfaction: 0,
+              satisfiedRequirements: [],
+              missingRequirements: [],
+              sourceArtifactIds: mergedSourceArtifactIds,
+              graphPatchConsumption: buildEmptyPatchConsumption(),
+              warning: "无法读取完整章节内容，验证跳过",
+            });
+            return;
+          }
+          const contract = effectiveSteeringInput.steeringContract ?? { mustInclude: effectiveSteeringInput.mustInclude ?? [], mustAvoid: effectiveSteeringInput.mustAvoid ?? [], sceneBeats: [] as string[] };
+          const report = verifyContractSatisfaction({ chapterText: fullContent, mustInclude: contract.mustInclude ?? [], mustAvoid: contract.mustAvoid ?? [], sceneBeats: contract.sceneBeats ?? [], goal: contract.goal });
+
+          // Per-patch granular consumption with sceneBeats-only support
+          const graphPatchConsumption: GraphPatchConsumption = { patches: [], consumed: [], pending: [], partiallyConsumed: [] };
+          if (graphDerivedPatchRequirements.length > 0) {
+            for (const pr of graphDerivedPatchRequirements) {
+              const isSceneBeatsOnly = pr.mustInclude.length === 0 && pr.mustAvoid.length === 0 && pr.sceneBeats.length > 0;
+              let status: "consumed" | "pending" | "partially_consumed";
+              let satisfiedRequirements: string[];
+              let missingRequirements: string[];
+              let reason: string;
+              if (isSceneBeatsOnly) {
+                // Soft evidence: sceneBeats must appear in verification report
+                const satisfiedBeats = pr.sceneBeats.filter((beat) =>
+                  report.items.some((item) => item.requirement.includes(beat) && item.status !== "missing"),
+                );
+                const missingBeats = pr.sceneBeats.filter((beat) =>
+                  !report.items.some((item) => item.requirement.includes(beat) && item.status !== "missing"),
+                );
+                satisfiedRequirements = satisfiedBeats;
+                missingRequirements = missingBeats;
+                if (satisfiedBeats.length === 0) {
+                  status = "pending";
+                  reason = "场景节拍未在章节中体现";
+                } else if (missingBeats.length === 0) {
+                  status = "consumed";
+                  reason = "所有场景节拍已体现";
+                } else {
+                  status = "partially_consumed";
+                  reason = `部分场景节拍已体现（${satisfiedBeats.length}/${pr.sceneBeats.length}）`;
+                }
+              } else {
+                // Hard requirements: mustInclude must be satisfied AND mustAvoid must not be violated
+                const satisfiedHard = pr.mustInclude.filter((req) =>
+                  report.items.some((item) => item.requirement.includes(req) && item.status !== "missing"),
+                );
+                const missingHard = pr.mustInclude.filter((req) =>
+                  !report.items.some((item) => item.requirement.includes(req) && item.status !== "missing"),
+                );
+                // mustAvoid: status="missing" in report means the avoid was violated (bad)
+                const violatedAvoid = pr.mustAvoid.filter((avoidItem) =>
+                  report.items.some((item) => item.requirement.includes(avoidItem) && item.status === "missing"),
+                );
+                const honoredAvoid = pr.mustAvoid.filter((avoidItem) =>
+                  !report.items.some((item) => item.requirement.includes(avoidItem) && item.status === "missing"),
+                );
+                satisfiedRequirements = [...satisfiedHard, ...honoredAvoid];
+                missingRequirements = [...missingHard, ...violatedAvoid];
+                if (missingRequirements.length === 0) {
+                  status = "consumed";
+                  reason = "所有硬性要求已满足";
+                } else if (satisfiedRequirements.length > 0) {
+                  status = "partially_consumed";
+                  const totalReqs = pr.mustInclude.length + pr.mustAvoid.length;
+                  reason = `部分硬性要求已满足（${satisfiedRequirements.length}/${totalReqs}）`;
+                } else {
+                  status = "pending";
+                  reason = violatedAvoid.length > 0 && missingHard.length === 0
+                    ? `mustAvoid 被违反：${violatedAvoid.slice(0, 2).join("；")}`
+                    : "硬性要求未满足";
+                }
+              }
+              graphPatchConsumption.patches.push({ patchId: pr.patchId, status, reason, satisfiedRequirements, missingRequirements });
+              if (status === "consumed") graphPatchConsumption.consumed.push(pr.patchId);
+              else if (status === "partially_consumed") graphPatchConsumption.partiallyConsumed.push(pr.patchId);
+              else graphPatchConsumption.pending.push(pr.patchId);
+            }
+          } else if (graphDerivedPatchIds.length > 0) {
+            for (const patchId of graphDerivedPatchIds) {
+              graphPatchConsumption.patches.push({ patchId, status: "pending", reason: "无详细需求信息", satisfiedRequirements: [], missingRequirements: [] });
+              graphPatchConsumption.pending.push(patchId);
+            }
+          }
+
+          // Mark consumed and partially-consumed patches in the graph service
+          for (const patchId of graphPatchConsumption.consumed) {
+            try { await narrativeGraphService.markPatchConsumed(id, patchId, "consumed"); } catch { /* per-patch best-effort */ }
+          }
+          for (const patchId of graphPatchConsumption.partiallyConsumed) {
+            try { await narrativeGraphService.markPatchConsumed(id, patchId, "partially_consumed"); } catch { /* per-patch best-effort */ }
+          }
+
+          const verificationSummary = {
+            contractSatisfaction: report.satisfactionRate,
+            satisfiedRequirements: report.items.filter((i) => i.status === "satisfied").map((i) => i.requirement),
+            missingRequirements: report.items.filter((i) => i.status === "missing").map((i) => i.requirement),
+            sourceArtifactIds: mergedSourceArtifactIds,
+            graphPatchConsumption,
+            ...(report.shouldRewrite ? { warning: "硬性用户要求未全部满足，建议修订" } : {}),
+          };
+          broadcast("write-next:verification", { bookId: id, chapterNumber: result.chapterNumber, report, ...verificationSummary });
+          if (sessId) {
+            await artifactService.create({
+              sessionId: sessId, bookId: id, type: "contract_verification",
+              title: `验证第${result.chapterNumber}章`,
+              payload: { report, ...verificationSummary } as unknown as Record<string, unknown>,
+              summary: `rate=${report.satisfactionRate}${report.shouldRewrite ? " [未满足]" : ""}`,
+              searchableText: JSON.stringify(verificationSummary),
+            });
+          }
+        } catch (e) {
+          // Guarantee write-next:verification is always broadcast when hasContract=true
+          broadcast("write-next:verification", {
+            bookId: id,
+            chapterNumber: result.chapterNumber,
+            report: { satisfactionRate: 0, items: [], shouldRewrite: true },
+            contractSatisfaction: 0,
+            satisfiedRequirements: [],
+            missingRequirements: [],
+            sourceArtifactIds: mergedSourceArtifactIds,
+            graphPatchConsumption: buildEmptyPatchConsumption(),
+            warning: `验证失败：${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      } else if (graphDerivedPatchIds.length > 0) {
+        // No contract to verify against — consume graph patches best-effort
+        for (const patchId of graphDerivedPatchIds) {
+          try { await narrativeGraphService.markPatchConsumed(id, patchId, "consumed"); } catch { /* */ }
+        }
+      }
     };
+
     const onWriteError = (e: unknown): void => {
       const error = e instanceof Error ? e.message : String(e);
-      emitActionEvent("compose", "fail", {
-        bookId: id,
-        chapterNumber,
-        briefUsed,
-        error,
-      });
-      emitActionEvent("write-next", "fail", {
-        bookId: id,
-        chapterNumber,
-        briefUsed,
-        error,
-      });
+      emitActionEvent("compose", "fail", { bookId: id, chapterNumber, briefUsed, error });
+      emitActionEvent("write-next", "fail", { bookId: id, chapterNumber, briefUsed, error });
     };
 
     if (mode === "ai-plan") {
@@ -4405,7 +4935,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             chapterNumber: planChapterNumber,
             briefUsed: planBrief !== undefined,
           });
-          const externalContext = buildWriteNextContextFromPlan(plan, steeringInput);
+          const externalContext = buildWriteNextContextFromPlan(plan, effectiveSteeringInput);
           emitActionEvent("compose", "start", {
             bookId: id,
             chapterNumber: planChapterNumber,
@@ -4434,7 +4964,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
     } else {
       // manual-plan, legacy (no mode), or quick with steering: build externalContext from steering fields.
-      const externalContext = buildWriteNextExternalContext(steeringInput);
+      const externalContext = buildWriteNextExternalContext(effectiveSteeringInput);
       const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
       emitActionEvent("compose", "start", {
         bookId: id,
@@ -5234,8 +5764,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (!parsed.ok) {
       return c.json({ code: "ASSISTANT_READ_VALIDATION_FAILED", errors: parsed.errors }, 422);
     }
-    const { dimension, bookId, chapter, keyword } = parsed.value;
-    const result = await resolveAssistantCrudRead(parsed.value);
+    let { dimension, bookId, chapter, keyword } = parsed.value;
+    // Auto-resolve latest chapter when LLM omits chapter number for dimension=chapter
+    if (dimension === "chapter" && chapter === undefined) {
+      try {
+        const index = await state.loadChapterIndex(bookId);
+        chapter = index.length > 0 ? Math.max(...index.map((ch) => ch.number)) : undefined;
+      } catch {
+        // fallback: will be handled downstream
+      }
+    }
+    const result = await resolveAssistantCrudRead({ dimension, bookId, chapter, keyword });
     return c.json({
       ok: true,
       dimension,
@@ -5411,6 +5950,107 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
 
+    // NovelOS shared variables
+    const NOVELOS_PLOT_QUALITY_RE = /(?:剧情|小说|故事).{0,10}(?:写|写得|质量|如何|怎样|怎么样|评价|分析|优缺点|差距|吸引|好看)/;
+    const novelosBookId = await resolveScopedBookId();
+
+    // NovelOS P1: Steering/contract generation from analysis or explicit user constraints
+    const NOVELOS_STEERING_RE = /(?:按[照]?你|就按你|照[这个那个刚才]).{0,15}(?:说|给|提|建议|方案|优缺点).{0,10}(?:规划|写|计划|安排|继续)/;
+    const NOVELOS_MUST_RE = /(?:下一章|写第.{1,3}章).{0,20}(?:必须|一定要|要让|不要让|不能)/;
+    if (novelosBookId && (NOVELOS_STEERING_RE.test(prompt) || NOVELOS_MUST_RE.test(prompt))) {
+      broadcast("agent:start", { instruction: prompt });
+      return streamSSE(c, async (stream) => {
+        try {
+          const sessId = sessionId || `s_${Date.now().toString(36)}`;
+          const recentArtifacts = await artifactService.listRecentSessionArtifacts(sessId, 20);
+
+          await stream.writeSSE({
+            event: "assistant:progress",
+            data: JSON.stringify({ type: "tool_call", tool: "resolve_context", args: { prompt } }),
+          });
+          broadcast("log", "工具调用：resolve_context");
+
+          // Resolve references and extract requirements
+          const resolved = resolveContext({ sessionId: sessId, userText: prompt, recentArtifacts, bookId: novelosBookId });
+
+          // Fetch referenced critique payloads
+          let critiquePayload: Record<string, unknown> | undefined;
+          for (const ref of resolved.resolvedReferences) {
+            const art = await artifactService.getById(ref.artifactId, sessId, novelosBookId);
+            if (art && art.type === "plot_critique") {
+              critiquePayload = art.payload;
+              break;
+            }
+          }
+
+          await stream.writeSSE({
+            event: "assistant:progress",
+            data: JSON.stringify({ type: "tool_call", tool: "compile_steering_contract" }),
+          });
+          broadcast("log", "工具调用：compile_steering_contract");
+
+          // Compile steering contract
+          const contract = compileSteeringContract({
+            userText: prompt,
+            resolvedRequirements: resolved.extractedUserRequirements,
+            referencedCritiquePayload: critiquePayload as Parameters<typeof compileSteeringContract>[0]["referencedCritiquePayload"],
+            sourceArtifactIds: resolved.resolvedReferences.map((r) => r.artifactId),
+          });
+
+          // Generate blueprint from contract
+          const blueprint = buildBlueprintFromContract(contract, novelosBookId);
+
+          // Save contract and blueprint as artifacts
+          const contractArt = await artifactService.create({
+            sessionId: sessId, bookId: novelosBookId,
+            type: "chapter_steering_contract", title: "章节干预契约",
+            payload: contract as unknown as Record<string, unknown>,
+            summary: `Contract: ${contract.mustInclude.length} mustInclude, ${contract.mustAvoid.length} mustAvoid, priority=${contract.priority}`,
+            searchableText: contract.rawRequest,
+          });
+          const blueprintPayloadWithMeta = {
+            ...(blueprint as unknown as Record<string, unknown>),
+            status: "draft" as const,
+            version: 1,
+            sourceArtifactIds: [contractArt.artifactId],
+          };
+          const blueprintArt = await artifactService.create({
+            sessionId: sessId, bookId: novelosBookId,
+            type: "chapter_blueprint", title: "章节戏剧蓝图",
+            payload: blueprintPayloadWithMeta,
+            summary: `Blueprint: ${blueprint.scenes.length} scenes, ending: ${blueprint.endingHook.slice(0, 30)}, status=draft`,
+            searchableText: JSON.stringify(blueprint),
+          });
+          const blueprintCardPayload = {
+            ...blueprintPayloadWithMeta,
+            artifactId: blueprintArt.artifactId,
+          };
+
+          // Build response text
+          const responseText = buildSteeringResponseText(contract, blueprint, resolved);
+
+          await stream.writeSSE({
+            event: "assistant:done",
+            data: JSON.stringify({
+              ok: true,
+              response: responseText,
+              cards: [
+                { type: "contract", payload: contract },
+                { type: "blueprint", payload: blueprintCardPayload },
+              ],
+            }),
+          });
+          broadcast("agent:complete", { instruction: prompt, response: responseText });
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          await stream.writeSSE({
+            event: "assistant:done",
+            data: JSON.stringify({ ok: false, error, response: `契约生成失败：${error}` }),
+          });
+          broadcast("agent:complete", { instruction: prompt, response: `失败：${error}` });
+        }
+      });
+    }
     // Deterministic chapter-revise lane:
     // When user explicitly asks to modify a specific chapter, execute revise directly
     // instead of letting agent freely chain into write-next or unrelated tools.
@@ -5578,6 +6218,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           });
           broadcast("agent:error", { instruction: prompt, error: outputDecision.message, requestId: outputDecision.requestId });
           return;
+        }
+        // Background: if this was a plot quality question, save artifact for future reference
+        if (NOVELOS_PLOT_QUALITY_RE.test(prompt) && novelosBookId && finalResponse.length > 100) {
+          void (async () => {
+            try {
+              await artifactService.create({
+                sessionId: sessionId || "",
+                bookId: novelosBookId,
+                type: "plot_critique",
+                title: `剧情分析: ${novelosBookId}`,
+                payload: { llmResponse: finalResponse },
+                summary: finalResponse.slice(0, 200),
+                searchableText: finalResponse,
+              });
+            } catch { /* best-effort */ }
+          })();
         }
         await queueSSE("assistant:done", { ok: true, response: finalResponse });
         broadcast("agent:complete", { instruction: prompt, response: finalResponse });
@@ -5976,9 +6632,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const intentType = parseAssistantIntentType(body.intentType);
+    // Use routeAssistantIntent for richer intent detection (supports artifact references, mustInclude extraction)
+    const routedIntent = routeAssistantIntent({
+      sessionId,
+      userText: input,
+      selectedBookIds: parsedScope.scope.type === "book-list" ? parsedScope.scope.bookIds : [],
+      recentMessages: [],
+      recentArtifacts: sessionId ? await artifactService.listRecentSessionArtifacts(sessionId, 20) : [],
+    });
+    // Map routed intent types to plan intents
+    function mapRoutedToPlanIntent(routedType: string): AssistantPlanIntent | null {
+      switch (routedType) {
+        case "plan_next_from_previous_analysis":
+        case "write_next_with_user_plot":
+        case "write_next_from_graph_change":
+          return "write_next";
+        case "audit_chapter":
+          return "audit";
+        case "revise_chapter":
+          return "audit_and_optimize";
+        case "edit_story_graph":
+        case "query_story_graph":
+          return null; // handled separately
+        default:
+          return null;
+      }
+    }
     const intent = intentType === "goal-to-book"
       ? "goal_to_book"
-      : resolveAssistantPlanIntent(input);
+      : routedIntent.intentType !== "clarify"
+        ? (mapRoutedToPlanIntent(routedIntent.intentType) ?? resolveAssistantPlanIntent(input))
+        : resolveAssistantPlanIntent(input);
     if (!intent) {
       return c.json({
         error: {
@@ -6062,11 +6746,146 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
+    // For write_next: auto-load latest contract/blueprint artifacts
+    let latestSteering: Awaited<ReturnType<typeof loadLatestSteeringArtifacts>> | undefined;
+    if (intent === "write_next") {
+      const bookId = parsedScope.scope.type === "book-list" && parsedScope.scope.bookIds.length === 1 ? parsedScope.scope.bookIds[0] : undefined;
+      latestSteering = await loadLatestSteeringArtifacts(artifactService, sessionId, bookId);
+    }
     const hydratedPlan = await hydratePlanChapters(drafted.plan);
     const requiresReleaseCandidateCheckpoint = ASSISTANT_RELEASE_CANDIDATE_PATTERN.test(input);
-    const graph = requiresReleaseCandidateCheckpoint
+    let graph = requiresReleaseCandidateCheckpoint
       ? appendAssistantCheckpointAfterLeafTasks(buildAssistantTaskGraphFromPlan(taskId, hydratedPlan, drafted.risk.level))
       : buildAssistantTaskGraphFromPlan(taskId, hydratedPlan, drafted.risk.level);
+    // Enrich write-next nodes with latest steering artifacts
+    if (latestSteering && (latestSteering.contract || latestSteering.blueprint)) {
+      graph = {
+        ...graph,
+        nodes: graph.nodes.map((node) => {
+          if (node.action !== "write-next") return node;
+          return {
+            ...node,
+            ...(latestSteering!.contract ? { steeringContract: latestSteering!.contract } : {}),
+            ...(latestSteering!.blueprint ? { blueprint: latestSteering!.blueprint } : {}),
+            ...(latestSteering!.sourceArtifactIds.length > 0 ? { sourceArtifactIds: latestSteering!.sourceArtifactIds } : {}),
+          };
+        }),
+      };
+    }
+    // For plot-driven write-next intents, prepend a blueprint-confirm checkpoint before write-next nodes
+    const needsBlueprintConfirm =
+      routedIntent.intentType === "plan_next_from_previous_analysis" ||
+      routedIntent.intentType === "write_next_with_user_plot";
+    if (needsBlueprintConfirm) {
+      const planBookId = parsedScope.scope.type === "book-list" && parsedScope.scope.bookIds.length === 1
+        ? parsedScope.scope.bookIds[0] : undefined;
+
+      // Resolve blueprint artifact id: confirmed > pending > auto-generate
+      let bpArtifactId = latestSteering?.blueprintArtifactId ?? latestSteering?.pendingBlueprintArtifactId;
+
+      // If no blueprint artifact exists, auto-generate a draft blueprint so the checkpoint can be bound
+      if (!bpArtifactId) {
+        let contractForBp = latestSteering?.contract;
+        if (!contractForBp) {
+          // No steering contract in session — compile a minimal one from user input
+          const recentArts = sessionId ? await artifactService.listRecentSessionArtifacts(sessionId, 20) : [];
+          const resolvedCtx = resolveContext({ sessionId, userText: input, recentArtifacts: recentArts, bookId: planBookId });
+          const compiledFromInput = compileSteeringContract({
+            userText: input,
+            resolvedRequirements: resolvedCtx.extractedUserRequirements,
+            sourceArtifactIds: resolvedCtx.resolvedReferences.map((r) => r.artifactId),
+          });
+          contractForBp = compiledFromInput as unknown as Record<string, unknown>;
+          await artifactService.create({
+            sessionId,
+            bookId: planBookId,
+            type: "chapter_steering_contract",
+            title: "章节干预契约",
+            payload: contractForBp,
+            summary: `Contract: auto-generated from plan input`,
+            searchableText: input,
+          });
+        }
+
+        // Build draft blueprint from contract
+        const contractFields = {
+          goal: typeof contractForBp.goal === "string" ? contractForBp.goal : undefined,
+          mustInclude: Array.isArray(contractForBp.mustInclude) ? contractForBp.mustInclude as string[] : [],
+          mustAvoid: Array.isArray(contractForBp.mustAvoid) ? contractForBp.mustAvoid as string[] : [],
+          sceneBeats: Array.isArray(contractForBp.sceneBeats) ? contractForBp.sceneBeats as string[] : [],
+          payoffRequired: typeof contractForBp.payoffRequired === "string" ? contractForBp.payoffRequired : undefined,
+          endingHook: typeof contractForBp.endingHook === "string" ? contractForBp.endingHook : undefined,
+        };
+        const autoBp = buildBlueprintFromContract(contractFields, planBookId ?? "");
+        const autoBpPayload: Record<string, unknown> = {
+          ...(autoBp as unknown as Record<string, unknown>),
+          status: "draft",
+          version: 1,
+          sourceArtifactIds: latestSteering?.sourceArtifactIds ?? [],
+        };
+        const autoBpArt = await artifactService.create({
+          sessionId,
+          bookId: planBookId,
+          type: "chapter_blueprint",
+          title: "章节戏剧蓝图",
+          payload: autoBpPayload,
+          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=draft (auto-generated)`,
+          searchableText: JSON.stringify(autoBpPayload),
+        });
+        // Self-describe: include artifactId in payload
+        const autoBpPayloadWithId = { ...autoBpPayload, artifactId: autoBpArt.artifactId };
+        await artifactService.update(autoBpArt.artifactId, sessionId, {
+          bookId: planBookId,
+          payload: autoBpPayloadWithId,
+          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=draft (auto-generated)`,
+          searchableText: JSON.stringify(autoBpPayloadWithId),
+        });
+        bpArtifactId = autoBpArt.artifactId;
+      }
+
+      const writeNextNodeIds = graph.nodes
+        .filter((n) => n.type === "task" && n.action === "write-next")
+        .map((n) => n.nodeId);
+      if (writeNextNodeIds.length > 0 && bpArtifactId) {
+        const cpNodeId = nextAssistantCheckpointNodeId(graph);
+        const cpNode: TaskNode = {
+          nodeId: cpNodeId,
+          type: "checkpoint",
+          action: "checkpoint",
+          mode: "blueprint-confirm",
+          checkpoint: {
+            nodeId: cpNodeId,
+            requiredApproval: true,
+            blueprintArtifactId: bpArtifactId,
+            requiredBlueprintStatus: "confirmed",
+          },
+        };
+        const targetSet = new Set(writeNextNodeIds);
+        const firstTargetIndex = graph.nodes.findIndex((n) => targetSet.has(n.nodeId));
+        const nextNodes = [...graph.nodes];
+        nextNodes.splice(firstTargetIndex >= 0 ? firstTargetIndex : 0, 0, cpNode);
+        const filteredEdges = graph.edges.filter((e) => !(targetSet.has(e.to) && !targetSet.has(e.from)));
+        const newEdges = [...filteredEdges];
+        for (const targetId of targetSet) {
+          const incoming = graph.edges
+            .filter((e) => e.to === targetId && !targetSet.has(e.from))
+            .map((e) => e.from);
+          if (incoming.length === 0) {
+            newEdges.push({ from: cpNodeId, to: targetId });
+          } else {
+            for (const from of incoming) {
+              newEdges.push({ from, to: cpNodeId });
+            }
+            newEdges.push({ from: cpNodeId, to: targetId });
+          }
+        }
+        graph = {
+          ...graph,
+          nodes: nextNodes,
+          edges: dedupeAssistantTaskEdges(newEdges),
+        };
+      }
+    }
     assistantTaskGraphs.set(taskId, graph);
     return c.json({
       taskId,
@@ -6749,6 +7568,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...summarizeAssistantTaskRun(taskId),
       });
     }
+    // For blueprint-confirm checkpoints: verify the bound blueprint artifact is confirmed
+    const graphNode = snapshot.graph?.nodes.find((n) => n.nodeId === nodeId);
+    if (graphNode?.mode === "blueprint-confirm" && graphNode?.checkpoint?.blueprintArtifactId) {
+      const bpArtifactId = graphNode.checkpoint.blueprintArtifactId;
+      const requiredStatus = graphNode.checkpoint.requiredBlueprintStatus ?? "confirmed";
+      const bpArt = await artifactService.getById(bpArtifactId, snapshot.sessionId);
+      if (!bpArt || bpArt.payload.status !== requiredStatus) {
+        return c.json({
+          error: {
+            code: "BLUEPRINT_NOT_CONFIRMED",
+            message: `Blueprint artifact ${bpArtifactId} must have status "${requiredStatus}" before this checkpoint can be approved. Current status: ${bpArt ? String(bpArt.payload.status ?? "unknown") : "not found"}.`,
+            blueprintArtifactId: bpArtifactId,
+          },
+        }, 409);
+      }
+    }
     const approved = assistantConductor.approve(taskId, nodeId, "manual");
     if (!approved) {
       return c.json({
@@ -6829,6 +7664,421 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }, 404);
     }
     return c.json(snapshot);
+  });
+
+  // --- NovelOS P0/P1: Artifact, Plot Critique, Steering Compile, Verify ---
+
+  app.get("/api/assistant/artifacts", async (c) => {
+    const sessionId = c.req.query("sessionId") ?? "";
+    const bookId = c.req.query("bookId");
+    const type = c.req.query("type") as AssistantArtifactType | undefined;
+    const limit = Math.min(parseInt(c.req.query("limit") ?? "20", 10) || 20, 100);
+
+    if (type) {
+      return c.json({ artifacts: await artifactService.listByType(sessionId, type, limit) });
+    }
+    if (bookId) {
+      return c.json({ artifacts: await artifactService.listRecentBookArtifacts(bookId, limit) });
+    }
+    return c.json({ artifacts: await artifactService.listRecentSessionArtifacts(sessionId, limit) });
+  });
+
+  app.post("/api/assistant/plot-critique", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "PLOT_CRITIQUE_INVALID_BODY", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : `asst_s_${Date.now().toString(36)}`;
+    const bookId = typeof body.bookId === "string" ? body.bookId : "";
+    if (!bookId) {
+      return c.json({ code: "PLOT_CRITIQUE_BOOK_REQUIRED", errors: [{ field: "bookId", message: "bookId is required" }] }, 422);
+    }
+
+    try {
+      const bookDir = join(root, "books", bookId);
+      const chapterIndex = await state.loadChapterIndex(bookId);
+      const chapters = await Promise.all(
+        chapterIndex.slice(-10).map(async (ch) => {
+          const content = await readChapterContentSnapshot(bookId, ch.number);
+          return { number: ch.number, title: ch.title, content: content ?? "", wordCount: ch.wordCount ?? 0 };
+        }),
+      );
+      const truthFiles = await Promise.all(
+        ["story_bible", "current_state", "current_focus", "pending_hooks"].map(async (name) => {
+          try {
+            const content = await readFile(join(bookDir, "story", `${name}.md`), "utf-8");
+            return { name, content };
+          } catch {
+            return { name, content: "" };
+          }
+        }),
+      );
+
+      const minChapter = chapters.length > 0 ? chapters[0].number : 1;
+      const maxChapter = chapters.length > 0 ? chapters[chapters.length - 1].number : 1;
+      const critique = generatePlotCritique({
+        bookId,
+        chapterRange: { from: minChapter, to: maxChapter },
+        chapters: chapters.filter((c) => c.content.length > 0),
+        truthFiles: truthFiles.filter((t) => t.content.length > 0),
+        focus: typeof body.focus === "string" ? body.focus : undefined,
+      });
+
+      const artifact = await artifactService.create({
+        sessionId,
+        bookId,
+        type: "plot_critique",
+        title: `剧情分析: ${bookId} 章节 ${minChapter}-${maxChapter}`,
+        payload: critique as unknown as Record<string, unknown>,
+        summary: `剧情分析：${critique.strengths.length} 个优势，${critique.weaknesses.length} 个问题，${critique.nextChapterOpportunities.length} 个机会`,
+        searchableText: JSON.stringify(critique),
+      });
+
+      return c.json({ artifact, critique });
+    } catch (e) {
+      return c.json({ code: "PLOT_CRITIQUE_FAILED", error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.post("/api/assistant/steering/compile", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "STEERING_COMPILE_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const userText = typeof body.userText === "string" ? body.userText : "";
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const bookId = typeof body.bookId === "string" ? body.bookId : undefined;
+
+    // Resolve context
+    const recentSummaries = sessionId
+      ? await artifactService.listRecentSessionArtifacts(sessionId, 20)
+      : [];
+    const resolved = resolveContext({ sessionId, userText, recentArtifacts: recentSummaries, bookId });
+
+    // Fetch referenced critique payloads
+    let critiquePayload: { nextChapterOpportunities?: ReadonlyArray<{ title: string; why: string; mustInclude: ReadonlyArray<string>; risk: string; payoff: string }>; weaknesses?: ReadonlyArray<string> } | undefined;
+    for (const ref of resolved.resolvedReferences) {
+      const art = await artifactService.getById(ref.artifactId, sessionId, bookId);
+      if (art && art.type === "plot_critique") {
+        critiquePayload = art.payload as typeof critiquePayload;
+        break;
+      }
+    }
+
+    // Compile contract
+    const contract = compileSteeringContract({
+      userText,
+      resolvedRequirements: resolved.extractedUserRequirements,
+      referencedCritiquePayload: critiquePayload,
+      sourceArtifactIds: resolved.resolvedReferences.map((r) => r.artifactId),
+    });
+
+    // Store contract as artifact
+    const artifact = await artifactService.create({
+      sessionId,
+      bookId,
+      type: "chapter_steering_contract",
+      title: "章节干预契约",
+      payload: contract as unknown as Record<string, unknown>,
+      summary: `Contract: ${contract.mustInclude.length} mustInclude, ${contract.mustAvoid.length} mustAvoid, priority=${contract.priority}`,
+      searchableText: contract.rawRequest,
+    });
+
+    return c.json({ contract, artifact, resolvedContext: resolved });
+  });
+
+  app.post("/api/assistant/contract/verify", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "CONTRACT_VERIFY_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const chapterText = typeof body.chapterText === "string" ? body.chapterText : "";
+    const contract = body.contract as Record<string, unknown> | undefined;
+    if (!chapterText || !contract) {
+      return c.json({ code: "CONTRACT_VERIFY_MISSING_FIELDS", message: "chapterText and contract are required" }, 422);
+    }
+
+    const report = verifyContractSatisfaction({
+      chapterText,
+      mustInclude: Array.isArray(contract.mustInclude) ? contract.mustInclude as string[] : [],
+      mustAvoid: Array.isArray(contract.mustAvoid) ? contract.mustAvoid as string[] : [],
+      sceneBeats: Array.isArray(contract.sceneBeats) ? contract.sceneBeats as string[] : [],
+      goal: typeof contract.goal === "string" ? contract.goal : undefined,
+    });
+
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const bookId = typeof body.bookId === "string" ? body.bookId : undefined;
+    if (sessionId) {
+      await artifactService.create({
+        sessionId,
+        bookId,
+        type: "contract_verification",
+        title: "契约验证报告",
+        payload: report as unknown as Record<string, unknown>,
+        summary: `satisfactionRate=${report.satisfactionRate}, shouldRewrite=${report.shouldRewrite}`,
+        searchableText: JSON.stringify(report),
+      });
+    }
+
+    return c.json({ report });
+  });
+
+  // --- P2: Narrative Graph API ---
+
+  app.get("/api/books/:id/narrative-graph", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const graph = await narrativeGraphService.loadGraph(id);
+      return c.json({ graph });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.post("/api/books/:id/narrative-graph/patches", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "PATCH_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const operations = body.operations as ReadonlyArray<NarrativeGraphOperation> | undefined;
+    const reason = typeof body.reason === "string" ? body.reason : "user edit";
+    if (!operations || !Array.isArray(operations) || operations.length === 0) {
+      return c.json({ code: "PATCH_NO_OPERATIONS", message: "operations array is required" }, 422);
+    }
+    try {
+      const patch = await narrativeGraphService.createPatch(id, operations, reason);
+      return c.json({ patch });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.post("/api/books/:id/narrative-graph/patches/:patchId/apply", async (c) => {
+    const id = c.req.param("id");
+    const patchId = c.req.param("patchId");
+    try {
+      const graph = await narrativeGraphService.applyPatch(id, patchId);
+      return c.json({ ok: true, graph });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+  });
+
+  app.post("/api/books/:id/narrative-graph/patches/:patchId/rollback", async (c) => {
+    const id = c.req.param("id");
+    const patchId = c.req.param("patchId");
+    try {
+      const graph = await narrativeGraphService.rollbackPatch(id, patchId);
+      return c.json({ ok: true, graph });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+  });
+
+  app.get("/api/books/:id/narrative-graph/patches", async (c) => {
+    const id = c.req.param("id");
+    const patches = await narrativeGraphService.listPatches(id);
+    return c.json({ patches });
+  });
+
+  app.post("/api/books/:id/narrative-graph/patches/:patchId/compile-steering", async (c) => {
+    const id = c.req.param("id");
+    const patchId = c.req.param("patchId");
+    try {
+      const patches = await narrativeGraphService.getUnconsumedPatches(id);
+      const targetPatches = patchId === "all" ? patches : patches.filter((p) => p.patchId === patchId);
+      const result = compileGraphPatchesToSteering(targetPatches);
+      return c.json({ steering: result });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+
+  // --- Blueprint Preview (P1) ---
+
+  app.post("/api/assistant/blueprint/preview", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "BLUEPRINT_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const sessionId = typeof body.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : `sess_${Date.now().toString(36)}`;
+    const bookId = typeof body.bookId === "string" && body.bookId.trim() ? body.bookId.trim() : undefined;
+
+    // Accept either an explicit compiled contract or a raw contract object
+    const rawContract = body.contract as Record<string, unknown> | undefined;
+    if (!rawContract) {
+      return c.json({ code: "BLUEPRINT_NO_CONTRACT", message: "contract is required" }, 422);
+    }
+    const compiled = {
+      goal: typeof rawContract.goal === "string" ? rawContract.goal : undefined,
+      mustInclude: Array.isArray(rawContract.mustInclude) ? rawContract.mustInclude as string[] : [],
+      mustAvoid: Array.isArray(rawContract.mustAvoid) ? rawContract.mustAvoid as string[] : [],
+      sceneBeats: Array.isArray(rawContract.sceneBeats) ? rawContract.sceneBeats as string[] : [],
+      payoffRequired: typeof rawContract.payoffRequired === "string" ? rawContract.payoffRequired : undefined,
+      endingHook: typeof rawContract.endingHook === "string" ? rawContract.endingHook : undefined,
+    };
+    const sourceArtifactIds: string[] = Array.isArray(rawContract.sourceArtifactIds)
+      ? rawContract.sourceArtifactIds.filter((x): x is string => typeof x === "string")
+      : [];
+
+    const blueprint = buildBlueprintFromContract(compiled, bookId ?? "");
+    const blueprintWithMeta = {
+      ...blueprint,
+      status: "draft" as const,
+      version: 1,
+      sourceArtifactIds,
+    };
+
+    // Save as artifacts for session history
+    const contractArt = await artifactService.create({
+      sessionId,
+      bookId,
+      type: "chapter_steering_contract",
+      title: "章节干预契约",
+      payload: rawContract,
+      summary: `Contract: ${compiled.mustInclude.length} mustInclude, priority=${typeof rawContract.priority === "string" ? rawContract.priority : "normal"}`,
+      searchableText: typeof rawContract.rawRequest === "string" ? rawContract.rawRequest : JSON.stringify(compiled.mustInclude),
+    });
+    const blueprintArt = await artifactService.create({
+      sessionId,
+      bookId,
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      payload: blueprintWithMeta as unknown as Record<string, unknown>,
+      summary: `Blueprint v1: ${blueprint.scenes.length} scenes, status=draft`,
+      searchableText: JSON.stringify(blueprintWithMeta),
+    });
+    // Patch artifact payload to be self-describing (includes its own artifactId)
+    const blueprintWithArtifactId = { ...blueprintWithMeta, artifactId: blueprintArt.artifactId };
+    await artifactService.update(blueprintArt.artifactId, sessionId, {
+      bookId,
+      payload: blueprintWithArtifactId as unknown as Record<string, unknown>,
+      summary: `Blueprint v1: ${blueprint.scenes.length} scenes, status=draft`,
+      searchableText: JSON.stringify(blueprintWithArtifactId),
+    });
+
+    return c.json({
+      blueprint: blueprintWithArtifactId,
+      artifactIds: {
+        contract: contractArt.artifactId,
+        blueprint: blueprintArt.artifactId,
+      },
+    });
+  });
+
+  // --- Blueprint edit (PUT) ---
+
+  app.put("/api/assistant/blueprint/:artifactId", async (c) => {
+    const artifactId = c.req.param("artifactId");
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "BLUEPRINT_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const sessionId = typeof body.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "";
+    if (!sessionId) {
+      return c.json({ code: "BLUEPRINT_EDIT_VALIDATION_FAILED", errors: [{ field: "sessionId", message: "sessionId is required" }] }, 422);
+    }
+    const bookId = typeof body.bookId === "string" && body.bookId.trim() ? body.bookId.trim() : undefined;
+    const patch = body.patch as Record<string, unknown> | undefined;
+    if (!patch) {
+      return c.json({ code: "BLUEPRINT_EDIT_VALIDATION_FAILED", errors: [{ field: "patch", message: "patch is required" }] }, 422);
+    }
+
+    const existing = await artifactService.getById(artifactId, sessionId, bookId);
+    if (!existing) {
+      return c.json({ code: "BLUEPRINT_NOT_FOUND", message: `Blueprint artifact ${artifactId} not found` }, 404);
+    }
+    if (existing.type !== "chapter_blueprint") {
+      return c.json({ code: "BLUEPRINT_TYPE_MISMATCH", message: `Artifact ${artifactId} is not a chapter_blueprint` }, 422);
+    }
+
+    const currentVersion = typeof existing.payload.version === "number" ? existing.payload.version : 1;
+    const merged: Record<string, unknown> = {
+      ...existing.payload,
+      ...patch,
+      status: "edited" as const,
+      version: currentVersion + 1,
+      previousArtifactId: artifactId,
+    };
+
+    const sceneCount = Array.isArray(merged.scenes) ? merged.scenes.length : "?";
+    const updated = await artifactService.update(artifactId, sessionId, {
+      bookId,
+      payload: merged,
+      summary: `Blueprint v${currentVersion + 1}: ${sceneCount} scenes, status=edited`,
+      searchableText: JSON.stringify(merged),
+    });
+    if (!updated) {
+      return c.json({ code: "BLUEPRINT_UPDATE_FAILED", message: "Failed to update artifact" }, 500);
+    }
+
+    return c.json({ blueprint: merged, artifactId });
+  });
+
+  // --- Blueprint confirm (POST) ---
+
+  app.post("/api/assistant/blueprint/:artifactId/confirm", async (c) => {
+    const artifactId = c.req.param("artifactId");
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "BLUEPRINT_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const sessionId = typeof body.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "";
+    if (!sessionId) {
+      return c.json({ code: "BLUEPRINT_CONFIRM_VALIDATION_FAILED", errors: [{ field: "sessionId", message: "sessionId is required" }] }, 422);
+    }
+    const bookId = typeof body.bookId === "string" && body.bookId.trim() ? body.bookId.trim() : undefined;
+
+    const existing = await artifactService.getById(artifactId, sessionId, bookId);
+    if (!existing) {
+      return c.json({ code: "BLUEPRINT_NOT_FOUND", message: `Blueprint artifact ${artifactId} not found` }, 404);
+    }
+    if (existing.type !== "chapter_blueprint") {
+      return c.json({ code: "BLUEPRINT_TYPE_MISMATCH", message: `Artifact ${artifactId} is not a chapter_blueprint` }, 422);
+    }
+
+    const currentVersion = typeof existing.payload.version === "number" ? existing.payload.version : 1;
+    const confirmed = {
+      ...existing.payload,
+      status: "confirmed" as const,
+      version: currentVersion + 1,
+      previousArtifactId: artifactId,
+    };
+
+    const updated = await artifactService.update(artifactId, sessionId, {
+      bookId,
+      payload: confirmed,
+      summary: `Blueprint v${currentVersion + 1}: confirmed`,
+      searchableText: JSON.stringify(confirmed),
+    });
+    if (!updated) {
+      return c.json({ code: "BLUEPRINT_CONFIRM_FAILED", message: "Failed to confirm artifact" }, 500);
+    }
+
+    return c.json({ blueprint: confirmed, artifactId });
+  });
+
+  // --- P5: Developmental Editor API ---
+
+  app.post("/api/assistant/editor/evaluate", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ code: "EDITOR_INVALID", errors: [{ field: "body", message: "Must be a JSON object" }] }, 422);
+    }
+    const chapterText = typeof body.chapterText === "string" ? body.chapterText : "";
+    const chapterNumber = typeof body.chapterNumber === "number" ? body.chapterNumber : 1;
+    const contract = body.steeringContract as Record<string, unknown> | undefined;
+    const report = evaluateChapterDrama({
+      chapterText,
+      chapterNumber,
+      steeringContract: contract ? {
+        mustInclude: Array.isArray(contract.mustInclude) ? contract.mustInclude as string[] : [],
+        mustAvoid: Array.isArray(contract.mustAvoid) ? contract.mustAvoid as string[] : [],
+      } : undefined,
+    });
+    return c.json({ report });
   });
 
   // --- Language setup ---

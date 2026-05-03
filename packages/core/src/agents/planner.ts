@@ -348,6 +348,7 @@ export class PlannerAgent extends BaseAgent {
             ? `Build toward: ${mustIncludeItems.slice(1).join(", ")}, with resistance from a capable opponent`
             : "Introduce resistance from a competent opponent or ally with their own agenda.",
           "Land a visible payoff, reversal, or cost before the chapter ends.",
+          "Close on a hook that grows out of the payoff — a new question, not vague atmosphere.",
         ]
       : [
           `用一个具体压力点开场，直接指向：${input.goal}`,
@@ -358,10 +359,13 @@ export class PlannerAgent extends BaseAgent {
             ? `推进至：${mustIncludeItems.slice(1).join("、")}，对手或盟友制造直接阻力`
             : "让有能力的对手或盟友制造阻力，体现其独立诉求。",
           "章内必须落下一个可见爽点、反转或代价。",
+          "章尾用兑现后的自然新问题制造悬念，不能只靠氛围句收尾。",
         ];
 
     const sceneSeeds = contract?.sceneBeats.length
-      ? contract.sceneBeats.slice(0, 6)
+      ? (contract.sceneBeats.length >= 5
+          ? contract.sceneBeats.slice(0, 6)
+          : [...contract.sceneBeats, ...defaultSceneSeeds].slice(0, 6))
       : defaultSceneSeeds;
 
     const payoff = contract?.payoffRequired

@@ -21,6 +21,11 @@ import {
 } from "../components/assistant/WorldConsistencyMarketCard";
 import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
 import { CheckpointApprovalCard } from "../components/assistant/CheckpointApprovalCard";
+import { ContractCard, type ContractCardPayload } from "../components/assistant/ContractCard";
+import { BlueprintPreviewCard, type BlueprintPreviewPayload } from "../components/assistant/BlueprintPreviewCard";
+import { ContractVerificationCard, type VerificationReportPayload } from "../components/assistant/ContractVerificationCard";
+import { PlotCritiqueCard, type PlotCritiqueCardPayload } from "../components/assistant/PlotCritiqueCard";
+import { EditorReportCard, type EditorReportPayload } from "../components/assistant/EditorReportCard";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 import {
@@ -38,11 +43,17 @@ interface Nav {
   toDashboard: () => void;
 }
 
+export interface AssistantMessageCard {
+  readonly type: "plot_critique" | "contract" | "blueprint" | "verification" | "editor_report";
+  readonly payload: Record<string, unknown>;
+}
+
 export interface AssistantMessage {
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly timestamp: number;
+  readonly cards?: ReadonlyArray<AssistantMessageCard>;
 }
 
 export interface AssistantComposerState {
@@ -136,6 +147,8 @@ export interface AssistantPendingCheckpoint {
   readonly nodeId: string;
   readonly mode?: string;
   readonly label?: string;
+  readonly blueprintArtifactId?: string;
+  readonly requiredBlueprintStatus?: string;
 }
 
 export interface AssistantGoalToBookStage {
@@ -277,6 +290,17 @@ interface AssistantTaskGraphSnapshot {
     readonly action: string;
     readonly chapter?: number;
     readonly mode?: string;
+    readonly steeringContract?: Record<string, unknown>;
+    readonly blueprint?: Record<string, unknown>;
+    readonly sourceArtifactIds?: ReadonlyArray<string>;
+    readonly checkpoint?: {
+      readonly nodeId: string;
+      readonly requiredApproval: boolean;
+      readonly approvedAt?: string;
+      readonly approvedBy?: string;
+      readonly blueprintArtifactId?: string;
+      readonly requiredBlueprintStatus?: string;
+    };
   }>;
   readonly edges: ReadonlyArray<{
     readonly from: string;
@@ -299,11 +323,16 @@ interface AssistantTaskSnapshot {
     readonly startedAt?: string;
     readonly finishedAt?: string;
     readonly error?: string;
-     readonly checkpoint?: {
+    readonly steeringContract?: Record<string, unknown>;
+    readonly blueprint?: Record<string, unknown>;
+    readonly sourceArtifactIds?: ReadonlyArray<string>;
+      readonly checkpoint?: {
         readonly nodeId: string;
         readonly requiredApproval: boolean;
         readonly approvedAt?: string;
         readonly approvedBy?: string;
+        readonly blueprintArtifactId?: string;
+        readonly requiredBlueprintStatus?: string;
       };
       readonly parallelCandidates?: number;
       readonly candidateDecision?: AssistantCandidateDecisionState;
@@ -363,7 +392,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 interface AssistantStreamCallbacks {
   readonly onProgress: (status: string) => void;
   readonly onMessage: (content: string) => void;
-  readonly onDone: (result: { ok: boolean; response?: string; error?: string }) => void;
+  readonly onDone: (result: { ok: boolean; response?: string; error?: string; cards?: ReadonlyArray<AssistantMessageCard> }) => void;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -460,7 +489,8 @@ async function streamAssistantChat(
               }
             } else if (eventName === "assistant:done") {
               const finalResponse = typeof data.response === "string" ? data.response : lastResponse;
-              callbacks.onDone({ ok: data.ok !== false, response: finalResponse, error: typeof data.error === "string" ? data.error : undefined });
+              const cards = Array.isArray(data.cards) ? data.cards as ReadonlyArray<AssistantMessageCard> : undefined;
+              callbacks.onDone({ ok: data.ok !== false, response: finalResponse, error: typeof data.error === "string" ? data.error : undefined, cards });
               return;
             }
           } catch { /* skip unparseable SSE data */ }
@@ -603,6 +633,8 @@ const ASSISTANT_EVENT_SET = new Set([
   "assistant:step:success",
   "assistant:step:fail",
   "assistant:done",
+  "write-next:verification",
+  "write-next:success",
 ]);
 const VALID_ASSISTANT_TASK_PLAN_TRANSITIONS: Record<AssistantTaskPlanStatus, ReadonlyArray<AssistantTaskPlanStatus>> = {
   draft: ["awaiting-confirm", "cancelled"],
@@ -1172,6 +1204,8 @@ export function resolveAssistantPendingCheckpoint(
     nodeId,
     ...(typeof mode === "string" ? { mode } : {}),
     label,
+    ...(typeof graphNode?.checkpoint?.blueprintArtifactId === "string" ? { blueprintArtifactId: graphNode.checkpoint.blueprintArtifactId } : {}),
+    ...(typeof graphNode?.checkpoint?.requiredBlueprintStatus === "string" ? { requiredBlueprintStatus: graphNode.checkpoint.requiredBlueprintStatus } : {}),
   };
 }
 
@@ -1204,6 +1238,96 @@ export function formatAssistantTimelineMessage(
 }
 
 export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, message: SSEMessage): AssistantComposerState {
+  // Handle write-next:success — when verificationPending=true, show a pending verification card.
+  if (message.event === "write-next:success") {
+    const payload = typeof message.data === "object" && message.data !== null ? message.data as Record<string, unknown> : null;
+    if (!payload) return state;
+    const details = typeof payload.details === "object" && payload.details !== null ? payload.details as Record<string, unknown> : {};
+    if (details.verificationPending !== true) return state;
+    const bookId = typeof payload.bookId === "string" ? payload.bookId : "";
+    const chapterNumber = typeof payload.chapterNumber === "number" ? payload.chapterNumber : undefined;
+    // Avoid duplicate pending cards for the same bookId/chapterNumber
+    const alreadyPending = state.messages.some(
+      (m) => m.cards?.some(
+        (c) => c.type === "verification" && (c.payload as Record<string, unknown>).pending === true
+          && (c.payload as Record<string, unknown>).bookId === bookId
+          && (chapterNumber === undefined || (c.payload as Record<string, unknown>).chapterNumber === chapterNumber),
+      ),
+    );
+    if (alreadyPending) return state;
+    const now = message.timestamp ?? Date.now();
+    return {
+      ...state,
+      messages: [
+        ...state.messages,
+        {
+          id: `msg-${state.nextMessageId}`,
+          role: "assistant",
+          content: "章节已生成，正在验证用户契约",
+          timestamp: now,
+          cards: [{ type: "verification", payload: { pending: true, bookId, ...(chapterNumber !== undefined ? { chapterNumber } : {}) } }],
+        },
+      ],
+      nextMessageId: state.nextMessageId + 1,
+    };
+  }
+
+  // Handle write-next:verification independently — it carries a bookId, not a taskId.
+  if (message.event === "write-next:verification") {
+    const payload = typeof message.data === "object" && message.data !== null ? message.data as Record<string, unknown> : null;
+    if (!payload) return state;
+    const report = typeof payload.report === "object" && payload.report !== null ? payload.report as Record<string, unknown> : {};
+    const bookId = typeof payload.bookId === "string" ? payload.bookId : "";
+    const chapterNumber = typeof payload.chapterNumber === "number" ? payload.chapterNumber : undefined;
+    const verCardPayload: Record<string, unknown> = {
+      ...report,
+      ...(typeof payload.contractSatisfaction === "number" ? { contractSatisfaction: payload.contractSatisfaction } : {}),
+      ...(Array.isArray(payload.satisfiedRequirements) ? { satisfiedRequirements: payload.satisfiedRequirements } : {}),
+      ...(Array.isArray(payload.missingRequirements) ? { missingRequirements: payload.missingRequirements } : {}),
+      ...(Array.isArray(payload.sourceArtifactIds) ? { sourceArtifactIds: payload.sourceArtifactIds } : {}),
+      ...(typeof payload.graphPatchConsumption === "object" && payload.graphPatchConsumption !== null ? { graphPatchConsumption: payload.graphPatchConsumption } : {}),
+      ...(typeof payload.warning === "string" ? { warning: payload.warning } : {}),
+    };
+    const now = message.timestamp ?? Date.now();
+    const newCard: AssistantMessageCard = { type: "verification", payload: verCardPayload };
+    // Try to replace an existing pending verification card for the same bookId/chapterNumber
+    let pendingIndex = -1;
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m.cards?.some(
+        (c) => c.type === "verification" && (c.payload as Record<string, unknown>).pending === true
+          && (c.payload as Record<string, unknown>).bookId === bookId
+          && (chapterNumber === undefined || (c.payload as Record<string, unknown>).chapterNumber === chapterNumber),
+      )) {
+        pendingIndex = i;
+        break;
+      }
+    }
+    if (pendingIndex >= 0) {
+      const replaced = state.messages.map((m, i) =>
+        i !== pendingIndex
+          ? m
+          : { ...m, content: "章节契约验证完成", cards: [newCard], timestamp: now },
+      );
+      return { ...state, messages: replaced };
+    }
+    // No pending card found — append a new verification message
+    return {
+      ...state,
+      messages: [
+        ...state.messages,
+        {
+          id: `msg-${state.nextMessageId}`,
+          role: "assistant",
+          content: "章节契约验证完成",
+          timestamp: now,
+          cards: [newCard],
+        },
+      ],
+      nextMessageId: state.nextMessageId + 1,
+    };
+  }
+
   if (!ASSISTANT_EVENT_SET.has(message.event)) {
     return state;
   }
@@ -1252,13 +1376,25 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
     : payload?.nodeStatus === "waiting_approval"
       ? "waiting_approval"
       : "running";
+  const checkpointPayload = typeof payload?.checkpoint === "object" && payload.checkpoint !== null && !Array.isArray(payload.checkpoint)
+    ? payload.checkpoint as Record<string, unknown>
+    : null;
+  const checkpointMode = typeof payload?.mode === "string" ? payload.mode : undefined;
+  const checkpointLabel = checkpointMode === "blueprint-confirm"
+    ? "蓝图确认"
+    : checkpointMode === "publish-candidate-confirm"
+      ? "发布候选确认"
+      : "流程确认";
   const pendingCheckpoint = payload?.action === "checkpoint"
     && payload?.nodeStatus === "waiting_approval"
     && typeof payload?.stepId === "string"
     && payload.stepId.trim().length > 0
     ? {
         nodeId: payload.stepId,
-        label: "流程确认",
+        ...(checkpointMode ? { mode: checkpointMode } : {}),
+        label: checkpointLabel,
+        ...(typeof checkpointPayload?.blueprintArtifactId === "string" ? { blueprintArtifactId: checkpointPayload.blueprintArtifactId } : {}),
+        ...(typeof checkpointPayload?.requiredBlueprintStatus === "string" ? { requiredBlueprintStatus: checkpointPayload.requiredBlueprintStatus } : {}),
       }
     : taskStatus === "waiting_approval"
       ? currentExecution.pendingCheckpoint ?? null
@@ -1470,6 +1606,7 @@ export function completeAssistantResponse(
   state: AssistantComposerState,
   responseText: string,
   now = Date.now(),
+  cards?: ReadonlyArray<AssistantMessageCard>,
 ): AssistantComposerState {
   const content = responseText.trim() || "已完成，请继续下一步操作。";
   return {
@@ -1488,6 +1625,7 @@ export function completeAssistantResponse(
       role: "assistant",
       content,
       timestamp: now,
+      ...(cards && cards.length > 0 ? { cards } : {}),
     }],
     nextMessageId: state.nextMessageId + 1,
   };
@@ -2151,8 +2289,14 @@ function useElapsedTime(startTimestamp: number | null): string {
 
 function MessageList({
   messages,
+  sessionId,
+  bookId,
+  onBlueprintUpdate,
 }: {
   readonly messages: ReadonlyArray<AssistantMessage>;
+  readonly sessionId?: string;
+  readonly bookId?: string;
+  readonly onBlueprintUpdate?: (messageId: string, cardIndex: number, newPayload: Record<string, unknown>) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -2169,7 +2313,17 @@ function MessageList({
           {message.role === "user" ? (
             message.content
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+              {message.cards && message.cards.length > 0 && (
+                <NovelosMessageCards
+                  cards={message.cards}
+                  sessionId={sessionId}
+                  bookId={bookId}
+                  onBlueprintUpdate={onBlueprintUpdate ? (cardIndex, newPayload) => onBlueprintUpdate(message.id, cardIndex, newPayload) : undefined}
+                />
+              )}
+            </>
           )}
         </div>
       ))}
@@ -2228,6 +2382,153 @@ function AssistantThinkingIndicator({
         )}
       </div>
       <div ref={bottomRef} />
+    </>
+  );
+}
+
+/**
+ * Wrapper that adds inline confirm/edit interactions to a blueprint card.
+ * Manages local edit-dialog state and calls the blueprint API on submit.
+ */
+function BlueprintCardShell({
+  card,
+  cardIndex,
+  sessionId,
+  bookId,
+  onBlueprintUpdate,
+}: {
+  readonly card: AssistantMessageCard;
+  readonly cardIndex: number;
+  readonly sessionId?: string;
+  readonly bookId?: string;
+  readonly onBlueprintUpdate?: (cardIndex: number, newPayload: Record<string, unknown>) => void;
+}) {
+  const [editOpen, setEditOpen] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [editError, setEditError] = useState("");
+
+  const payload = card.payload as unknown as BlueprintPreviewPayload;
+  const artifactId = typeof payload.artifactId === "string" ? payload.artifactId : undefined;
+  const canInteract = Boolean(artifactId && sessionId && onBlueprintUpdate);
+
+  const handleConfirm = canInteract
+    ? async () => {
+        try {
+          const result = await postApi<{ blueprint: Record<string, unknown> }>(
+            `/assistant/blueprint/${artifactId}/confirm`,
+            { sessionId: sessionId ?? "", bookId },
+          );
+          onBlueprintUpdate!(cardIndex, result.blueprint);
+        } catch { /* best-effort */ }
+      }
+    : undefined;
+
+  const handleEditOpen = canInteract
+    ? () => {
+        setEditText(JSON.stringify(payload, null, 2));
+        setEditError("");
+        setEditOpen(true);
+      }
+    : undefined;
+
+  const handleEditSubmit = async () => {
+    let patch: Record<string, unknown>;
+    try {
+      patch = JSON.parse(editText) as Record<string, unknown>;
+    } catch {
+      setEditError("JSON 格式错误，请检查后重试");
+      return;
+    }
+    try {
+      const result = await putApi<{ blueprint: Record<string, unknown> }>(
+        `/assistant/blueprint/${artifactId}`,
+        { sessionId: sessionId ?? "", bookId, patch },
+      );
+      onBlueprintUpdate!(cardIndex, result.blueprint);
+      setEditOpen(false);
+    } catch { /* best-effort */ }
+  };
+
+  return (
+    <div>
+      <BlueprintPreviewCard
+        blueprint={payload}
+        onConfirm={handleConfirm}
+        onEdit={handleEditOpen}
+      />
+      {editOpen && (
+        <div className="mt-2 rounded-md border border-border bg-card/50 p-3 space-y-2" data-testid="blueprint-edit-panel">
+          <div className="text-xs font-medium text-foreground">编辑蓝图（直接修改 JSON）</div>
+          <textarea
+            className="w-full rounded border border-border bg-background p-2 text-xs font-mono h-48 resize-y"
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            data-testid="blueprint-edit-textarea"
+          />
+          {editError && (
+            <div className="text-xs text-destructive" data-testid="blueprint-edit-error">{editError}</div>
+          )}
+          <div className="flex gap-2 justify-end">
+            <button
+              type="button"
+              className="text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-foreground"
+              onClick={() => { setEditOpen(false); setEditError(""); }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
+              onClick={handleEditSubmit}
+              data-testid="blueprint-edit-submit"
+            >
+              保存蓝图
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function NovelosMessageCards({
+  cards,
+  sessionId,
+  bookId,
+  onBlueprintUpdate,
+}: {
+  readonly cards: ReadonlyArray<AssistantMessageCard>;
+  readonly sessionId?: string;
+  readonly bookId?: string;
+  readonly onBlueprintUpdate?: (cardIndex: number, newPayload: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      {cards.map((card, i) => {
+        switch (card.type) {
+          case "plot_critique":
+            return <PlotCritiqueCard key={i} critique={card.payload as unknown as PlotCritiqueCardPayload} />;
+          case "contract":
+            return <ContractCard key={i} contract={card.payload as unknown as ContractCardPayload} />;
+          case "blueprint":
+            return (
+              <BlueprintCardShell
+                key={i}
+                card={card}
+                cardIndex={i}
+                sessionId={sessionId}
+                bookId={bookId}
+                onBlueprintUpdate={onBlueprintUpdate}
+              />
+            );
+          case "verification":
+            return <ContractVerificationCard key={i} report={card.payload as unknown as VerificationReportPayload} />;
+          case "editor_report":
+            return <EditorReportCard key={i} report={card.payload as unknown as EditorReportPayload} />;
+          default:
+            return null;
+        }
+      })}
     </>
   );
 }
@@ -3301,7 +3602,7 @@ export function AssistantView({
           const reply = result.response.trim() || "没有收到回复，请重试。";
           saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, response: reply, completedAt: Date.now(), progressLogs });
           invalidateAssistantBookViews(resolvedContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null));
-          setState((prev) => completeAssistantResponse(prev, reply));
+          setState((prev) => completeAssistantResponse(prev, reply, undefined, result.cards));
         } else {
           const errorMsg = result.error ?? "未知错误";
           if (shouldKeepPendingOnChatDisconnect(errorMsg)) {
@@ -3399,6 +3700,20 @@ export function AssistantView({
     sendPrompt(buildAssistantNextActionPrompt(action, state.taskPlan));
   };
 
+  const handleUpdateBlueprintCard = useCallback((messageId: string, cardIndex: number, newPayload: Record<string, unknown>) => {
+    setState((prev) => ({
+      ...prev,
+      messages: prev.messages.map((msg) =>
+        msg.id !== messageId ? msg : {
+          ...msg,
+          cards: msg.cards?.map((card, idx) =>
+            idx !== cardIndex ? card : { ...card, payload: newPayload },
+          ),
+        },
+      ),
+    }));
+  }, []);
+
   const handleSelectCandidate = async (nodeId: string, candidateId: string) => {
     if (!state.taskExecution) {
       return;
@@ -3422,9 +3737,18 @@ export function AssistantView({
     if (!state.taskExecution) {
       return;
     }
+    const checkpoint = state.taskExecution.pendingCheckpoint?.nodeId === nodeId
+      ? state.taskExecution.pendingCheckpoint
+      : null;
     setScopeBlockHint("");
     setState((prev) => ({ ...prev, loading: true }));
     try {
+      if (checkpoint?.mode === "blueprint-confirm" && checkpoint.blueprintArtifactId) {
+        await postApi(`/assistant/blueprint/${checkpoint.blueprintArtifactId}/confirm`, {
+          sessionId: state.taskExecution.sessionId,
+          ...(chatBookContext?.id ? { bookId: chatBookContext.id } : {}),
+        });
+      }
       await postApi(`/assistant/tasks/${state.taskExecution.taskId}/approve/${nodeId}`, {});
       const snapshot = await fetchJson<AssistantTaskSnapshot>(`/assistant/tasks/${state.taskExecution.taskId}`);
       setState((prev) => reconcileAssistantTaskFromSnapshot({
@@ -3584,6 +3908,9 @@ export function AssistantView({
             {showLoading ? <LoadingConversation /> : state.messages.length === 0 ? <EmptyConversation /> : (
             <MessageList
               messages={state.messages}
+              sessionId={state.taskExecution?.sessionId}
+              bookId={chatBookContext?.id}
+              onBlueprintUpdate={handleUpdateBlueprintCard}
             />
           )}
           {state.taskPlan && (
@@ -3615,7 +3942,7 @@ export function AssistantView({
             <CheckpointApprovalCard
               nodeId={state.taskExecution.pendingCheckpoint.nodeId}
               label={state.taskExecution.pendingCheckpoint.label}
-              disabled={assistantBusy}
+              disabled={false}
               onApprove={handleApproveCheckpoint}
             />
           )}

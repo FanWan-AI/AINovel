@@ -7,6 +7,10 @@ export interface CheckpointState {
   readonly requiredApproval: boolean;
   readonly approvedAt?: string;
   readonly approvedBy?: string;
+  /** ID of the blueprint artifact that must be confirmed before this checkpoint can be approved. */
+  readonly blueprintArtifactId?: string;
+  /** The payload status value required (default "confirmed"). */
+  readonly requiredBlueprintStatus?: string;
 }
 
 export interface TaskNode {
@@ -20,6 +24,9 @@ export interface TaskNode {
   readonly parallelCandidates?: number;
   readonly planInput?: string;
   readonly brief?: string;
+  readonly steeringContract?: Record<string, unknown>;
+  readonly blueprint?: Record<string, unknown>;
+  readonly sourceArtifactIds?: ReadonlyArray<string>;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly maxRetries?: number;
   readonly checkpoint?: CheckpointState;
@@ -50,6 +57,9 @@ export interface TaskNodeRuntimeState {
   readonly parallelCandidates?: number;
   readonly planInput?: string;
   readonly brief?: string;
+  readonly steeringContract?: Record<string, unknown>;
+  readonly blueprint?: Record<string, unknown>;
+  readonly sourceArtifactIds?: ReadonlyArray<string>;
   readonly maxRetries: number;
   readonly attempts: number;
   readonly status: TaskNodeStatus;
@@ -142,6 +152,9 @@ interface MutableTaskNodeRuntimeState {
   parallelCandidates?: number;
   planInput?: string;
   brief?: string;
+  steeringContract?: Record<string, unknown>;
+  blueprint?: Record<string, unknown>;
+  sourceArtifactIds?: ReadonlyArray<string>;
   maxRetries: number;
   attempts: number;
   status: TaskNodeStatus;
@@ -183,6 +196,9 @@ function cloneNodeState(node: MutableTaskNodeRuntimeState): TaskNodeRuntimeState
     ...node,
     ...(node.bookIds ? { bookIds: [...node.bookIds] } : {}),
     ...(node.checkpoint ? { checkpoint: cloneCheckpoint(node.checkpoint) } : {}),
+    ...(node.steeringContract ? { steeringContract: { ...node.steeringContract } } : {}),
+    ...(node.blueprint ? { blueprint: { ...node.blueprint } } : {}),
+    ...(node.sourceArtifactIds ? { sourceArtifactIds: [...node.sourceArtifactIds] } : {}),
   };
 }
 
@@ -360,6 +376,9 @@ export class AssistantConductor {
           ...(node.parallelCandidates !== undefined ? { parallelCandidates: node.parallelCandidates } : {}),
           ...(node.planInput ? { planInput: node.planInput } : {}),
           ...(node.brief ? { brief: node.brief } : {}),
+          ...(node.steeringContract ? { steeringContract: node.steeringContract } : {}),
+          ...(node.blueprint ? { blueprint: node.blueprint } : {}),
+          ...(node.sourceArtifactIds ? { sourceArtifactIds: [...node.sourceArtifactIds] } : {}),
           maxRetries: Math.max(node.maxRetries ?? 0, 0),
           attempts: 0,
           status: "pending",
@@ -379,21 +398,25 @@ export class AssistantConductor {
     autoApprove: boolean,
   ): AsyncGenerator<AssistantConductorEvent> {
     const state = run.nodes[node.nodeId]!;
+    const checkpointRequiresManualApproval = node.checkpoint?.requiredBlueprintStatus === "confirmed"
+      || Boolean(node.checkpoint?.blueprintArtifactId);
+    const shouldAutoApprove = autoApprove && !checkpointRequiresManualApproval;
     const startedAt = this.now();
     state.attempts += 1;
     state.startedAt ??= startedAt;
-    state.status = autoApprove ? "running" : "waiting_approval";
+    state.status = shouldAutoApprove ? "running" : "waiting_approval";
     state.checkpoint = {
+      ...(node.checkpoint ?? {}),
       nodeId: node.nodeId,
       requiredApproval: true,
-      ...(autoApprove ? { approvedAt: startedAt, approvedBy: "auto" } : {}),
+      ...(shouldAutoApprove ? { approvedAt: startedAt, approvedBy: "auto" } : {}),
     };
-    run.status = autoApprove ? "running" : "waiting_approval";
+    run.status = shouldAutoApprove ? "running" : "waiting_approval";
     run.currentNodeId = node.nodeId;
     run.lastUpdatedAt = startedAt;
     yield this.buildNodeEvent(run, state, "start", startedAt);
 
-    if (!autoApprove) {
+    if (!shouldAutoApprove) {
       await new Promise<void>((resolve) => {
         run.approvalResolvers.set(node.nodeId, resolve);
       });
@@ -403,10 +426,11 @@ export class AssistantConductor {
     state.status = "succeeded";
     state.finishedAt = finishedAt;
     state.checkpoint = {
+      ...(state.checkpoint ?? node.checkpoint ?? {}),
       nodeId: node.nodeId,
       requiredApproval: true,
       approvedAt: state.checkpoint?.approvedAt ?? finishedAt,
-      approvedBy: state.checkpoint?.approvedBy ?? (autoApprove ? "auto" : "manual"),
+      approvedBy: state.checkpoint?.approvedBy ?? (shouldAutoApprove ? "auto" : "manual"),
     };
     run.status = "running";
     run.currentNodeId = node.nodeId;

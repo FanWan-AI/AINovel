@@ -56,6 +56,7 @@ describe("QualityReportCard", () => {
               excerpt: "| 维度 | 观察 |\n| --- | --- |\n| 冲突 | 目标与结果不一致 |",
               reason: "关键冲突未闭环",
             }],
+            cached: true,
           },
           book: {
             scopeType: "book",
@@ -87,7 +88,7 @@ describe("QualityReportCard", () => {
     expect(html).toContain("已复用 book memory 缓存");
     expect(html).toContain("动机承接偏弱");
     expect(html).toContain("chapter-run:run_01");
-    expect(html).toContain("<table>");
+    expect(html).toContain("<table"); // react-markdown may add extra attributes
     expect(html).toContain("目标与结果不一致");
     expect(html).not.toContain("下一步：spot-fix");
   });
