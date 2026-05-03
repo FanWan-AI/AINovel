@@ -105,6 +105,43 @@ vi.mock("@actalk/inkos-core", () => {
     }
   }
 
+  const ChapterBlueprintSchema = {
+    safeParse(raw: unknown) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        return { success: false as const };
+      }
+      const payload = raw as Record<string, unknown>;
+      const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+      const valid = typeof payload.openingHook === "string"
+        && payload.openingHook.trim().length > 0
+        && scenes.length >= 5
+        && scenes.length <= 8
+        && scenes.every((scene) => {
+          if (typeof scene !== "object" || scene === null || Array.isArray(scene)) return false;
+          const s = scene as Record<string, unknown>;
+          return typeof s.beat === "string" && s.beat.trim().length > 0
+            && typeof s.conflict === "string" && s.conflict.trim().length > 0
+            && typeof s.turn === "string" && s.turn.trim().length > 0
+            && typeof s.payoff === "string" && s.payoff.trim().length > 0
+            && typeof s.cost === "string" && s.cost.trim().length > 0;
+        })
+        && typeof payload.payoffRequired === "string"
+        && payload.payoffRequired.trim().length > 0
+        && typeof payload.endingHook === "string"
+        && payload.endingHook.trim().length > 0
+        && (payload.status === undefined || payload.status === "draft" || payload.status === "edited" || payload.status === "confirmed");
+      return valid
+        ? {
+            success: true as const,
+            data: {
+              ...payload,
+              contractSatisfaction: Array.isArray(payload.contractSatisfaction) ? payload.contractSatisfaction : [],
+            },
+          }
+        : { success: false as const };
+    },
+  };
+
   return {
     StateManager: MockStateManager,
     PipelineRunner: MockPipelineRunner,
@@ -112,6 +149,7 @@ vi.mock("@actalk/inkos-core", () => {
     ContinuityAuditor: MockContinuityAuditor,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
+    ChapterBlueprintSchema,
     computeAnalytics: vi.fn(() => ({})),
     chatCompletion: chatCompletionMock,
     runAgentLoop: runAgentLoopMock,
@@ -6420,13 +6458,20 @@ describe("P2.5 — loadLatestSteeringArtifacts only injects confirmed blueprint"
     const confirmedBlueprint = {
       artifactId: "art_confirmed_bp_001",
       sessionId: "sess_confirmed_bp_001",
+      bookId: "demo-book",
       type: "chapter_blueprint",
       title: "章节戏剧蓝图",
       createdAt: new Date().toISOString(),
       sourceMessageIds: [],
       payload: {
         openingHook: "confirmed opening",
-        scenes: [],
+        scenes: Array.from({ length: 5 }, (_, index) => ({
+          beat: `confirmed beat ${index + 1}`,
+          conflict: `confirmed conflict ${index + 1}`,
+          turn: `confirmed turn ${index + 1}`,
+          payoff: `confirmed payoff ${index + 1}`,
+          cost: `confirmed cost ${index + 1}`,
+        })),
         payoffRequired: "test",
         endingHook: "confirmed ending",
         contractSatisfaction: [],
@@ -6440,6 +6485,7 @@ describe("P2.5 — loadLatestSteeringArtifacts only injects confirmed blueprint"
     const plotCritique2 = {
       artifactId: "art_confirmed_crit_001",
       sessionId: "sess_confirmed_bp_001",
+      bookId: "demo-book",
       type: "plot_critique",
       title: "剧情分析",
       createdAt: new Date().toISOString(),
@@ -6471,6 +6517,69 @@ describe("P2.5 — loadLatestSteeringArtifacts only injects confirmed blueprint"
     // Confirmed blueprint SHOULD be injected
     expect(writeNextNode?.blueprint).toBeDefined();
   });
+
+  it("write-next node in plan does NOT get invalid confirmed blueprint injected", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+
+    const plotCritique = {
+      artifactId: "art_invalid_confirmed_crit_001",
+      sessionId: "sess_invalid_confirmed_bp_001",
+      bookId: "demo-book",
+      type: "plot_critique",
+      title: "剧情分析",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: { nextChapterOpportunities: [] },
+      summary: "test",
+      searchableText: "test",
+    };
+    const invalidConfirmedBlueprint = {
+      artifactId: "art_invalid_confirmed_bp_001",
+      sessionId: "sess_invalid_confirmed_bp_001",
+      bookId: "demo-book",
+      type: "chapter_blueprint",
+      title: "章节戏剧蓝图",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        openingHook: "invalid confirmed opening",
+        scenes: [],
+        payoffRequired: "test",
+        endingHook: "invalid confirmed ending",
+        contractSatisfaction: [],
+        status: "confirmed",
+        version: 2,
+        artifactId: "art_invalid_confirmed_bp_001",
+      },
+      summary: "Blueprint v2: confirmed but invalid",
+      searchableText: "test",
+    };
+    await writeFile(
+      join(artifactsDir, "sess_invalid_confirmed_bp_001.jsonl"),
+      JSON.stringify(plotCritique) + "\n" + JSON.stringify(invalidConfirmedBlueprint) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_invalid_confirmed_bp_001",
+        input: "按照你刚才说的规划下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ action: string; blueprint?: unknown }> };
+    };
+    const writeNextNode = data.graph?.nodes.find((n) => n.action === "write-next");
+    expect(writeNextNode?.blueprint).toBeUndefined();
+  });
 });
 
 describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked without confirmed blueprint", () => {
@@ -6498,6 +6607,7 @@ describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked 
     const draftBpForCheckpoint = {
       artifactId: "art_bp_checkpoint_001",
       sessionId: "sess_bp_checkpoint_001",
+      bookId: "demo-book",
       type: "chapter_blueprint",
       title: "章节戏剧蓝图",
       createdAt: new Date().toISOString(),
@@ -6518,6 +6628,7 @@ describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked 
     const critiqueForCheckpoint = {
       artifactId: "art_crit_checkpoint_001",
       sessionId: "sess_bp_checkpoint_001",
+      bookId: "demo-book",
       type: "plot_critique",
       title: "剧情分析",
       createdAt: new Date().toISOString(),
@@ -6561,6 +6672,7 @@ describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked 
     const critiqueOnly = {
       artifactId: "art_crit_no_bp_001",
       sessionId: "sess_no_bp_001",
+      bookId: "demo-book",
       type: "plot_critique",
       title: "剧情分析",
       createdAt: new Date().toISOString(),

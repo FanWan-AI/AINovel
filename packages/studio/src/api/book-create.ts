@@ -6,6 +6,7 @@ export interface StudioCreateBookBody {
   readonly language?: string;
   readonly platform?: string;
   readonly chapterWordCount?: number;
+  readonly chapterLengthTolerancePercent?: number;
   readonly targetChapters?: number;
 }
 
@@ -17,6 +18,7 @@ export interface StudioBookConfigDraft {
   readonly status: "outlining";
   readonly targetChapters: number;
   readonly chapterWordCount: number;
+  readonly chapterLengthTolerancePercent: number;
   readonly language?: "zh" | "en";
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -65,6 +67,7 @@ export function buildStudioBookConfig(body: StudioCreateBookBody, now: string): 
     status: "outlining",
     targetChapters: body.targetChapters ?? 200,
     chapterWordCount: body.chapterWordCount ?? 3000,
+    chapterLengthTolerancePercent: body.chapterLengthTolerancePercent ?? 30,
     ...(body.language === "en"
       ? { language: "en" as const }
       : body.language === "zh"

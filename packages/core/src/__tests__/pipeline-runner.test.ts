@@ -1454,8 +1454,8 @@ describe("PipelineRunner", () => {
         }),
         lengthSpec: expect.objectContaining({
           target: 220,
-          softMin: 190,
-          softMax: 250,
+          softMin: 154,
+          softMax: 286,
         }),
       });
     } finally {
@@ -1583,8 +1583,8 @@ describe("PipelineRunner", () => {
       expect(reviseChapter.mock.calls[0]?.[6]).toMatchObject({
         lengthSpec: expect.objectContaining({
           target: 220,
-          softMin: 190,
-          softMax: 250,
+          softMin: 154,
+          softMax: 286,
         }),
       });
       expect(normalizeChapter).toHaveBeenCalledTimes(1);
@@ -1603,7 +1603,7 @@ describe("PipelineRunner", () => {
   it("normalizes overlong writer output once before audit", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const overlongDraft = "冗余句子。".repeat(60);
-    const normalizedDraft = "压缩后的正文。".repeat(12);
+    const normalizedDraft = "压缩后的正文。".repeat(30);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -1651,7 +1651,7 @@ describe("PipelineRunner", () => {
   it("normalizes short writer output once before audit", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const shortDraft = "短句。".repeat(20);
-    const normalizedDraft = "补足后的正文。".repeat(15);
+    const normalizedDraft = "补足后的正文。".repeat(30);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -1694,8 +1694,8 @@ describe("PipelineRunner", () => {
         chapterContent: shortDraft,
         lengthSpec: expect.objectContaining({
           target: 220,
-          softMin: 190,
-          softMax: 250,
+          softMin: 154,
+          softMax: 286,
         }),
       });
       expect(auditChapter.mock.calls[0]?.[1]).toBe(normalizedDraft);
@@ -1704,7 +1704,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("records a length warning when a single normalize pass still misses the hard range", async () => {
+  it("rejects a destructive normalize pass that still misses the hard range", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const overlongDraft = "冗余句子。".repeat(60);
     const stillOverHard = "仍然过长。".repeat(70);
@@ -1748,9 +1748,10 @@ describe("PipelineRunner", () => {
       expect((result as { lengthWarnings?: ReadonlyArray<string> }).lengthWarnings?.[0]).toContain(
         "超出硬区间",
       );
-      expect((result as { lengthTelemetry?: { finalCount: number } }).lengthTelemetry?.finalCount).toBe(
-        stillOverHard.length,
+      expect((result as { lengthTelemetry?: { finalCount: number; normalizeApplied: boolean } }).lengthTelemetry?.finalCount).toBe(
+        overlongDraft.length,
       );
+      expect((result as { lengthTelemetry?: { normalizeApplied: boolean } }).lengthTelemetry?.normalizeApplied).toBe(false);
       expect(chapterMeta?.lengthWarnings?.[0]).toContain("超出硬区间");
       expect(chapterMeta?.lengthTelemetry?.lengthWarning).toBe(true);
     } finally {

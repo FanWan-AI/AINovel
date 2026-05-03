@@ -853,6 +853,21 @@ describe("AssistantView", () => {
         missingRequirements: [],
         satisfiedRequirements: ["必须包含：林清雪主动找万凡"],
         sourceArtifactIds: ["art-001"],
+        blueprintFulfillment: {
+          score: 86,
+          shouldRewrite: false,
+          openingHook: {
+            expected: "林清雪主动找万凡",
+            position: 0,
+            withinFirst300Words: true,
+            status: "satisfied",
+            evidence: "林清雪主动找万凡",
+          },
+          scenes: [],
+          payoffRequired: { status: "satisfied", evidence: "关系推进" },
+          endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "章尾钩子" },
+          blockingIssues: [],
+        },
       },
       timestamp: 1234567890,
     };
@@ -866,6 +881,10 @@ describe("AssistantView", () => {
     expect(next.messages[0]!.cards![0]!.payload.shouldRewrite).toBe(false);
     expect(next.messages[0]!.cards![0]!.payload.contractSatisfaction).toBe(0.8);
     expect((next.messages[0]!.cards![0]!.payload.sourceArtifactIds as string[])).toContain("art-001");
+    expect(next.messages[0]!.cards![0]!.payload.blueprintFulfillment).toMatchObject({
+      score: 86,
+      shouldRewrite: false,
+    });
     expect(next.nextMessageId).toBe(initial.nextMessageId + 1);
   });
 

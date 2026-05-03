@@ -58,6 +58,11 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return ["/api/books", `/api/books/${chapterAction[1]}`];
   }
 
+  const bookUpdate = normalized.match(/^\/api\/books\/([^/]+)$/);
+  if (bookUpdate) {
+    return ["/api/books", `/api/books/${bookUpdate[1]}`];
+  }
+
   if (/^\/api\/daemon\/(start|stop)$/.test(normalized)) {
     return ["/api/daemon"];
   }

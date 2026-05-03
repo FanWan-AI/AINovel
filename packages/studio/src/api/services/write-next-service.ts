@@ -52,7 +52,7 @@ export function buildWriteNextExternalContext(input: WriteNextInput): string | u
     sections.push(`## Source Artifacts\n${input.sourceArtifactIds.map((id) => `- ${id}`).join("\n")}`);
   }
 
-  if (input.blueprint) {
+  if (input.blueprint && input.blueprint.status !== "draft" && input.blueprint.status !== "edited") {
     sections.push(formatBlueprint(input.blueprint));
   }
 
@@ -111,7 +111,7 @@ export function buildWriteNextContextFromPlan(
     sections.push(`## Source Artifacts\n${input.sourceArtifactIds.map((id) => `- ${id}`).join("\n")}`);
   }
 
-  if (input.blueprint) {
+  if (input.blueprint && input.blueprint.status !== "draft" && input.blueprint.status !== "edited") {
     sections.push(formatBlueprint(input.blueprint));
   }
 
@@ -120,12 +120,18 @@ export function buildWriteNextContextFromPlan(
 
 function formatBlueprint(blueprint: NonNullable<WriteNextInput["blueprint"]>): string {
   const lines: string[] = ["## Chapter Blueprint"];
+  if (blueprint.status) lines.push(`### Status\n${blueprint.status}`);
+  if (blueprint.version) lines.push(`### Version\n${blueprint.version}`);
+  if (blueprint.sourceArtifactIds && blueprint.sourceArtifactIds.length > 0) {
+    lines.push(`### Blueprint Source Artifacts\n${blueprint.sourceArtifactIds.map((id) => `- ${id}`).join("\n")}`);
+  }
   if (blueprint.openingHook) lines.push(`### Opening Hook\n${blueprint.openingHook.trim()}`);
   if (blueprint.scenes && blueprint.scenes.length > 0) {
     lines.push("### Scenes");
     for (const [i, scene] of blueprint.scenes.entries()) {
       const parts = [`Beat: ${scene.beat}`];
       if (scene.conflict) parts.push(`Conflict: ${scene.conflict}`);
+      if (scene.informationGap) parts.push(`InformationGap: ${scene.informationGap}`);
       if (scene.turn) parts.push(`Turn: ${scene.turn}`);
       if (scene.payoff) parts.push(`Payoff: ${scene.payoff}`);
       if (scene.cost) parts.push(`Cost: ${scene.cost}`);
@@ -138,6 +144,7 @@ function formatBlueprint(blueprint: NonNullable<WriteNextInput["blueprint"]>): s
     lines.push("### Contract Satisfaction");
     for (const item of blueprint.contractSatisfaction) lines.push(`- ${item}`);
   }
+  lines.push(`### Structured Blueprint JSON\n\`\`\`json\n${JSON.stringify(blueprint, null, 2)}\n\`\`\``);
   return lines.join("\n\n");
 }
 

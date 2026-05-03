@@ -26,6 +26,7 @@ export interface PlanChapterInput {
   readonly bookDir: string;
   readonly chapterNumber: number;
   readonly externalContext?: string;
+  readonly confirmedChapterBlueprint?: ChapterBlueprint;
 }
 
 export interface PlanChapterOutput {
@@ -76,7 +77,10 @@ export class PlannerAgent extends BaseAgent {
     const outlineNode = this.findOutlineNode(volumeOutline, input.chapterNumber);
     const matchedOutlineAnchor = this.hasMatchedOutlineAnchor(volumeOutline, input.chapterNumber);
     const steeringContract = this.parseExternalSteeringContract(input.externalContext);
+    const confirmedBlueprint = input.confirmedChapterBlueprint
+      ?? this.parseExternalConfirmedBlueprint(input.externalContext);
     const goal = steeringContract?.goal
+      ?? confirmedBlueprint?.openingHook
       ?? this.deriveGoal(input.externalContext, currentFocus, authorIntent, outlineNode, input.chapterNumber);
     const parsedRules = parseBookRules(bookRulesRaw);
     const mustKeep = this.unique([
@@ -115,7 +119,7 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries,
     });
 
-    const blueprint = this.buildChapterBlueprint({
+    const blueprint = confirmedBlueprint ?? this.buildChapterBlueprint({
       language: input.book.language ?? "zh",
       goal,
       outlineNode,
@@ -136,6 +140,7 @@ export class PlannerAgent extends BaseAgent {
       styleEmphasis,
       ...(steeringContract ? { steeringContract } : {}),
       blueprint,
+      userContractPriority: confirmedBlueprint ? "hard" : (steeringContract?.priority ?? "normal"),
       conflicts,
       hookAgenda,
     });
@@ -324,6 +329,83 @@ export class PlannerAgent extends BaseAgent {
       priority,
       rawRequest: externalContext.trim(),
     });
+  }
+
+  private parseExternalConfirmedBlueprint(externalContext?: string): ChapterBlueprint | undefined {
+    if (!externalContext || externalContext.trim().length === 0) return undefined;
+
+    const jsonSection = this.extractSection(externalContext, [
+      "structured blueprint json",
+      "chapter blueprint json",
+      "confirmed blueprint json",
+      "结构化蓝图 json",
+    ]);
+    const jsonCandidate = jsonSection ? this.extractJsonObject(jsonSection) : undefined;
+    if (jsonCandidate) {
+      try {
+        const raw = JSON.parse(jsonCandidate);
+        const parsed = ChapterBlueprintSchema.safeParse(raw);
+        if (parsed.success && parsed.data.status === "confirmed") {
+          return parsed.data;
+        }
+      } catch {
+        // Fall back to markdown parsing below.
+      }
+    }
+
+    const blueprintSection = this.extractSection(externalContext, ["chapter blueprint", "章节蓝图"]);
+    if (!blueprintSection || !/status:\s*confirmed|状态[:：]\s*confirmed/i.test(blueprintSection)) {
+      return undefined;
+    }
+
+    const openingHook = this.extractSectionFirstDirective(blueprintSection, ["opening hook", "开场钩子"]);
+    const payoffRequired = this.extractSectionFirstDirective(blueprintSection, ["payoff required", "兑现要求", "爽点兑现"]);
+    const endingHook = this.extractSectionFirstDirective(blueprintSection, ["ending hook", "章尾钩子", "结尾钩子"]);
+    const sceneLines = this.extractSectionList(blueprintSection, ["scenes", "scene beats", "场景", "场景节拍"]);
+    if (!openingHook || !payoffRequired || !endingHook || sceneLines.length < 5) {
+      return undefined;
+    }
+
+    const scenes = sceneLines.slice(0, 8).map((line) => this.parseBlueprintSceneLine(line));
+    const parsed = ChapterBlueprintSchema.safeParse({
+      openingHook,
+      scenes,
+      payoffRequired,
+      endingHook,
+      status: "confirmed",
+      version: 1,
+      sourceArtifactIds: [],
+    });
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  private extractJsonObject(content: string): string | undefined {
+    const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+    if (fenced?.startsWith("{")) return fenced;
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+    if (start >= 0 && end > start) return content.slice(start, end + 1);
+    return undefined;
+  }
+
+  private parseBlueprintSceneLine(line: string): ChapterBlueprint["scenes"][number] {
+    const cleaned = line.replace(/^\d+[.)、]\s*/, "").trim();
+    const parts = new Map<string, string>();
+    for (const part of cleaned.split(/\s+\|\s+/)) {
+      const match = part.match(/^([^:：]+)[:：]\s*(.+)$/u);
+      if (match?.[1] && match[2]) {
+        parts.set(match[1].trim().toLowerCase(), match[2].trim());
+      }
+    }
+    const beat = parts.get("beat") ?? cleaned;
+    return {
+      beat,
+      conflict: parts.get("conflict") ?? "该场景必须有可见阻力，不能只总结推进。",
+      informationGap: parts.get("informationgap") ?? parts.get("information gap"),
+      turn: parts.get("turn") ?? "该场景必须发生局势转折。",
+      payoff: parts.get("payoff") ?? "该场景必须给出可见兑现。",
+      cost: parts.get("cost") ?? "该场景的收益必须伴随代价或风险。",
+    };
   }
 
   private buildChapterBlueprint(input: {
@@ -985,6 +1067,9 @@ export class PlannerAgent extends BaseAgent {
       "",
       "## Style Emphasis",
       styleEmphasis,
+      "",
+      "## User Contract Priority",
+      intent.userContractPriority,
       "",
       "## Steering Contract",
       steeringContract,

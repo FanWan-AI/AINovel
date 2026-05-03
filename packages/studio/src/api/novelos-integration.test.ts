@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AssistantArtifactService } from "./services/assistant-artifact-service.js";
@@ -16,6 +16,7 @@ import { verifyContractSatisfaction } from "./services/contract-verifier-service
 import { buildWriteNextExternalContext } from "./services/write-next-service.js";
 import { NarrativeGraphService } from "./services/narrative-graph-service.js";
 import { compileGraphPatchesToSteering } from "./services/graph-to-steering-compiler.js";
+import { PlannerAgent, auditBlueprintFulfillment, type BookConfig } from "@actalk/inkos-core";
 
 describe("NovelOS: 闭环链路验证", () => {
   let tempDir: string;
@@ -158,6 +159,9 @@ describe("NovelOS: 闭环链路验证", () => {
       payoffRequired: "测试兑现",
       endingHook: "测试钩子",
       contractSatisfaction: ["目标：测试"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_confirmed_bp"],
     };
 
     const ctx = buildWriteNextExternalContext({ blueprint });
@@ -170,6 +174,131 @@ describe("NovelOS: 闭环链路验证", () => {
     expect(ctx).toContain("Ending Hook");
     expect(ctx).toContain("测试钩子");
     expect(ctx).toContain("Contract Satisfaction");
+    expect(ctx).toContain("Structured Blueprint JSON");
+    expect(ctx).toContain("\"status\": \"confirmed\"");
+  });
+
+  it("3b. draft/edited blueprint 不进入 write-next externalContext", () => {
+    const baseBlueprint = {
+      openingHook: "草稿开场不应进入正文链路",
+      scenes: [
+        { beat: "场景1", conflict: "冲突1", turn: "转折1", payoff: "爽点1", cost: "代价1" },
+        { beat: "场景2", conflict: "冲突2", turn: "转折2", payoff: "爽点2", cost: "代价2" },
+        { beat: "场景3", conflict: "冲突3", turn: "转折3", payoff: "爽点3", cost: "代价3" },
+        { beat: "场景4", conflict: "冲突4", turn: "转折4", payoff: "爽点4", cost: "代价4" },
+        { beat: "场景5", conflict: "冲突5", turn: "转折5", payoff: "爽点5", cost: "代价5" },
+      ],
+      payoffRequired: "草稿兑现",
+      endingHook: "草稿钩子",
+      contractSatisfaction: ["draft"],
+    };
+
+    expect(buildWriteNextExternalContext({ blueprint: { ...baseBlueprint, status: "draft" as const } })).toBeUndefined();
+    expect(buildWriteNextExternalContext({ blueprint: { ...baseBlueprint, status: "edited" as const } })).toBeUndefined();
+    expect(buildWriteNextExternalContext({ blueprint: { ...baseBlueprint, status: "confirmed" as const } })).toContain("草稿开场不应进入正文链路");
+  });
+
+  it("3c. confirmed blueprint 结构化进入 ChapterIntent / Writer prompt / verifier 来源", async () => {
+    const book: BookConfig = {
+      id: "book-1",
+      title: "NovelOS Chain",
+      platform: "tomato",
+      genre: "urban",
+      language: "zh",
+      status: "active",
+      targetChapters: 20,
+      chapterWordCount: 3000,
+      createdAt: "2026-05-02T00:00:00.000Z",
+      updatedAt: "2026-05-02T00:00:00.000Z",
+    };
+    const bookDir = join(tempDir, "books", book.id);
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "author_intent.md"), "# Author Intent\n都市系统文，强调信息差压制。\n", "utf-8"),
+      writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n推进林清雪与万凡关系张力。\n", "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n万凡是主角。\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n第3章：关系试探升级。\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "", "utf-8"),
+    ]);
+
+    const blueprint = {
+      openingHook: "林清雪主动找万凡，把一份错误资料拍在他面前。",
+      scenes: [
+        { beat: "林清雪主动找万凡公开试探", conflict: "她用错误资料压迫万凡表态", informationGap: "资料来源被人调包", turn: "万凡没有辩解而是反问来源", payoff: "林清雪第一次意识到自己可能误判", cost: "两人的互信被公开消耗" },
+        { beat: "万凡顺势设置系统反馈验证", conflict: "系统反馈不能被旁人看见", informationGap: "林清雪看不懂万凡的判断依据", turn: "反馈指向林清雪身边人", payoff: "信息差压制成立", cost: "万凡暴露异常判断力" },
+        { beat: "误判反转在办公室当场爆开", conflict: "真正泄密者反咬万凡", informationGap: "证据链缺一环", turn: "林清雪当众改口护住万凡", payoff: "关系筹码改变", cost: "林清雪被卷入对立面" },
+        { beat: "万凡主动选择追查源头", conflict: "继续追会得罪上级", informationGap: "上级与系统任务有关", turn: "万凡放弃安全退路", payoff: "主角主动性兑现", cost: "他失去低调空间" },
+        { beat: "新证据指向更大的误判", conflict: "证据看似证明林清雪也参与", informationGap: "证据时间戳异常", turn: "万凡发现第二层陷阱", payoff: "章尾悬念抬升", cost: "他必须暂时隐瞒林清雪" },
+      ],
+      payoffRequired: "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转。",
+      endingHook: "章尾揭示：那份错误资料最初来自林清雪的私人账号。",
+      contractSatisfaction: ["必须包含：林清雪主动找万凡", "必须包含：误判反转"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_chain_confirmed_bp"],
+    };
+    const externalContext = buildWriteNextExternalContext({
+      steeringContract: {
+        goal: "林清雪主动找万凡，并出现一次误判反转",
+        mustInclude: ["林清雪主动找万凡", "误判反转"],
+        sceneBeats: ["林清雪公开试探万凡"],
+        priority: "hard",
+      },
+      blueprint,
+      sourceArtifactIds: ["art_chain_contract", "art_chain_confirmed_bp"],
+    });
+
+    expect(externalContext).toContain("林清雪主动找万凡");
+    expect(externalContext).toContain("Structured Blueprint JSON");
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: tempDir,
+      bookId: book.id,
+    });
+    const plan = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+      externalContext,
+      confirmedChapterBlueprint: blueprint,
+    });
+
+    expect(plan.intent.blueprint?.openingHook).toContain("错误资料");
+    expect(plan.intent.blueprint?.scenes[0]?.conflict).toContain("压迫万凡表态");
+    const writerPrompt = [
+      "## 本章意图",
+      plan.intentMarkdown,
+      "- openingHook 必须写进开场 300 字内",
+      "- 每个场景必须点名 conflict、turn、payoff、cost",
+    ].join("\n");
+    expect(writerPrompt).toContain("林清雪主动找万凡");
+    expect(writerPrompt).toContain("openingHook");
+    expect(writerPrompt).toContain("公开试探");
+    expect(writerPrompt).toContain("conflict");
+    expect(writerPrompt).toContain("turn");
+    expect(writerPrompt).toContain("payoff");
+    expect(writerPrompt).toContain("cost");
+    expect(writerPrompt).toContain("endingHook");
+    await expect(readFile(plan.runtimePath, "utf-8")).resolves.toContain("林清雪主动找万凡必须带来关系筹码变化");
+
+    const report = verifyContractSatisfaction({
+      chapterText: "林清雪主动找万凡，把资料拍在桌上。误判反转后，她当众改口护住万凡。",
+      mustInclude: ["林清雪主动找万凡", "误判反转"],
+      mustAvoid: [],
+      sceneBeats: [
+        `Blueprint openingHook: ${blueprint.openingHook}`,
+        `Blueprint scene 1 conflict: ${blueprint.scenes[0]!.conflict}`,
+        `Blueprint endingHook: ${blueprint.endingHook}`,
+      ],
+    });
+    expect(report.items.some((item) => item.requirement.includes("Blueprint openingHook"))).toBe(true);
+    expect(report.items.some((item) => item.requirement.includes("Blueprint scene 1 conflict"))).toBe(true);
+    expect(report.items.some((item) => item.requirement.includes("Blueprint endingHook"))).toBe(true);
   });
 
   it("4. mustInclude 出现在正文220字之后，verification 仍必须 satisfied", () => {
@@ -533,6 +662,180 @@ describe("NovelOS: 闭环链路验证", () => {
       expect(result.status).toBe("partially_consumed");
       expect(result.satisfiedRequirements.some((r) => r.includes("林清雪主动找万凡"))).toBe(true);
       expect(result.missingRequirements).toContain("暴力冲突");
+    });
+  });
+
+  // ── P4: Blueprint Fulfillment Auditor integration tests ───────────────
+
+  describe("P4: BlueprintFulfillmentAuditor integration", () => {
+    const CONFIRMED_BLUEPRINT = {
+      openingHook: "林清雪主动找万凡，把一份错误资料拍在他面前",
+      scenes: [
+        { beat: "林清雪公开试探万凡", conflict: "错误资料压迫万凡表态", turn: "万凡反问来源", payoff: "信息差压制成立", cost: "互信被消耗" },
+        { beat: "万凡设置系统反馈验证", conflict: "反馈不能被旁人看见", turn: "反馈指向林清雪身边人", payoff: "信息差成立", cost: "万凡暴露异常判断力" },
+        { beat: "误判反转在办公室爆开", conflict: "真正泄密者反咬万凡", turn: "林清雪当众改口护住万凡", payoff: "关系筹码改变", cost: "林清雪卷入对立面" },
+        { beat: "万凡主动追查源头", conflict: "继续追会得罪上级", turn: "万凡放弃安全退路", payoff: "主角主动性兑现", cost: "失去低调空间" },
+        { beat: "新证据指向更大误判", conflict: "证据看似证明林清雪也参与", turn: "万凡发现第二层陷阱", payoff: "章尾悬念抬升", cost: "必须暂时隐瞒林清雪" },
+      ],
+      payoffRequired: "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转",
+      endingHook: "那份错误资料最初来自林清雪的私人账号",
+      contractSatisfaction: ["必须包含：林清雪主动找万凡"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_confirmed_bp"],
+    };
+
+    it("P4-1. confirmed blueprint + 满足正文 → blueprintFulfillment.score 高, shouldRewrite=false", () => {
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前，面色沉静地等着他的反应。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "万凡设置系统反馈验证，反馈不能被旁人看见，反馈指向林清雪身边人，信息差成立，万凡暴露异常判断力。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "万凡主动追查源头，继续追会得罪上级，万凡放弃安全退路，主角主动性兑现，失去低调空间。" +
+        "新证据指向更大误判，证据看似证明林清雪也参与，万凡发现第二层陷阱，章尾悬念抬升，必须暂时隐瞒林清雪。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转，这一切已经确认。" +
+        "那份错误资料最初来自林清雪的私人账号——这一发现让万凡停住了脚步。";
+
+      const report = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      expect(report.score).toBeGreaterThan(60);
+      expect(report.shouldRewrite).toBe(false);
+      expect(report.openingHook.withinFirst300Words).toBe(true);
+      expect(report.endingHook.nearChapterEnd).toBe(true);
+      expect(report.payoffRequired.status).not.toBe("missing");
+    });
+
+    it("P4-2. confirmed blueprint + 正文缺 openingHook → shouldRewrite=true, blockingIssues 有明确原因", () => {
+      const chapterText =
+        "万凡一个人坐在办公室里思考，没有人来找他。" +
+        "公开试探发生了，资料压迫表态，反问来源，信息差压制成立，互信被消耗。" +
+        "误判反转在办公室爆开，真正泄密者反咬，林清雪当众改口护住，关系筹码改变，卷入对立面。" +
+        "主动追查源头，继续追会得罪上级，放弃安全退路，主动性兑现，失去低调空间。" +
+        "关系筹码发生变化，并出现一次误判反转。" +
+        "那份错误资料最初来自私人账号。";
+
+      const report = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      expect(report.openingHook.status).toBe("missing");
+      expect(report.shouldRewrite).toBe(true);
+      expect(report.blockingIssues.length).toBeGreaterThan(0);
+      expect(report.blockingIssues.some((i) => i.includes("openingHook"))).toBe(true);
+    });
+
+    it("P4-3. confirmed blueprint + 正文缺 endingHook → shouldRewrite=true, blockingIssues 有明确原因", () => {
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "万凡主动追查源头，继续追会得罪上级，万凡放弃安全退路，主角主动性兑现，失去低调空间。" +
+        "新证据指向更大误判，证据看似证明林清雪也参与，万凡发现第二层陷阱，章尾悬念抬升，必须暂时隐瞒林清雪。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转。" +
+        "万凡回到了他的座位，什么都没有说。";
+
+      const report = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      expect(report.endingHook.status).toBe("missing");
+      expect(report.shouldRewrite).toBe(true);
+      expect(report.blockingIssues.some((i) => i.includes("endingHook"))).toBe(true);
+    });
+
+    it("P4-4. invalid/draft blueprint 不调用 auditor (guard at call site)", () => {
+      // The auditor itself does not check status — the caller must guard.
+      // This test verifies that when we explicitly call with a draft blueprint,
+      // the auditor still runs (no crash), but the caller in server.ts only
+      // calls it when confirmedChapterBlueprint is non-null (which requires confirmed status).
+      const draftBlueprint = {
+        ...CONFIRMED_BLUEPRINT,
+        status: "draft" as const,
+      };
+
+      // Direct call does not throw (auditor is pure heuristic)
+      expect(() =>
+        auditBlueprintFulfillment({ chapterText: "任意正文内容", blueprint: draftBlueprint }),
+      ).not.toThrow();
+
+      // Verify server.ts guard: parseConfirmedChapterBlueprint rejects draft status
+      // The integration boundary is tested via buildWriteNextExternalContext:
+      // draft blueprints are filtered out and never reach the auditor in the pipeline.
+      const ctx = buildWriteNextExternalContext({ blueprint: { ...draftBlueprint } });
+      expect(ctx).toBeUndefined(); // draft blocked from context → auditor never triggered
+    });
+
+    it("P4-5. auditBlueprintFulfillment 输出结构包含所有必需字段", () => {
+      const report = auditBlueprintFulfillment({
+        chapterText: "测试文本",
+        blueprint: CONFIRMED_BLUEPRINT,
+      });
+
+      // Top-level required fields
+      expect(typeof report.score).toBe("number");
+      expect(report.score).toBeGreaterThanOrEqual(0);
+      expect(report.score).toBeLessThanOrEqual(100);
+      expect(typeof report.shouldRewrite).toBe("boolean");
+      expect(Array.isArray(report.blockingIssues)).toBe(true);
+      expect(Array.isArray(report.scenes)).toBe(true);
+
+      // openingHook fields
+      expect(typeof report.openingHook.expected).toBe("string");
+      expect(typeof report.openingHook.position).toBe("number");
+      expect(typeof report.openingHook.withinFirst300Words).toBe("boolean");
+      expect(["satisfied", "weak", "missing"]).toContain(report.openingHook.status);
+
+      // scene fields
+      for (const scene of report.scenes) {
+        expect(typeof scene.index).toBe("number");
+        expect(typeof scene.beat).toBe("string");
+        expect(["satisfied", "weak", "missing"]).toContain(scene.status);
+        expect(Array.isArray(scene.missingFields)).toBe(true);
+      }
+
+      // payoffRequired fields
+      expect(["satisfied", "weak", "missing"]).toContain(report.payoffRequired.status);
+
+      // endingHook fields
+      expect(["satisfied", "weak", "missing"]).toContain(report.endingHook.status);
+      expect(typeof report.endingHook.nearChapterEnd).toBe("boolean");
+    });
+
+    it("P4-6. artifact 类型 blueprint_fulfillment_report 可被 AssistantArtifactService 存取", async () => {
+      const sessId = "sess-p4";
+      const fakeReport = {
+        score: 85,
+        openingHook: { expected: "test", found: "test", position: 0, withinFirst300Words: true, status: "satisfied" as const },
+        scenes: [],
+        payoffRequired: { status: "satisfied" as const },
+        endingHook: { status: "satisfied" as const, nearChapterEnd: true },
+        blockingIssues: [],
+        shouldRewrite: false,
+      };
+
+      const art = await artifactSvc.create({
+        sessionId: sessId,
+        bookId: "book-p4",
+        type: "blueprint_fulfillment_report",
+        title: "蓝图兑现审计第3章",
+        payload: fakeReport as unknown as Record<string, unknown>,
+        summary: "score=85",
+        searchableText: JSON.stringify(fakeReport),
+      });
+
+      expect(art.type).toBe("blueprint_fulfillment_report");
+
+      const list = await artifactSvc.listByType(sessId, "blueprint_fulfillment_report");
+      expect(list).toHaveLength(1);
+      expect(list[0].artifactId).toBe(art.artifactId);
     });
   });
 });

@@ -52,6 +52,7 @@ interface BookData {
     readonly genre: string;
     readonly status: string;
     readonly chapterWordCount: number;
+    readonly chapterLengthTolerancePercent?: number;
     readonly targetChapters?: number;
     readonly language?: string;
     readonly fanficMode?: string;
@@ -380,6 +381,7 @@ export function BookDetail({
   const [chapterActionRunning, setChapterActionRunning] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsWordCount, setSettingsWordCount] = useState<number | null>(null);
+  const [settingsLengthTolerance, setSettingsLengthTolerance] = useState<number | null>(null);
   const [settingsTargetChapters, setSettingsTargetChapters] = useState<number | null>(null);
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
@@ -689,6 +691,7 @@ export function BookDetail({
     try {
       const body: Record<string, unknown> = {};
       if (settingsWordCount !== null) body.chapterWordCount = settingsWordCount;
+      if (settingsLengthTolerance !== null) body.chapterLengthTolerancePercent = settingsLengthTolerance;
       if (settingsTargetChapters !== null) body.targetChapters = settingsTargetChapters;
       if (settingsStatus !== null) body.status = settingsStatus;
       await fetchJson(`/books/${bookId}`, {
@@ -783,6 +786,9 @@ export function BookDetail({
   const showBookAuxiliaryPanels = false;
 
   const currentWordCount = settingsWordCount ?? book.chapterWordCount;
+  const currentLengthTolerance = settingsLengthTolerance ?? book.chapterLengthTolerancePercent ?? 30;
+  const currentLengthMin = Math.max(1, Math.floor(currentWordCount * (1 - currentLengthTolerance / 100)));
+  const currentLengthMax = Math.floor(currentWordCount * (1 + currentLengthTolerance / 100));
   const currentTargetChapters = settingsTargetChapters ?? book.targetChapters ?? 0;
   const currentStatus = settingsStatus ?? (book.status as BookStatus);
 
@@ -965,6 +971,19 @@ export function BookDetail({
                   onChange={(e) => setSettingsWordCount(Number(e.target.value))}
                   className="px-3 py-2 text-sm rounded-lg border border-border/50 bg-secondary/30 outline-none focus:border-primary/50 w-32"
                 />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">字数容忍度</label>
+                <select
+                  value={currentLengthTolerance}
+                  onChange={(e) => setSettingsLengthTolerance(Number(e.target.value))}
+                  className="px-3 py-2 text-sm rounded-lg border border-border/50 bg-secondary/30 outline-none focus:border-primary/50 w-32"
+                >
+                  {[10, 20, 30, 40, 50, 60, 70, 80].map((value) => (
+                    <option key={value} value={value}>±{value}%</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-muted-foreground">{currentLengthMin}-{currentLengthMax} 字可接受</span>
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">{t("create.targetChapters")}</label>

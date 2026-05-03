@@ -1286,6 +1286,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
       ...(Array.isArray(payload.missingRequirements) ? { missingRequirements: payload.missingRequirements } : {}),
       ...(Array.isArray(payload.sourceArtifactIds) ? { sourceArtifactIds: payload.sourceArtifactIds } : {}),
       ...(typeof payload.graphPatchConsumption === "object" && payload.graphPatchConsumption !== null ? { graphPatchConsumption: payload.graphPatchConsumption } : {}),
+      ...(typeof payload.blueprintFulfillment === "object" && payload.blueprintFulfillment !== null ? { blueprintFulfillment: payload.blueprintFulfillment } : {}),
       ...(typeof payload.warning === "string" ? { warning: payload.warning } : {}),
     };
     const now = message.timestamp ?? Date.now();

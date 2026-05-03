@@ -282,14 +282,14 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
   if (tableRows.length > 0) {
     return HooksStateSchema.parse({
       hooks: tableRows
-        .filter((row) => normalizeHookId(row[0]).length > 0)
+        .filter((row) => isPendingHookDataRow(row))
         .map((row) => {
           const hookId = normalizeHookId(row[0]);
           const legacyShape = row.length < 8;
           return {
             hookId,
             startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
-            type: row[2] ?? "unspecified",
+            type: (row[2] ?? "").trim() || "unspecified",
             status: normalizeHookStatus(row[3], warnings, hookId),
             lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
             expectedPayoff: row[5] ?? "",
@@ -318,6 +318,18 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
         notes: line,
       })),
   });
+}
+
+function isPendingHookDataRow(row: ReadonlyArray<string | undefined>): boolean {
+  const hookId = normalizeHookId(row[0]);
+  if (hookId.length === 0) return false;
+  if (/^\(?无\)?$/u.test(hookId) || /^none$/iu.test(hookId) || /^n\/a$/iu.test(hookId)) return false;
+  const second = (row[1] ?? "").trim();
+  const third = (row[2] ?? "").trim();
+  // `pending_hooks.md` can contain a second closed-hooks table where placeholder
+  // rows like `(无) | | | |` are not active hook records.
+  if (second === "" && third === "") return false;
+  return true;
 }
 
 function parseCurrentStateStateMarkdown(

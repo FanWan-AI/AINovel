@@ -72,6 +72,7 @@ describe("ComposerAgent", () => {
             resolution: "allow local outline deferral",
           },
         ],
+        userContractPriority: "normal",
         hookAgenda: {
           pressureMap: [],
           mustAdvance: [],

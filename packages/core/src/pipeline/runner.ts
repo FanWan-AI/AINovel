@@ -28,7 +28,7 @@ import type { AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
-import type { ContextPackage, RuleStack } from "../models/input-governance.js";
+import type { ChapterBlueprint, ContextPackage, RuleStack } from "../models/input-governance.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, isOutsideSoftRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
@@ -78,6 +78,7 @@ export interface PipelineConfig {
   readonly notifyChannels?: ReadonlyArray<NotifyChannel>;
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
+  readonly confirmedChapterBlueprint?: ChapterBlueprint;
   readonly modelOverrides?: Record<string, string | AgentLLMOverride>;
   readonly inputGovernanceMode?: InputGovernanceMode;
   readonly logger?: Logger;
@@ -920,6 +921,7 @@ export class PipelineRunner {
       const lengthSpec = buildLengthSpec(
         wordCount ?? book.chapterWordCount,
         book.language ?? gp.language,
+        book.chapterLengthTolerancePercent ?? 30,
       );
 
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
@@ -1042,6 +1044,7 @@ export class PipelineRunner {
       bookDir,
       chapterNumber,
       context ?? this.config.externalContext,
+      this.config.confirmedChapterBlueprint,
       { reuseExistingIntentWhenContextMissing: false },
     );
 
@@ -1066,6 +1069,7 @@ export class PipelineRunner {
       bookDir,
       chapterNumber,
       context ?? this.config.externalContext,
+      this.config.confirmedChapterBlueprint,
       { reuseExistingIntentWhenContextMissing: true },
     );
 
@@ -1183,6 +1187,7 @@ export class PipelineRunner {
           bookDir,
           targetChapter,
           this.config.externalContext,
+          this.config.confirmedChapterBlueprint,
           { reuseExistingIntentWhenContextMissing: true },
         );
       const preRevision = await this.evaluateMergedAudit({
@@ -1232,6 +1237,7 @@ export class PipelineRunner {
       const lengthSpec = buildLengthSpec(
         chapterLengthTarget,
         lengthLanguage,
+        book.chapterLengthTolerancePercent ?? 30,
       );
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
@@ -1630,6 +1636,7 @@ export class PipelineRunner {
     const lengthSpec = buildLengthSpec(
       wordCount ?? book.chapterWordCount,
       pipelineLang,
+      book.chapterLengthTolerancePercent ?? 30,
     );
 
     // 1. Write chapter
@@ -2070,6 +2077,7 @@ export class PipelineRunner {
         bookDir,
         targetChapter,
         this.config.externalContext,
+        this.config.confirmedChapterBlueprint,
         { reuseExistingIntentWhenContextMissing: true },
       );
 
@@ -2662,6 +2670,7 @@ ${matrix}`,
       bookDir,
       chapterNumber,
       externalContext,
+      this.config.confirmedChapterBlueprint,
       { reuseExistingIntentWhenContextMissing: true },
     );
 
@@ -2791,12 +2800,25 @@ ${matrix}`,
       chapterIntent: params.chapterIntent,
     });
 
-    // Safety net: if normalizer output is less than 25% of original, it was too destructive.
-    // Reject and keep original content.
-    if (normalized.finalCount < writerCount * 0.25) {
+    const cutRatio = writerCount > 0 ? 1 - normalized.finalCount / writerCount : 0;
+    const expansionRatio = writerCount > 0 ? normalized.finalCount / writerCount - 1 : 0;
+    const normalizedOutsideHardRange = isOutsideHardRange(normalized.finalCount, params.lengthSpec);
+    const destructiveCompression = normalized.mode === "compress" && cutRatio > 0.45;
+    const destructiveExpansion = normalized.mode === "expand" && expansionRatio > 3.0;
+
+    // Quality-first safety net: never accept a one-pass length rewrite that is
+    // still outside the configured hard range or that rewrites too much of the
+    // chapter. Keeping a slightly long/short but intact scene is better than
+    // saving a gutted chapter.
+    if (normalizedOutsideHardRange || destructiveCompression || destructiveExpansion) {
+      const reason = normalizedOutsideHardRange
+        ? `结果仍超出硬区间 ${params.lengthSpec.hardMin}-${params.lengthSpec.hardMax}`
+        : destructiveCompression
+          ? `压缩幅度 ${Math.round(cutRatio * 100)}% 超过安全阈值`
+          : `扩写幅度 ${Math.round(expansionRatio * 100)}% 超过安全阈值`;
       this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
-        zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（砍了${Math.round((1 - normalized.finalCount / writerCount) * 100)}%，超过安全阈值）`,
-        en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount} (cut ${Math.round((1 - normalized.finalCount / writerCount) * 100)}%, exceeds safety threshold)`,
+        zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（${reason}），已保留原稿。`,
+        en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount}; original draft kept.`,
       });
       return {
         content: params.chapterContent,
@@ -3305,6 +3327,7 @@ ${matrix}`,
     bookDir: string,
     chapterNumber: number,
     externalContext?: string,
+    confirmedChapterBlueprint?: ChapterBlueprint,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
     },
@@ -3312,7 +3335,7 @@ ${matrix}`,
     plan: PlanChapterOutput;
     composed: Awaited<ReturnType<ComposerAgent["composeChapter"]>>;
   }> {
-    const plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext, options);
+    const plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext, confirmedChapterBlueprint, options);
 
     const composer = new ComposerAgent(this.agentCtxFor("composer", book.id));
     const composed = await composer.composeChapter({
@@ -3330,6 +3353,7 @@ ${matrix}`,
     bookDir: string,
     chapterNumber: number,
     externalContext?: string,
+    confirmedChapterBlueprint?: ChapterBlueprint,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
     },
@@ -3348,6 +3372,7 @@ ${matrix}`,
       bookDir,
       chapterNumber,
       externalContext,
+      confirmedChapterBlueprint,
     });
   }
 

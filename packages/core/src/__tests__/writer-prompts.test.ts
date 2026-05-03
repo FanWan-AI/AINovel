@@ -108,6 +108,30 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("Keep the prose restrained");
   });
 
+  it("puts governed writers into chapter director mode with executable genre templates", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide",
+      undefined,
+      3,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+    );
+
+    expect(prompt).toContain("章节导演模式");
+    expect(prompt).toContain("openingHook 必须落在开场 300 字内");
+    expect(prompt).toContain("阻力、行动、反应、转折、结果");
+    expect(prompt).toContain("都市系统文");
+    expect(prompt).toContain("女频职场爽文");
+    expect(prompt).toContain("修仙/玄幻");
+  });
+
   it("tells governed English prompts to obey variance briefs and include resistance-bearing exchanges", () => {
     const prompt = buildWriterSystemPrompt(
       {

@@ -290,6 +290,46 @@ describe("ContractVerificationCard", () => {
     expect(html).toContain("graph-patch-consumption");
   });
 
+  it("renders blueprint fulfillment audit when verification payload includes it", () => {
+    const report: VerificationReportPayload = {
+      satisfactionRate: 1,
+      items: [],
+      shouldRewrite: false,
+      blueprintFulfillment: {
+        score: 86,
+        shouldRewrite: false,
+        openingHook: {
+          expected: "林清雪主动找万凡",
+          position: 0,
+          withinFirst300Words: true,
+          status: "satisfied",
+          evidence: "林清雪主动找万凡",
+        },
+        scenes: [
+          {
+            index: 0,
+            beat: "林清雪进入地下室",
+            conflict: "她误判万凡状态",
+            turn: "误判被系统提示反转",
+            payoff: "关系筹码发生变化",
+            cost: "暴露链接风险",
+            status: "satisfied",
+            evidence: "林清雪进入地下室",
+            missingFields: [],
+          },
+        ],
+        payoffRequired: { status: "satisfied", evidence: "关系筹码发生变化" },
+        endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "新的监控者出现" },
+        blockingIssues: [],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report }));
+    expect(html).toContain("蓝图兑现审计");
+    expect(html).toContain("86分");
+    expect(html).toContain("林清雪进入地下室");
+  });
+
   it("renders consumed, partially_consumed, and pending patch states in graphPatchConsumption", () => {
     const report: VerificationReportPayload = {
       satisfactionRate: 0.6,

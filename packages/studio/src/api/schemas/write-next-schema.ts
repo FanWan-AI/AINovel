@@ -43,6 +43,9 @@ export interface WriteNextInput {
     readonly payoffRequired?: string;
     readonly endingHook?: string;
     readonly contractSatisfaction?: ReadonlyArray<string>;
+    readonly status?: "draft" | "edited" | "confirmed";
+    readonly version?: number;
+    readonly sourceArtifactIds?: ReadonlyArray<string>;
   };
 }
 

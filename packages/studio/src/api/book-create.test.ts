@@ -20,6 +20,7 @@ describe("buildStudioBookConfig", () => {
         platform: "qidian",
         language: "zh",
         chapterWordCount: 2500,
+        chapterLengthTolerancePercent: 40,
         targetChapters: 120,
       },
       "2026-03-30T00:00:00.000Z",
@@ -31,6 +32,7 @@ describe("buildStudioBookConfig", () => {
       platform: "qidian",
       language: "zh",
       chapterWordCount: 2500,
+      chapterLengthTolerancePercent: 40,
       targetChapters: 120,
     });
   });
@@ -48,6 +50,7 @@ describe("buildStudioBookConfig", () => {
 
     expect(config.platform).toBe("other");
     expect(config.language).toBe("en");
+    expect(config.chapterLengthTolerancePercent).toBe(30);
     expect(config.id).toBe("english-book");
   });
 

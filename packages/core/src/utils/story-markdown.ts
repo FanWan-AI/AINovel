@@ -89,7 +89,7 @@ export function parsePendingHooksMarkdown(markdown: string): StoredHook[] {
 
   if (tableRows.length > 0) {
     return tableRows
-      .filter((row) => normalizeHookId(row[0]).length > 0)
+      .filter((row) => isPendingHookDataRow(row))
       .map((row) => parsePendingHookRow(row));
   }
 
@@ -225,6 +225,17 @@ export function normalizeHookId(value: string | undefined): string {
   return normalized;
 }
 
+function isPendingHookDataRow(row: ReadonlyArray<string | undefined>): boolean {
+  const hookId = normalizeHookId(row[0]);
+  if (hookId.length === 0) return false;
+  if (/^\(?无\)?$/u.test(hookId) || /^none$/iu.test(hookId) || /^n\/a$/iu.test(hookId)) return false;
+  const second = (row[1] ?? "").trim();
+  const third = (row[2] ?? "").trim();
+  // Ignore rows from the "closed hooks" table (hook_id | 起始章节 | 关闭章节 | 内容).
+  if (third === "" && second === "") return false;
+  return true;
+}
+
 function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook {
   const legacyShape = row.length < 8;
   const payoffTiming = legacyShape ? undefined : normalizeHookPayoffTiming(row[6]);
@@ -233,7 +244,7 @@ function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook
   return {
     hookId: normalizeHookId(row[0]),
     startChapter: parseStrictChapterInteger(row[1]),
-    type: row[2] ?? "",
+    type: (row[2] ?? "").trim() || "unspecified",
     status: row[3] ?? "open",
     lastAdvancedChapter: parseStrictChapterInteger(row[4]),
     expectedPayoff: row[5] ?? "",

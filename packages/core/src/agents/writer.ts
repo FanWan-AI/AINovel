@@ -875,9 +875,13 @@ ${traceNotes}
 
 ${varianceBlock}
 ${lengthRequirementBlock}
-- Treat the Chapter Blueprint as the chapter's scene contract. Do not replace it with generic continuation.
-- PRE_WRITE_CHECK must name how the Steering Contract and Chapter Blueprint will be satisfied.
+- Director mode: you are staging the chapter, not summarizing it.
+- Treat the Chapter Blueprint as the chapter's hard scene contract. Do not replace it with generic continuation.
+- If the blueprint has openingHook, put that hook inside the first 300 words. If it has endingHook, make it the chapter-tail hook.
+- Every blueprint scene beat must become a visible scene with resistance, action, reaction, turn, and result. Never compress a scene into one sentence of summary.
+- PRE_WRITE_CHECK must name how the Steering Contract and Chapter Blueprint will be satisfied, including each scene's conflict, turn, payoff, and cost.
 - The prose must contain at least one active protagonist choice, one resistance-bearing exchange, one visible payoff, and one cost/risk.
+- If old plot momentum conflicts with confirmed blueprint or user must-include items, obey the current user contract and bridge continuity locally.
 - Output PRE_WRITE_CHECK first, then the chapter
 - Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks`;
     }
@@ -905,9 +909,13 @@ ${traceNotes}
 
 ${varianceBlock}
 ${lengthRequirementBlock}
-- 把 Chapter Blueprint 当作本章场景契约，不得用泛泛续写替代。
-- PRE_WRITE_CHECK 必须说明 Steering Contract 与 Chapter Blueprint 如何落地。
+- 章节导演模式：你是在调度一整章，不是在总结剧情。
+- 把 Chapter Blueprint 当作本章硬性场景契约，不得用泛泛续写替代。
+- 如果蓝图有 openingHook，必须写进开场 300 字内；如果蓝图有 endingHook，必须落在章尾钩子位置。
+- 蓝图里的每个 scene beat 都必须成为一个可见场景，包含阻力、行动、反应、转折、结果。不得用一句总结带过。
+- PRE_WRITE_CHECK 必须说明 Steering Contract 与 Chapter Blueprint 如何落地，并逐项点名每个场景的 conflict、turn、payoff、cost。
 - 正文必须至少包含：一次主角主动选择、一轮带阻力的直接交锋、一个可见爽点/回报、一个代价/风险。
+- 如果旧剧情惯性和 confirmed blueprint / 用户 mustInclude 冲突，优先当前用户契约，并用合理桥段承接连续性。
 - 先输出写作自检表，再写正文
 - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }

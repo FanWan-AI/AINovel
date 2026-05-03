@@ -127,6 +127,18 @@ export interface WritingGovernanceForm {
   readonly antiAiTraceStrength: AntiAiTraceStrength;
 }
 
+export interface SettingsBookLengthBook {
+  readonly id: string;
+  readonly title: string;
+  readonly chapterWordCount: number;
+  readonly chapterLengthTolerancePercent?: number;
+}
+
+export interface BookLengthPreferenceDraft {
+  readonly chapterWordCount: number;
+  readonly chapterLengthTolerancePercent: number;
+}
+
 export const DEFAULT_WRITING_GOVERNANCE_FORM: WritingGovernanceForm = {
   styleTemplate: "narrative-balance",
   reviewStrictnessBaseline: "balanced",
@@ -219,6 +231,10 @@ interface SaveAssistantStrategyOptions {
   readonly putApiImpl?: typeof putApi;
 }
 
+interface SaveBookLengthPreferenceOptions {
+  readonly putApiImpl?: typeof putApi;
+}
+
 export async function saveWritingGovernance(
   form: WritingGovernanceForm,
   options: SaveWritingGovernanceOptions = {},
@@ -242,6 +258,36 @@ export async function saveAssistantStrategy(
     },
     approvalSkills: form.approvalSkills,
     publishQualityGate: form.publishQualityGate,
+  });
+}
+
+export function clampBookLengthTolerance(value: number): number {
+  if (!Number.isFinite(value)) return 30;
+  return Math.min(80, Math.max(10, Math.round(value)));
+}
+
+export function buildBookLengthPreferenceDraft(book: SettingsBookLengthBook): BookLengthPreferenceDraft {
+  return {
+    chapterWordCount: Number.isFinite(book.chapterWordCount) ? book.chapterWordCount : 3000,
+    chapterLengthTolerancePercent: clampBookLengthTolerance(book.chapterLengthTolerancePercent ?? 30),
+  };
+}
+
+export function formatBookLengthRange(draft: BookLengthPreferenceDraft): string {
+  const min = Math.max(1, Math.floor(draft.chapterWordCount * (1 - draft.chapterLengthTolerancePercent / 100)));
+  const max = Math.floor(draft.chapterWordCount * (1 + draft.chapterLengthTolerancePercent / 100));
+  return `${min}-${max} 字`;
+}
+
+export async function saveBookLengthPreference(
+  bookId: string,
+  draft: BookLengthPreferenceDraft,
+  options: SaveBookLengthPreferenceOptions = {},
+): Promise<void> {
+  const putApiImpl = options.putApiImpl ?? putApi;
+  await putApiImpl(`/books/${bookId}`, {
+    chapterWordCount: Math.max(1000, Math.round(draft.chapterWordCount)),
+    chapterLengthTolerancePercent: clampBookLengthTolerance(draft.chapterLengthTolerancePercent),
   });
 }
 
@@ -275,11 +321,16 @@ export function SettingsView({
   const { data: writingGovernanceData, loading: writingGovernanceLoading, error: writingGovernanceError, refetch: refetchWritingGovernance } = useApi<{
     readonly settings: WritingGovernanceSettings;
   }>("/project/writing-governance");
+  const { data: booksData, loading: booksLoading, error: booksError, refetch: refetchBooks } = useApi<{
+    readonly books: ReadonlyArray<SettingsBookLengthBook>;
+  }>("/books");
   const { data: assistantStrategyData, loading: assistantStrategyLoading, error: assistantStrategyError, refetch: refetchAssistantStrategy } = useApi<{
     readonly settings: AssistantStrategySettings;
   }>("/project/assistant-strategy");
   const [writingForm, setWritingForm] = useState<WritingGovernanceForm>(DEFAULT_WRITING_GOVERNANCE_FORM);
   const [savingWritingGovernance, setSavingWritingGovernance] = useState(false);
+  const [bookLengthDrafts, setBookLengthDrafts] = useState<Record<string, BookLengthPreferenceDraft>>({});
+  const [savingBookLengthId, setSavingBookLengthId] = useState<string | null>(null);
   const [assistantStrategyForm, setAssistantStrategyForm] = useState<AssistantStrategyForm>(DEFAULT_ASSISTANT_STRATEGY_FORM);
   const [savingAssistantStrategy, setSavingAssistantStrategy] = useState(false);
   const [assistantStrategySaveError, setAssistantStrategySaveError] = useState<string | null>(null);
@@ -288,6 +339,15 @@ export function SettingsView({
   useEffect(() => {
     setWritingForm(normalizeWritingGovernanceForm(writingGovernanceData?.settings));
   }, [writingGovernanceData?.settings]);
+
+  useEffect(() => {
+    const nextDrafts: Record<string, BookLengthPreferenceDraft> = {};
+    for (const book of booksData?.books ?? []) {
+      nextDrafts[book.id] = bookLengthDrafts[book.id] ?? buildBookLengthPreferenceDraft(book);
+    }
+    setBookLengthDrafts(nextDrafts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booksData?.books]);
 
   useEffect(() => {
     setAssistantStrategyForm(normalizeAssistantStrategyForm(assistantStrategyData?.settings));
@@ -370,6 +430,86 @@ export function SettingsView({
           >
             {savingWritingGovernance ? "保存中..." : "保存全局策略"}
           </button>
+        </div>
+
+        <div className="space-y-3 rounded-md border border-border/70 bg-card/40 p-4">
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold text-foreground">每本书章节字数策略</h3>
+            <p className="text-xs text-muted-foreground">字数容忍度控制“可接受区间”。归一化结果若掉出该区间或压缩过猛，会保留原稿，优先保护内容质量。</p>
+          </div>
+          {booksLoading && <p className="text-sm text-muted-foreground">加载书籍字数策略中...</p>}
+          {booksError && <p className="text-sm text-destructive">书籍字数策略加载失败：{booksError}</p>}
+          {!booksLoading && !booksError && (
+            <div className="space-y-2">
+              {(booksData?.books ?? []).map((book) => {
+                const draft = bookLengthDrafts[book.id] ?? buildBookLengthPreferenceDraft(book);
+                return (
+                  <div key={book.id} className="grid gap-3 rounded-md border border-border/60 p-3 md:grid-cols-[minmax(0,1fr)_140px_140px_140px_auto] md:items-end">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-foreground">{book.title}</div>
+                      <div className="text-xs text-muted-foreground">{book.id}</div>
+                    </div>
+                    <label className="space-y-1 text-xs">
+                      <span className="font-medium text-muted-foreground">目标字数</span>
+                      <input
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        type="number"
+                        min={1000}
+                        value={draft.chapterWordCount}
+                        onChange={(e) => setBookLengthDrafts((prev) => ({
+                          ...prev,
+                          [book.id]: {
+                            ...draft,
+                            chapterWordCount: Number(e.target.value) || 1000,
+                          },
+                        }))}
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs">
+                      <span className="font-medium text-muted-foreground">容忍度</span>
+                      <select
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        value={draft.chapterLengthTolerancePercent}
+                        onChange={(e) => setBookLengthDrafts((prev) => ({
+                          ...prev,
+                          [book.id]: {
+                            ...draft,
+                            chapterLengthTolerancePercent: Number(e.target.value),
+                          },
+                        }))}
+                      >
+                        {[10, 20, 30, 40, 50, 60, 70, 80].map((value) => (
+                          <option key={value} value={value}>±{value}%</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="text-xs text-muted-foreground">
+                      <span className="block font-medium text-foreground">可接受区间</span>
+                      {formatBookLengthRange(draft)}
+                    </div>
+                    <button
+                      className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-60"
+                      disabled={savingBookLengthId === book.id}
+                      onClick={async () => {
+                        setSavingBookLengthId(book.id);
+                        try {
+                          await saveBookLengthPreference(book.id, draft);
+                          await refetchBooks();
+                        } finally {
+                          setSavingBookLengthId(null);
+                        }
+                      }}
+                    >
+                      {savingBookLengthId === book.id ? "保存中..." : "保存"}
+                    </button>
+                  </div>
+                );
+              })}
+              {(booksData?.books ?? []).length === 0 && (
+                <p className="text-sm text-muted-foreground">暂无书籍。</p>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="space-y-3 rounded-md border border-border/70 bg-card/40 p-4">

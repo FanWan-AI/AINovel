@@ -9,11 +9,15 @@ import {
   createLogger,
   computeAnalytics,
   loadProjectConfig,
+  ChapterBlueprintSchema,
+  auditBlueprintFulfillment,
   type PipelineConfig,
+  type ChapterBlueprint,
   type ProjectConfig,
   type RunPlan,
   type LogSink,
   type LogEntry,
+  type BlueprintFulfillmentReport,
 } from "@actalk/inkos-core";
 import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -298,6 +302,11 @@ interface AssistantTaskAwaitingApproval {
   readonly nodeId: string;
   readonly type: "checkpoint" | "candidate-selection";
   readonly candidates?: ReadonlyArray<AssistantTaskCandidateSnapshot>;
+}
+
+function clampChapterLengthTolerance(value: number): number {
+  if (!Number.isFinite(value)) return 30;
+  return Math.min(80, Math.max(10, Math.round(value)));
 }
 
 function normalizeWritingGovernanceSettings(raw: unknown, fallbackUpdatedAt = ""): WritingGovernanceSettings {
@@ -1065,7 +1074,7 @@ const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
 const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|深度改写|大幅改写|rewrite|revise|spot-fix|polish|rework|anti-detect|chapter-redesign/iu;
 const ASSISTANT_REVISE_MODE_ANTI_DETECT_PATTERN = /反检测|anti[-\s]?detect/iu;
 const ASSISTANT_REVISE_MODE_POLISH_PATTERN = /润色|文风|措辞|polish/iu;
-const ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN = /深度改写|大幅改写|chapter[-\s]?redesign|换剧情|换场景|改剧情线|重构本章/iu;
+const ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN = /深度改写|大幅改写|chapter[-\s]?redesign|换剧情|换场景|改剧情线|重构本章|发生关系|亲密关系|上床|做爱|性爱/iu;
 const ASSISTANT_REVISE_MODE_REWRITE_PATTERN = /rewrite|改写/iu;
 const ASSISTANT_REVISE_MODE_REWORK_PATTERN = /重写|重作|改成|剧情|情节|整体改|彻底改|必须改/iu;
 const ASSISTANT_METRICS_DAY_RANGE_VALUES = [7, 30] as const;
@@ -1282,14 +1291,15 @@ async function loadLatestSteeringArtifacts(
         const full = await svc.getById(art.artifactId, sessionId, bookId);
         if (full) { result.contract = full.payload; result.sourceArtifactIds.push(art.artifactId); }
       }
-      if (art.type === "chapter_blueprint" && !result.blueprint && !result.pendingBlueprintArtifactId) {
+      if (art.type === "chapter_blueprint" && !result.blueprint) {
         const full = await svc.getById(art.artifactId, sessionId, bookId);
         if (full) {
-          if (full.payload.status === "confirmed") {
-            result.blueprint = full.payload;
+          const confirmedBlueprint = parseConfirmedChapterBlueprint(full.payload);
+          if (confirmedBlueprint) {
+            result.blueprint = confirmedBlueprint;
             result.blueprintArtifactId = art.artifactId;
             result.sourceArtifactIds.push(art.artifactId);
-          } else {
+          } else if (!result.pendingBlueprintArtifactId) {
             // Blueprint exists but is not yet confirmed — track it for the checkpoint binding
             result.pendingBlueprintArtifactId = art.artifactId;
             result.pendingBlueprintStatus = typeof full.payload.status === "string" ? full.payload.status : "draft";
@@ -1307,6 +1317,31 @@ function parseAssistantChapterFromInput(input: string): number | undefined {
   const enMatch = input.match(ASSISTANT_CHAPTER_EN_PATTERN);
   if (enMatch?.[1]) return Number.parseInt(enMatch[1], 10);
   return undefined;
+}
+
+function parseConfirmedChapterBlueprint(raw: unknown): ChapterBlueprint | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const parsed = ChapterBlueprintSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.status !== "confirmed") return undefined;
+  return parsed.data;
+}
+
+function buildBlueprintVerificationSceneBeats(blueprint: ChapterBlueprint | undefined): string[] {
+  if (!blueprint) return [];
+  const beats: string[] = [
+    `Blueprint openingHook: ${blueprint.openingHook}`,
+    `Blueprint payoffRequired: ${blueprint.payoffRequired}`,
+    `Blueprint endingHook: ${blueprint.endingHook}`,
+  ];
+  for (const [index, scene] of blueprint.scenes.entries()) {
+    beats.push(`Blueprint scene ${index + 1} beat: ${scene.beat}`);
+    beats.push(`Blueprint scene ${index + 1} conflict: ${scene.conflict}`);
+    if (scene.informationGap) beats.push(`Blueprint scene ${index + 1} informationGap: ${scene.informationGap}`);
+    beats.push(`Blueprint scene ${index + 1} turn: ${scene.turn}`);
+    beats.push(`Blueprint scene ${index + 1} payoff: ${scene.payoff}`);
+    beats.push(`Blueprint scene ${index + 1} cost: ${scene.cost}`);
+  }
+  return beats;
 }
 
 function extractAssistantUserRequest(input: string): string {
@@ -2467,7 +2502,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   async function buildPipelineConfig(
-    overrides?: Partial<Pick<PipelineConfig, "externalContext">>,
+    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "confirmedChapterBlueprint">>,
   ): Promise<PipelineConfig> {
     const currentConfig = await loadCurrentProjectConfig();
     const logger = createLogger({ tag: "studio", sinks: [sseSink] });
@@ -2489,6 +2524,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       },
       externalContext: overrides?.externalContext,
+      confirmedChapterBlueprint: overrides?.confirmedChapterBlueprint,
     };
   }
 
@@ -2920,7 +2956,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             // so long chapter generation does NOT cause the verification listener to pre-expire.
             // Bug 3 fix: events without chapterNumber are ignored; we match by chapterNumber
             // after the success event reveals which chapter was written.
-            type VerificationResult = { contractSatisfaction: number; shouldRewrite: boolean; missingRequirements: string[]; chapterNumber: number };
+            type VerificationResult = { contractSatisfaction: number; shouldRewrite: boolean; blueprintShouldRewrite: boolean; missingRequirements: string[]; chapterNumber: number };
             const verificationBuffer: VerificationResult[] = [];
             let pendingVerificationResolver: ((r: VerificationResult) => void) | null = null;
             let pendingVerificationRejecter: ((e: Error) => void) | null = null;
@@ -2944,8 +2980,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               if (chNum === null) return;
               const cs = typeof d?.contractSatisfaction === "number" ? d.contractSatisfaction : 1;
               const sr = (typeof d?.report === "object" && d.report !== null ? (d.report as Record<string, unknown>).shouldRewrite : false) === true;
+              const bsr = (typeof d?.blueprintFulfillment === "object" && d.blueprintFulfillment !== null
+                ? (d.blueprintFulfillment as Record<string, unknown>).shouldRewrite
+                : false) === true;
               const missing = Array.isArray(d?.missingRequirements) ? d.missingRequirements as string[] : [];
-              const verResult: VerificationResult = { contractSatisfaction: cs, shouldRewrite: sr, missingRequirements: missing, chapterNumber: chNum };
+              const verResult: VerificationResult = { contractSatisfaction: cs, shouldRewrite: sr, blueprintShouldRewrite: bsr, missingRequirements: missing, chapterNumber: chNum };
               // If a resolver is waiting for this exact chapter, resolve immediately
               if (pendingVerificationChapter !== null && chNum === pendingVerificationChapter && pendingVerificationResolver !== null) {
                 const resolver = pendingVerificationResolver;
@@ -3014,10 +3053,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   }, 3 * 60_000);
                 });
               }
-              if (verResult.contractSatisfaction < 0.7 || verResult.shouldRewrite) {
+              if (verResult.contractSatisfaction < 0.7 || verResult.shouldRewrite || verResult.blueprintShouldRewrite) {
                 const missingText = verResult.missingRequirements.length
                   ? `缺失要求：${verResult.missingRequirements.slice(0, 3).join("；")}`
-                  : "硬性要求未满足";
+                  : verResult.blueprintShouldRewrite
+                    ? "章节蓝图兑现审计未通过"
+                    : "硬性要求未满足";
                 throw new Error(`契约验证不通过（${Math.round(verResult.contractSatisfaction * 100)}%）—— ${missingText}`);
               }
             } else {
@@ -4291,13 +4332,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.get("/api/books", async (c) => {
     const bookIds = await state.listBooks();
-    const books = await Promise.all(
+    const entries = await Promise.all(
       bookIds.map(async (id) => {
-        const book = await state.loadBookConfig(id);
-        const nextChapter = await state.getNextChapterNumber(id);
-        return { ...book, chaptersWritten: nextChapter - 1 };
+        try {
+          const book = await state.loadBookConfig(id);
+          const nextChapter = await state.getNextChapterNumber(id);
+          return { ok: true as const, book: { ...book, chaptersWritten: nextChapter - 1 } };
+        } catch (error) {
+          return {
+            ok: false as const,
+            id,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       }),
     );
+    const books = entries.filter((entry) => entry.ok).map((entry) => entry.book);
+    const failed = entries.filter((entry) => !entry.ok).map((entry) => ({ id: entry.id, error: entry.error }));
+    if (failed.length > 0) {
+      return c.json({ books, warnings: failed });
+    }
     return c.json({ books });
   });
 
@@ -4447,6 +4501,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       language?: string;
       platform?: string;
       chapterWordCount?: number;
+      chapterLengthTolerancePercent?: number;
       targetChapters?: number;
     }>();
 
@@ -4682,6 +4737,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const { wordCount, mode, planInput, ...steeringInput } = validation.value;
+    const confirmedChapterBlueprint = parseConfirmedChapterBlueprint(steeringInput.blueprint);
     const directBrief = normalizeBriefValue((steeringInput as { brief?: unknown }).brief);
     const planBrief = normalizeBriefValue(planInput);
     const hasStructuredSteering = Boolean(
@@ -4701,7 +4757,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Pre-write: merge narrative graph patches into steering
     let mergedMustInclude = [...(steeringInput.mustInclude ?? [])];
     let mergedMustAvoid = [...(steeringInput.mustAvoid ?? [])];
-    let mergedSceneBeats = [...(steeringInput.steeringContract?.sceneBeats ?? [])];
+    let mergedSceneBeats = [
+      ...(steeringInput.steeringContract?.sceneBeats ?? []),
+      ...buildBlueprintVerificationSceneBeats(confirmedChapterBlueprint),
+    ];
     let mergedSourceArtifactIds = [...(steeringInput.sourceArtifactIds ?? [])];
     // Track graph-derived items separately so we can do conditional patch consumption
     let graphDerivedPatchIds: string[] = [];
@@ -4725,6 +4784,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       mustInclude: mergedMustInclude.length > 0 ? mergedMustInclude : undefined,
       mustAvoid: mergedMustAvoid.length > 0 ? mergedMustAvoid : undefined,
       sourceArtifactIds: mergedSourceArtifactIds.length > 0 ? mergedSourceArtifactIds : undefined,
+      blueprint: confirmedChapterBlueprint,
       steeringContract: steeringInput.steeringContract
         ? { ...steeringInput.steeringContract, sceneBeats: mergedSceneBeats, mustInclude: mergedMustInclude, mustAvoid: mergedMustAvoid }
         : mergedMustInclude.length > 0 || mergedMustAvoid.length > 0 || mergedSceneBeats.length > 0
@@ -4743,7 +4803,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
     const onWriteComplete = async (result: WriteResult): Promise<void> => {
       const baseDetails = { status: result.status, title: result.title, wordCount: result.wordCount };
-      const hasContract = Boolean(effectiveSteeringInput.steeringContract || (effectiveSteeringInput.mustInclude && effectiveSteeringInput.mustInclude.length > 0) || mergedSceneBeats.length > 0);
+      const hasContract = Boolean(effectiveSteeringInput.steeringContract || effectiveSteeringInput.blueprint || (effectiveSteeringInput.mustInclude && effectiveSteeringInput.mustInclude.length > 0) || mergedSceneBeats.length > 0);
       // Emit compose:success synchronously; write-next:success includes verification metadata.
       emitActionEvent("compose", "success", { bookId: id, chapterNumber: result.chapterNumber, briefUsed, details: baseDetails });
       // Success payload includes steering metadata so the frontend can display intent context
@@ -4879,12 +4939,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             graphPatchConsumption,
             ...(report.shouldRewrite ? { warning: "硬性用户要求未全部满足，建议修订" } : {}),
           };
-          broadcast("write-next:verification", { bookId: id, chapterNumber: result.chapterNumber, report, ...verificationSummary });
+
+          // ── Blueprint Fulfillment Audit (P4) ──────────────────────────
+          // Only run when a confirmed blueprint was used for this write operation.
+          let blueprintFulfillment: BlueprintFulfillmentReport | undefined;
+          if (confirmedChapterBlueprint) {
+            try {
+              blueprintFulfillment = auditBlueprintFulfillment({
+                chapterText: fullContent,
+                blueprint: confirmedChapterBlueprint,
+                chapterNumber: result.chapterNumber,
+              });
+              if (sessId) {
+                await artifactService.create({
+                  sessionId: sessId, bookId: id, type: "blueprint_fulfillment_report",
+                  title: `蓝图兑现审计第${result.chapterNumber}章`,
+                  payload: blueprintFulfillment as unknown as Record<string, unknown>,
+                  summary: `score=${blueprintFulfillment.score}${blueprintFulfillment.shouldRewrite ? " [需重写]" : ""}`,
+                  searchableText: JSON.stringify(blueprintFulfillment),
+                });
+              }
+            } catch {
+              // best-effort — never block verification broadcast
+            }
+          }
+
+          broadcast("write-next:verification", { bookId: id, chapterNumber: result.chapterNumber, report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}) });
           if (sessId) {
             await artifactService.create({
               sessionId: sessId, bookId: id, type: "contract_verification",
               title: `验证第${result.chapterNumber}章`,
-              payload: { report, ...verificationSummary } as unknown as Record<string, unknown>,
+              payload: { report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}) } as unknown as Record<string, unknown>,
               summary: `rate=${report.satisfactionRate}${report.shouldRewrite ? " [未满足]" : ""}`,
               searchableText: JSON.stringify(verificationSummary),
             });
@@ -4941,7 +5026,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             chapterNumber: planChapterNumber,
             briefUsed,
           });
-          const writePipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+          const writePipeline = new PipelineRunner(await buildPipelineConfig({ externalContext, confirmedChapterBlueprint }));
           return writePipeline.writeNextChapter(id, wordCount);
         }, (e) => {
           emitActionEvent("plan", "fail", {
@@ -4965,7 +5050,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } else {
       // manual-plan, legacy (no mode), or quick with steering: build externalContext from steering fields.
       const externalContext = buildWriteNextExternalContext(effectiveSteeringInput);
-      const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext }));
+      const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext, confirmedChapterBlueprint }));
       emitActionEvent("compose", "start", {
         bookId: id,
         chapterNumber,
@@ -6116,8 +6201,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           const unchangedReason = run.decision === "unchanged"
             ? (run.unchangedReason ?? NO_REVISIONS_APPLIED_MESSAGE)
             : "";
+          const pendingApproval = run.decision === "unchanged" && extractCandidateRevision(run) !== null;
           const response = run.decision === "unchanged"
-            ? `已执行第${targetChapter}章修订（模式：${reviseMode}），结果未改动：${unchangedReason}`
+            ? pendingApproval
+              ? [
+                  `已生成第${targetChapter}章候选修订（模式：${reviseMode}），但安全门未自动替换原文。`,
+                  `原因：${unchangedReason}`,
+                  `你可以在章节任务中心查看差异并手动批准，runId：${runId}`,
+                ].join("\n")
+              : `已执行第${targetChapter}章修订（模式：${reviseMode}），结果未改动：${unchangedReason}`
             : `已按你的要求完成第${targetChapter}章修订（模式：${reviseMode}，决策：${decision}）。`;
           await stream.writeSSE({ event: "assistant:done", data: JSON.stringify({ ok: true, response }) });
           broadcast("agent:complete", { instruction: prompt, response });
@@ -6746,9 +6838,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     }
     const drafted = buildAssistantPlanDraft(intent, parsedScope.scope, input);
-    // For write_next: auto-load latest contract/blueprint artifacts
+    // For write_next and plot-analysis-driven write_next: auto-load latest contract/blueprint artifacts.
+    const needsBlueprintConfirm =
+      routedIntent.intentType === "plan_next_from_previous_analysis" ||
+      routedIntent.intentType === "write_next_with_user_plot";
     let latestSteering: Awaited<ReturnType<typeof loadLatestSteeringArtifacts>> | undefined;
-    if (intent === "write_next") {
+    if (intent === "write_next" || needsBlueprintConfirm) {
       const bookId = parsedScope.scope.type === "book-list" && parsedScope.scope.bookIds.length === 1 ? parsedScope.scope.bookIds[0] : undefined;
       latestSteering = await loadLatestSteeringArtifacts(artifactService, sessionId, bookId);
     }
@@ -6773,9 +6868,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       };
     }
     // For plot-driven write-next intents, prepend a blueprint-confirm checkpoint before write-next nodes
-    const needsBlueprintConfirm =
-      routedIntent.intentType === "plan_next_from_previous_analysis" ||
-      routedIntent.intentType === "write_next_with_user_plot";
     if (needsBlueprintConfirm) {
       const planBookId = parsedScope.scope.type === "book-list" && parsedScope.scope.bookIds.length === 1
         ? parsedScope.scope.bookIds[0] : undefined;
@@ -8549,6 +8641,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     const updates = await c.req.json<{
       chapterWordCount?: number;
+      chapterLengthTolerancePercent?: number;
       targetChapters?: number;
       status?: string;
       language?: string;
@@ -8560,6 +8653,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ...book,
         is_release_candidate: isReleaseCandidate,
         ...(updates.chapterWordCount !== undefined ? { chapterWordCount: Number(updates.chapterWordCount) } : {}),
+        ...(updates.chapterLengthTolerancePercent !== undefined ? { chapterLengthTolerancePercent: clampChapterLengthTolerance(Number(updates.chapterLengthTolerancePercent)) } : {}),
         ...(updates.targetChapters !== undefined ? { targetChapters: Number(updates.targetChapters) } : {}),
         ...(updates.status !== undefined ? { status: updates.status as typeof book.status } : {}),
         ...(updates.language !== undefined ? { language: updates.language as "zh" | "en" } : {}),

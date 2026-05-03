@@ -115,6 +115,7 @@ export const ChapterIntentSchema = z.object({
   styleEmphasis: z.array(z.string()).default([]),
   steeringContract: ChapterSteeringContractSchema.optional(),
   blueprint: ChapterBlueprintSchema.optional(),
+  userContractPriority: ChapterSteeringPrioritySchema.default("normal"),
   conflicts: z.array(ChapterConflictSchema).default([]),
   hookAgenda: HookAgendaSchema.default({
     pressureMap: [],

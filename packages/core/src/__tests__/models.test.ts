@@ -105,6 +105,15 @@ describe("BookConfigSchema", () => {
     ).toThrow();
   });
 
+  it("rejects chapterLengthTolerancePercent outside the supported range", () => {
+    expect(() =>
+      BookConfigSchema.parse({ ...validBook, chapterLengthTolerancePercent: 5 }),
+    ).toThrow();
+    expect(() =>
+      BookConfigSchema.parse({ ...validBook, chapterLengthTolerancePercent: 90 }),
+    ).toThrow();
+  });
+
   it("rejects targetChapters below 1", () => {
     expect(() =>
       BookConfigSchema.parse({ ...validBook, targetChapters: 0 }),

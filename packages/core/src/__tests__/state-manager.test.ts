@@ -317,6 +317,44 @@ describe("StateManager", () => {
 
       expect(next).toBe(13);
     });
+
+    it("ignores placeholder rows in the closed-hooks table during markdown bootstrap", async () => {
+      const bookId = "closed-hooks-placeholder-book";
+      const bookDir = manager.bookDir(bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      const storyDir = join(bookDir, "story");
+      await mkdir(chaptersDir, { recursive: true });
+      await mkdir(storyDir, { recursive: true });
+
+      await Promise.all([
+        writeFile(join(chaptersDir, "0001_Start.md"), "# Chapter 1\n\nStable body.", "utf-8"),
+        writeFile(
+          join(storyDir, "pending_hooks.md"),
+          [
+            "# 伏笔池",
+            "",
+            "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| hook-1 | 1 | mystery | open | 1 | reveal | near-term | active hook |",
+            "",
+            "## 已关闭伏笔",
+            "",
+            "| hook_id | 起始章节 | 关闭章节 | 内容 |",
+            "| --- | --- | --- | --- |",
+            "| (无) |  |  |  |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+      ]);
+
+      const next = await manager.getNextChapterNumber(bookId);
+      const hooksJson = await readFile(join(storyDir, "state", "hooks.json"), "utf-8");
+
+      expect(next).toBe(2);
+      expect(hooksJson).toContain("hook-1");
+      expect(hooksJson).not.toContain("(无)");
+    });
   });
 
   // -------------------------------------------------------------------------

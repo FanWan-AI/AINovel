@@ -296,6 +296,51 @@ describe("PlannerAgent", () => {
     await expect(readFile(result.runtimePath, "utf-8")).resolves.toContain("## Chapter Blueprint");
   });
 
+  it("preserves a confirmed ChapterBlueprint as the hard runtime intent blueprint", async () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+    const confirmedBlueprint = {
+      openingHook: "林清雪推开会议室门，直接点名万凡。",
+      scenes: Array.from({ length: 5 }, (_, index) => ({
+        beat: `确认蓝图场景${index + 1}: 林清雪主动找万凡并制造误判反转`,
+        conflict: `确认冲突${index + 1}: 万凡不能用旧惯性回避`,
+        informationGap: `确认信息差${index + 1}`,
+        turn: `确认转折${index + 1}: 她的判断被现场证据反转`,
+        payoff: `确认爽点${index + 1}: 万凡夺回主动权`,
+        cost: `确认代价${index + 1}: 关系风险公开化`,
+      })),
+      payoffRequired: "必须兑现林清雪主动找万凡带来的关系筹码变化。",
+      endingHook: "章尾让新证据指向更大的误判。",
+      contractSatisfaction: ["必须包含：林清雪主动找万凡", "必须包含：误判反转"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_confirmed_bp"],
+    };
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+      externalContext: "## Steering Contract\n### Must Include\n- 林清雪主动找万凡\n- 误判反转",
+      confirmedChapterBlueprint: confirmedBlueprint,
+    });
+
+    expect(result.intent.userContractPriority).toBe("hard");
+    expect(result.intent.blueprint).toEqual(confirmedBlueprint);
+    const runtime = await readFile(result.runtimePath, "utf-8");
+    expect(runtime).toContain("林清雪推开会议室门");
+    expect(runtime).toContain("确认蓝图场景1");
+    expect(runtime).toContain("确认冲突1");
+    expect(runtime).toContain("确认转折1");
+    expect(runtime).toContain("确认爽点1");
+    expect(runtime).toContain("确认代价1");
+    expect(runtime).toContain("章尾让新证据指向更大的误判");
+  });
+
   it("emits structured directives when fallback planning, chapter type repetition, and title collapse stack up", async () => {
     book = {
       ...book,

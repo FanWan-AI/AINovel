@@ -44,6 +44,7 @@ export function buildWriterSystemPrompt(
         buildEnglishGenreIntro(book, genreProfile),
         buildEnglishCoreRules(book),
         buildGovernedInputContract("en", governed),
+        governed ? buildChapterDirectorRules("en") : "",
         buildLengthGuidance(resolvedLengthSpec, "en"),
         !governed ? buildEnglishAntiAIRules() : "",
         !governed ? buildEnglishCharacterMethod() : "",
@@ -62,6 +63,7 @@ export function buildWriterSystemPrompt(
         buildGenreIntro(book, genreProfile),
         buildCoreRules(resolvedLengthSpec),
         buildGovernedInputContract("zh", governed),
+        governed ? buildChapterDirectorRules("zh") : "",
         buildLengthGuidance(resolvedLengthSpec, "zh"),
         !governed ? buildAntiAIExamples() : "",
         !governed ? buildCharacterPsychologyMethod() : "",
@@ -101,7 +103,7 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
     return `## Input Governance Contract
 
 - Chapter-specific steering comes from the provided chapter intent and composed context package.
-- If a Chapter Blueprint is present, treat it as the mandatory scene design for this chapter: every scene beat needs direct resistance, a turn, a visible payoff, and an attached cost/risk.
+- If a Chapter Blueprint is present, treat it as the mandatory scene design for this chapter: openingHook must land inside the first 300 words, every scene beat needs direct resistance, a turn, a visible payoff, and an attached cost/risk, and endingHook must land at the chapter tail.
 - If a Steering Contract is present, satisfy every must-include item and avoid every must-avoid item unless a hard canon constraint makes it impossible.
 - The outline is the default plan, not unconditional global supremacy.
 - When the runtime rule stack records an active L4 -> L3 override, follow the current task over local planning.
@@ -110,13 +112,14 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
 - If Hook Debt Briefs are provided, they contain the ORIGINAL SEED TEXT from the chapter where each hook was planted. Use this text to write a continuation or payoff that feels connected to what the reader already saw — not a vague mention, but a scene that builds on the specific promise.
 - When the explicit hook agenda names an eligible resolve target, land a concrete payoff beat that answers the reader's original question from the seed chapter.
 - When stale debt is present, do not open sibling hooks casually; clear pressure from old promises before minting fresh debt.
-- In multi-character scenes, include at least one resistance-bearing exchange instead of reducing the beat to summary or explanation.`;
+- In multi-character scenes, include at least one resistance-bearing exchange instead of reducing the beat to summary or explanation.
+- If old plot momentum conflicts with confirmed blueprint or user must-include items, obey the current user contract and bridge continuity locally.`;
   }
 
   return `## 输入治理契约
 
 - 本章具体写什么，以提供给你的 chapter intent 和 composed context package 为准。
-- 如果出现 Chapter Blueprint，必须把它当作本章强制场景设计：每个场景节拍都要有直接阻力、局势转折、可见爽点，以及对应代价/风险。
+- 如果出现 Chapter Blueprint，必须把它当作本章强制场景设计：openingHook 必须落在开场 300 字内；每个场景节拍都要有直接阻力、局势转折、可见爽点，以及对应代价/风险；endingHook 必须落在章尾。
 - 如果出现 Steering Contract，必须满足所有 mustInclude，并避开所有 mustAvoid；除非硬设定明确不允许，否则不得擅自忽略用户要求。
 - 卷纲是默认规划，不是全局最高规则。
 - 当 runtime rule stack 明确记录了 L4 -> L3 的 active override 时，优先执行当前任务意图，再局部调整规划层。
@@ -125,7 +128,34 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
 - 如果提供了 Hook Debt 简报，里面包含每个伏笔种下时的**原始文本片段**。用这些原文来写延续或兑现场景——不是模糊地提一嘴，而是接着读者已经看到的具体承诺来写。
 - 如果显式 hook agenda 里出现了可回收目标，本章必须写出具体兑现片段，回答种子章节中读者的原始疑问。
 - 如果存在 stale debt，先消化旧承诺的压力，再决定是否开新坑；同类 sibling hook 不得随手再开。
-- 多角色场景里，至少给出一轮带阻力的直接交锋，不要把人物关系写成纯解释或纯总结。`;
+- 多角色场景里，至少给出一轮带阻力的直接交锋，不要把人物关系写成纯解释或纯总结。
+- 如果旧剧情惯性和 confirmed blueprint / 用户 mustInclude 冲突，优先当前用户契约，并用合理桥段承接连续性。`;
+}
+
+function buildChapterDirectorRules(language: "zh" | "en"): string {
+  if (language === "en") {
+    return `## Chapter Director Mode
+
+- You are the chapter director, not a summarizer. Write visible scenes, not minutes, reports, or abstract analysis.
+- Every blueprint scene must become an on-page scene with resistance, action, reaction, turn, and result. Do not compress a scene beat into one sentence of summary.
+- Avoid "he realized / he decided / they discussed" as the main delivery. Convert intention and analysis into dialogue, movement, pressure, public consequence, or irreversible choice.
+- Confirmed blueprint, mustInclude, and mustAvoid outrank old plot inertia. Use a brief continuity bridge when needed, then execute the current contract.
+- Genre execution templates:
+  - Urban system fiction: create information-gap pressure, show system feedback on page, make relationship tension change leverage, shift a resource/status number or social position, and land an immediate payoff before adding the next risk.
+  - Female workplace power fantasy: stage power oppression in a public or professionally consequential setting, let the lead counter in action, pay emotional value, reverse an opponent's misjudgment, and cash out identity or competence.
+  - Xianxia/fantasy: put realm/rule pressure on the body or choice, add an external threat or resource contest, write combat/trial turns visibly, then pair breakthrough with cost.`;
+  }
+
+  return `## 章节导演模式
+
+- 你是章节导演，不是总结员。写可见场景，不写流水账、项目纪要、纯复盘或纯分析。
+- 蓝图里的每个 scene beat 都必须变成正文里的独立可见场景，包含：阻力、行动、反应、转折、结果。不得用一句总结把场景带过。
+- 不要把“他意识到 / 他决定 / 他们讨论了”当作主要推进方式。把意图和分析改写成对话、动作、压力、公开后果或不可逆选择。
+- confirmed blueprint、mustInclude、mustAvoid 高于旧剧情惯性。需要承接时，用短桥段解释，然后执行当前契约。
+- 类型执行模板：
+  - 都市系统文：制造信息差压制；把系统反馈写到场上；让关系张力改变筹码；让资源、地位或可用权限发生变化；先给即时爽点，再挂新风险。
+  - 女频职场爽文：把权力压迫放在公开或职业后果明确的场合；让主角当场反制；给足情绪价值；让对方误判反转；兑现身份、能力或专业价值。
+  - 修仙/玄幻：把境界或规则压力落到身体和选择上；加入外部威胁或资源争夺；战斗/试炼必须有可见转折；突破必须绑定代价。`;
 }
 
 function buildLengthGuidance(lengthSpec: LengthSpec, language: "zh" | "en"): string {

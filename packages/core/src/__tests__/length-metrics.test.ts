@@ -63,6 +63,20 @@ describe("length metrics", () => {
     expect(spec.hardMax).toBe(280);
   });
 
+  it("uses configured tolerance as the accepted chapter band when provided", () => {
+    const spec = buildLengthSpec(3000, "zh", 30);
+
+    expect(spec.softMin).toBe(2100);
+    expect(spec.softMax).toBe(3900);
+    expect(spec.hardMin).toBe(2100);
+    expect(spec.hardMax).toBe(3900);
+  });
+
+  it("bounds configured tolerance between 10 and 80 percent", () => {
+    expect(buildLengthSpec(3000, "zh", 5).hardMin).toBe(2700);
+    expect(buildLengthSpec(3000, "zh", 100).hardMin).toBe(600);
+  });
+
   it("detects soft and hard range drift", () => {
     const spec = buildLengthSpec(2200, "zh");
 

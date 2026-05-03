@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildSettingsTabItems,
+  buildBookLengthPreferenceDraft,
+  clampBookLengthTolerance,
   collectWritingDuplicateKeys,
+  formatBookLengthRange,
   normalizeSettingsTab,
   normalizeAssistantStrategyForm,
   normalizeWritingGovernanceForm,
   resolveSettingsTabContent,
   saveAssistantStrategy,
+  saveBookLengthPreference,
   saveWritingGovernance,
 } from "./SettingsView";
 import type { TFunction } from "../hooks/use-i18n";
@@ -94,6 +98,40 @@ describe("writing governance helpers", () => {
       governanceKeys: ["plan-next-and-write", "style-template-global"],
       bookDetailKeys: ["plan-next-and-write", "quick-write"],
     })).toEqual(["plan-next-and-write"]);
+  });
+
+  it("builds per-book length drafts with a visible accepted range", () => {
+    const draft = buildBookLengthPreferenceDraft({
+      id: "book-1",
+      title: "测试书",
+      chapterWordCount: 3000,
+      chapterLengthTolerancePercent: 30,
+    });
+
+    expect(draft).toEqual({
+      chapterWordCount: 3000,
+      chapterLengthTolerancePercent: 30,
+    });
+    expect(formatBookLengthRange(draft)).toBe("2100-3900 字");
+  });
+
+  it("clamps book length tolerance to the supported author controls", () => {
+    expect(clampBookLengthTolerance(5)).toBe(10);
+    expect(clampBookLengthTolerance(90)).toBe(80);
+    expect(clampBookLengthTolerance(Number.NaN)).toBe(30);
+  });
+
+  it("saves per-book length preferences to the book endpoint", async () => {
+    const putApiImpl = vi.fn().mockResolvedValue(undefined);
+    await saveBookLengthPreference("book-1", {
+      chapterWordCount: 3200,
+      chapterLengthTolerancePercent: 40,
+    }, { putApiImpl });
+
+    expect(putApiImpl).toHaveBeenCalledWith("/books/book-1", {
+      chapterWordCount: 3200,
+      chapterLengthTolerancePercent: 40,
+    });
   });
 });
 

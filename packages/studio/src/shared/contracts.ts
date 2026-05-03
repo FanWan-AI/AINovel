@@ -42,6 +42,7 @@ export interface BookSummary {
 export interface BookDetail extends BookSummary {
   readonly createdAt: string;
   readonly chapterWordCount: number;
+  readonly chapterLengthTolerancePercent?: number;
   readonly language: "zh" | "en" | null;
 }
 

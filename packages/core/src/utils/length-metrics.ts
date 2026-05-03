@@ -36,7 +36,24 @@ export function formatLengthCount(
 export function buildLengthSpec(
   target: number,
   language: LengthLanguage = "zh",
+  tolerancePercent?: number,
 ): LengthSpec {
+  if (Number.isFinite(tolerancePercent)) {
+    const boundedTolerance = Math.min(80, Math.max(10, Math.round(tolerancePercent as number)));
+    const delta = Math.max(1, Math.floor((target * boundedTolerance) / 100));
+    const min = Math.max(1, target - delta);
+    const max = target + delta;
+    return {
+      target,
+      softMin: min,
+      softMax: max,
+      hardMin: min,
+      hardMax: max,
+      countingMode: resolveLengthCountingMode(language),
+      normalizeMode: "none",
+    };
+  }
+
   const softDelta = scaleRangeDelta(target, SOFT_RANGE_DELTA);
   const hardDelta = Math.max(softDelta, scaleRangeDelta(target, HARD_RANGE_DELTA));
   const softMin = Math.max(1, target - softDelta);

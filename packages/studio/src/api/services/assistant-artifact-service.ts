@@ -20,7 +20,8 @@ export type AssistantArtifactType =
   | "story_graph_patch"
   | "impact_analysis"
   | "quality_report"
-  | "contract_verification";
+  | "contract_verification"
+  | "blueprint_fulfillment_report";
 
 export interface AssistantArtifact {
   readonly artifactId: string;

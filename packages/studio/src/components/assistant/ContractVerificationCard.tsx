@@ -4,6 +4,8 @@
  * plus optional graph patch consumption summary and warnings.
  */
 
+import { BlueprintFulfillmentCard, type BlueprintFulfillmentReport } from "./BlueprintFulfillmentCard.js";
+
 export interface VerificationItem {
   readonly requirement: string;
   readonly status: "satisfied" | "partial" | "missing";
@@ -42,6 +44,7 @@ export interface VerificationReportPayload {
   readonly missingRequirements?: ReadonlyArray<string>;
   readonly sourceArtifactIds?: ReadonlyArray<string>;
   readonly graphPatchConsumption?: GraphPatchConsumption;
+  readonly blueprintFulfillment?: BlueprintFulfillmentReport;
   readonly warning?: string;
 }
 
@@ -162,6 +165,10 @@ export function ContractVerificationCard({ report }: { readonly report: Verifica
             )
           }
         </div>
+      )}
+
+      {report.blueprintFulfillment && (
+        <BlueprintFulfillmentCard report={report.blueprintFulfillment} />
       )}
     </section>
   );
