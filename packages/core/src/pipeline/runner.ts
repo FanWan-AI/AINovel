@@ -100,6 +100,7 @@ export interface ChapterPipelineResult {
   readonly status: "ready-for-review" | "audit-failed" | "state-degraded";
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
+  readonly lengthNormalizationSnapshots?: ReadonlyArray<LengthNormalizationSnapshot>;
   readonly tokenUsage?: TokenUsageSummary;
 }
 
@@ -111,7 +112,19 @@ export interface DraftResult {
   readonly filePath: string;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
+  readonly lengthNormalizationSnapshots?: ReadonlyArray<LengthNormalizationSnapshot>;
   readonly tokenUsage?: TokenUsageSummary;
+}
+
+export interface LengthNormalizationSnapshot {
+  readonly stage: "pre-audit" | "post-revision";
+  readonly mode: "compress" | "expand";
+  readonly beforeContent: string;
+  readonly afterContent: string;
+  readonly beforeCount: number;
+  readonly afterCount: number;
+  readonly applied: boolean;
+  readonly rejectedReason?: string;
 }
 
 export interface PlanChapterResult {
@@ -1025,6 +1038,7 @@ export class PipelineRunner {
         filePath,
         lengthWarnings,
         lengthTelemetry,
+        lengthNormalizationSnapshots: normalizedDraft.snapshot ? [normalizedDraft.snapshot] : [],
         tokenUsage: draftOutput.tokenUsage,
       };
     } finally {
@@ -1282,12 +1296,18 @@ export class PipelineRunner {
           skippedReason: unchangedReason,
         };
       }
-      const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
-        bookId,
-        chapterNumber: targetChapter,
-        chapterContent: reviseOutput.revisedContent,
-        lengthSpec,
-      });
+      // Quality-first policy: during revision, only expand under-length content.
+      // Over-length revisions are kept as-is rather than being destructively compressed,
+      // so that richly-written scenes are never gutted just to satisfy a soft upper bound.
+      const revisionRawCount = countChapterLength(reviseOutput.revisedContent, lengthSpec.countingMode);
+      const normalizedRevision = revisionRawCount < lengthSpec.softMin
+        ? await this.normalizeDraftLengthIfNeeded({
+            bookId,
+            chapterNumber: targetChapter,
+            chapterContent: reviseOutput.revisedContent,
+            lengthSpec,
+          })
+        : { content: reviseOutput.revisedContent, wordCount: revisionRawCount, applied: false };
       const postRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -1321,11 +1341,12 @@ export class PipelineRunner {
         postRevision,
       );
       const revisionBaseCount = countChapterLength(content, lengthSpec.countingMode);
-      const lengthWarnings = this.buildLengthWarnings(
-        targetChapter,
-        normalizedRevision.wordCount,
-        lengthSpec,
-      );
+      // Only produce length warnings when the chapter is under-length. Over-length content
+      // is intentionally preserved in the revision path (quality-first policy), so there is
+      // nothing actionable for the agent to do about it.
+      const lengthWarnings = normalizedRevision.wordCount < lengthSpec.hardMin
+        ? this.buildLengthWarnings(targetChapter, normalizedRevision.wordCount, lengthSpec)
+        : [];
       const lengthTelemetry = this.buildLengthTelemetry({
         lengthSpec,
         writerCount: revisionBaseCount,
@@ -1915,6 +1936,7 @@ export class PipelineRunner {
       status: resolvedStatus,
       lengthWarnings,
       lengthTelemetry,
+      lengthNormalizationSnapshots: reviewResult.lengthNormalizationSnapshots,
       tokenUsage: totalUsage,
     };
   }
@@ -2777,6 +2799,7 @@ ${matrix}`,
     content: string;
     wordCount: number;
     applied: boolean;
+    snapshot?: LengthNormalizationSnapshot;
     tokenUsage?: TokenUsageSummary;
   }> {
     const writerCount = countChapterLength(
@@ -2803,7 +2826,7 @@ ${matrix}`,
     const cutRatio = writerCount > 0 ? 1 - normalized.finalCount / writerCount : 0;
     const expansionRatio = writerCount > 0 ? normalized.finalCount / writerCount - 1 : 0;
     const normalizedOutsideHardRange = isOutsideHardRange(normalized.finalCount, params.lengthSpec);
-    const destructiveCompression = normalized.mode === "compress" && cutRatio > 0.45;
+    const destructiveCompression = normalized.mode === "compress" && cutRatio > 0.30;
     const destructiveExpansion = normalized.mode === "expand" && expansionRatio > 3.0;
 
     // Quality-first safety net: never accept a one-pass length rewrite that is
@@ -2824,6 +2847,18 @@ ${matrix}`,
         content: params.chapterContent,
         wordCount: writerCount,
         applied: false,
+        snapshot: normalized.mode === "compress" || normalized.mode === "expand"
+          ? {
+              stage: "pre-audit",
+              mode: normalized.mode,
+              beforeContent: params.chapterContent,
+              afterContent: normalized.normalizedContent,
+              beforeCount: writerCount,
+              afterCount: normalized.finalCount,
+              applied: false,
+              rejectedReason: reason,
+            }
+          : undefined,
       };
     }
 
@@ -2836,6 +2871,17 @@ ${matrix}`,
       content: normalized.normalizedContent,
       wordCount: normalized.finalCount,
       applied: normalized.applied,
+      snapshot: normalized.mode === "compress" || normalized.mode === "expand"
+        ? {
+            stage: "pre-audit",
+            mode: normalized.mode,
+            beforeContent: params.chapterContent,
+            afterContent: normalized.normalizedContent,
+            beforeCount: writerCount,
+            afterCount: normalized.finalCount,
+            applied: normalized.applied,
+          }
+        : undefined,
       tokenUsage: normalized.tokenUsage,
     };
   }

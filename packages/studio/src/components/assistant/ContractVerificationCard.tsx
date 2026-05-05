@@ -5,6 +5,7 @@
  */
 
 import { BlueprintFulfillmentCard, type BlueprintFulfillmentReport } from "./BlueprintFulfillmentCard.js";
+import { P5RevisionCard, type P5AutoRevisionPayload } from "./EditorReportCard.js";
 
 export interface VerificationItem {
   readonly requirement: string;
@@ -45,6 +46,7 @@ export interface VerificationReportPayload {
   readonly sourceArtifactIds?: ReadonlyArray<string>;
   readonly graphPatchConsumption?: GraphPatchConsumption;
   readonly blueprintFulfillment?: BlueprintFulfillmentReport;
+  readonly p5AutoRevision?: P5AutoRevisionPayload;
   readonly warning?: string;
 }
 
@@ -169,6 +171,10 @@ export function ContractVerificationCard({ report }: { readonly report: Verifica
 
       {report.blueprintFulfillment && (
         <BlueprintFulfillmentCard report={report.blueprintFulfillment} />
+      )}
+
+      {report.p5AutoRevision && (
+        <P5RevisionCard revision={report.p5AutoRevision} />
       )}
     </section>
   );

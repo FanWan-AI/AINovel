@@ -23,6 +23,11 @@ const runAgentLoopMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
 const pipelineConfigs: unknown[] = [];
 
+// ── P5 mocks ───────────────────────────────────────────────────────────
+const auditBlueprintFulfillmentMock = vi.fn();
+const generateBlueprintEditorReportMock = vi.fn();
+const targetedBlueprintReviserReviseMock = vi.fn();
+
 const logger = {
   child: () => logger,
   info: vi.fn(),
@@ -155,6 +160,13 @@ vi.mock("@actalk/inkos-core", () => {
     runAgentLoop: runAgentLoopMock,
     loadProjectConfig: loadProjectConfigMock,
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
+    // P5 blueprint revision exports
+    auditBlueprintFulfillment: auditBlueprintFulfillmentMock,
+    generateBlueprintEditorReport: generateBlueprintEditorReportMock,
+    TargetedBlueprintReviser: class MockTargetedBlueprintReviser {
+      constructor(_config: unknown) {}
+      revise = targetedBlueprintReviserReviseMock;
+    },
   };
 });
 
@@ -450,6 +462,13 @@ describe("createStudioServer daemon lifecycle", () => {
     logger.info.mockReset();
     logger.warn.mockReset();
     logger.error.mockReset();
+    // P5 mock defaults (no-op — P5 is only triggered when blueprintFulfillment.shouldRewrite=true)
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock.mockReturnValue({ score: 90, shouldRewrite: false, blockingIssues: [], openingHook: { status: "satisfied", evidence: "ok", position: 0, withinFirst300Words: true, expected: "" }, scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" }, endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "ok" } });
+    generateBlueprintEditorReportMock.mockReset();
+    generateBlueprintEditorReportMock.mockReturnValue({ targetedRewritePlan: { instructions: [], fixCount: 0, summary: "" }, blockingIssues: [], shouldRewrite: false });
+    targetedBlueprintReviserReviseMock.mockReset();
+    targetedBlueprintReviserReviseMock.mockResolvedValue({ revisedText: "", appliedFixes: [] });
   });
 
   afterEach(async () => {
@@ -721,18 +740,37 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
     expect(fallbackChapterResponse.status).toBe(200);
-    await expect(fallbackChapterResponse.json()).resolves.toMatchObject({
-      intent: "audit",
-      plan: [
-        { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 1 },
+	    await expect(fallbackChapterResponse.json()).resolves.toMatchObject({
+	      intent: "audit",
+	      plan: [
+	        { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 1 },
       ],
       graph: {
         nodes: expect.arrayContaining([
           expect.objectContaining({ nodeId: "s1", type: "task", action: "audit", bookId: "demo-book", chapter: 1 }),
         ]),
-      },
-    });
-  });
+	      },
+	    });
+
+	    const bareChapterResponse = await app.request("http://localhost/api/assistant/plan", {
+	      method: "POST",
+	      headers: { "Content-Type": "application/json" },
+	      body: JSON.stringify({
+	        sessionId: "asst_s_005",
+	        input: "我接受你的建议，你来着手修改，从24章开始",
+	        scope: { type: "book-list", bookIds: ["demo-book"] },
+	      }),
+	    });
+	    expect(bareChapterResponse.status).toBe(200);
+	    await expect(bareChapterResponse.json()).resolves.toMatchObject({
+	      intent: "audit_and_optimize",
+	      plan: [
+	        { stepId: "s1", action: "audit", bookId: "demo-book", chapter: 24 },
+	        { stepId: "s2", action: "revise", bookId: "demo-book", chapter: 24 },
+	        { stepId: "s3", action: "re-audit", bookId: "demo-book", chapter: 24 },
+	      ],
+	    });
+	  });
 
   it("appends a release-candidate checkpoint when the assistant input requests candidate confirmation", async () => {
     const { createStudioServer } = await import("./server.js");
@@ -1534,6 +1572,131 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(callArgs[2]).toHaveProperty("onToolCall");
     expect(callArgs[2]).toHaveProperty("onToolResult");
     expect(callArgs[2]).toHaveProperty("onMessage");
+  });
+
+  it("persists concrete next-chapter design replies as chapter_plan artifacts", async () => {
+    runAgentLoopMock.mockResolvedValueOnce([
+      "第35章设计方案：《翻牌时刻》",
+      "第一章段：主角回到安全屋，发现旧线索被重新激活。",
+      "第二章段：棕色风衣男人登场，逼出一场误判反转。",
+      "章末钩子：翻牌的时候到了。",
+    ].join("\n"));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_chat_plan_001",
+        prompt: "你觉得下一章怎么写？",
+        scopeBookTitles: ["测试书"],
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    const artifactText = await readFile(join(root, ".inkos", "assistant-artifacts", "sess_chat_plan_001.jsonl"), "utf-8");
+    const artifacts = artifactText.trim().split("\n").map((line) => JSON.parse(line) as {
+      type?: string;
+      payload?: { sceneBeats?: string[]; goal?: string };
+      searchableText?: string;
+    });
+    const planArtifact = artifacts.find((artifact) => artifact.type === "chapter_plan");
+    expect(planArtifact?.payload?.goal).toContain("翻牌时刻");
+    expect(planArtifact?.payload?.sceneBeats?.join("\n")).toContain("棕色风衣男人");
+    expect(planArtifact?.searchableText).toContain("第35章设计方案");
+  });
+
+  it("preserves full latest two recent messages while compacting older assistant chapter plans", async () => {
+    const longPriorPlan = [
+      "第37章设计方案：《夜宴》",
+      "第一段：四人在安全屋休整，新的赴约压力浮出水面。",
+      "第二段：主角复盘上一章的代价，决定主动掌控牌桌。",
+      "这是一段不应该被完整复述的正文。".repeat(120),
+    ].join("\n");
+    const recentUserMessage = "用户刚刚补充：保留上一章的铜币细节和清晨赴约。";
+    const recentAssistantMessage = "助手刚刚确认：铜币符文需要在开场被主角主动检查，不能丢。";
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "你觉得下一章写什么比较好？",
+        scopeBookTitles: ["测试书"],
+        scopeBookIds: ["demo-book"],
+        recentMessages: [
+          { role: "assistant", content: longPriorPlan },
+          { role: "user", content: recentUserMessage },
+          { role: "assistant", content: recentAssistantMessage },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    const promptArg = String(runAgentLoopMock.mock.calls.at(-1)?.[1] ?? "");
+    expect(promptArg).toContain("不要复述近期对话原文");
+    expect(promptArg).toContain("上一轮章节方案摘要：夜宴");
+    expect(promptArg).toContain("第一段：四人在安全屋休整");
+    expect(promptArg).not.toContain("这是一段不应该被完整复述的正文");
+    expect(promptArg).toContain(recentUserMessage);
+    expect(promptArg).toContain(recentAssistantMessage);
+  });
+
+  it("deduplicates repeated long assistant final responses before streaming done", async () => {
+    const plan = [
+      "第37章设计方案：《夜宴》",
+      "第一段：四人在安全屋休整，新的赴约压力浮出水面。",
+      "第二段：主角复盘上一章的代价，决定主动掌控牌桌。",
+      "第三段：章末以新约定制造下一章钩子。",
+      "本章结论：以低压场景承接高压对峙。",
+    ].join("\n");
+    runAgentLoopMock.mockResolvedValueOnce(`${plan}\n\n${plan}`);
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "你觉得下一章写什么比较好？",
+        scopeBookTitles: ["测试书"],
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    let body = "";
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+      }
+      body += decoder.decode();
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    const donePayload = parseAssistantDonePayload(body) as { response?: string };
+    expect(donePayload.response).toBeTruthy();
+    const occurrences = donePayload.response?.match(/第37章设计方案/g)?.length ?? 0;
+    expect(occurrences).toBe(1);
   });
 
   it("injects book and user memory summaries into assistant chat prompts", async () => {
@@ -4266,6 +4429,61 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("records applied write-next length normalization as a visible chapter version", async () => {
+    writeNextChapterMock.mockResolvedValueOnce({
+      chapterNumber: 3,
+      title: "Length Normalized",
+      wordCount: 3600,
+      revised: true,
+      status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+      lengthNormalizationSnapshots: [{
+        stage: "pre-audit",
+        mode: "compress",
+        beforeContent: "审计前完整草稿。".repeat(20),
+        afterContent: "归一化后草稿。".repeat(12),
+        beforeCount: 5800,
+        afterCount: 3600,
+        applied: true,
+      }],
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const writeResponse = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordCount: 3000 }),
+    });
+    expect(writeResponse.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const versionsResponse = await app.request("http://localhost/api/books/demo-book/chapters/3/versions");
+      const versionsData = await versionsResponse.json() as { versions: Array<{ versionId: string; actionType: string; label: string; hasContent: boolean }> };
+      const normalizationVersion = versionsData.versions.find((version) => version.actionType === "length-normalize");
+      expect(normalizationVersion).toMatchObject({
+        actionType: "length-normalize",
+        label: "审计前字数归一化 5800 -> 3600",
+        hasContent: true,
+      });
+    });
+
+    const versionsResponse = await app.request("http://localhost/api/books/demo-book/chapters/3/versions");
+    const versionsData = await versionsResponse.json() as { versions: Array<{ versionId: string; actionType: string }> };
+    const versionId = versionsData.versions.find((version) => version.actionType === "length-normalize")?.versionId;
+    expect(versionId).toBeTruthy();
+
+    const detailResponse = await app.request(`http://localhost/api/books/demo-book/chapters/3/versions/${versionId}`);
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toMatchObject({
+      actionType: "length-normalize",
+      label: "审计前字数归一化 5800 -> 3600",
+      beforeContent: expect.stringContaining("审计前完整草稿"),
+      afterContent: expect.stringContaining("归一化后草稿"),
+    });
+  });
+
   it("propagates unchanged reasons from core revise result into run records and events", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });
@@ -6706,6 +6924,127 @@ describe("P2.5 — blueprint-confirm checkpoint binds artifact; approve blocked 
     expect(typeof cpNode?.checkpoint?.blueprintArtifactId).toBe("string");
     expect(cpNode?.checkpoint?.blueprintArtifactId).toMatch(/^art_/);
   });
+
+  it("auto-generated blueprint uses referenced chapter_plan artifact when user says to follow the design plan", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+    const planText = [
+      "第35章设计方案：《翻牌时刻》",
+      "第一章段：林清雪和叶红鱼质问万凡带回来的暗夜气息。",
+      "第二章段：董凝回到安全屋，三人围绕棕色风衣男人的牌局展开交锋。",
+      "章末钩子：穿棕色风衣的男人敲门，说翻牌的时候到了。",
+    ].join("\n");
+    const chapterPlan = {
+      artifactId: "art_plan_35_001",
+      sessionId: "sess_plan_ref_001",
+      bookId: "demo-book",
+      type: "chapter_plan",
+      title: "第35章设计方案",
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: [],
+      payload: {
+        goal: "翻牌时刻",
+        response: planText,
+        sceneBeats: [
+          "林清雪和叶红鱼质问万凡带回来的暗夜气息",
+          "董凝回到安全屋并围绕棕色风衣男人的牌局交锋",
+        ],
+      },
+      summary: "第35章设计方案",
+      searchableText: planText,
+    };
+    await writeFile(
+      join(artifactsDir, "sess_plan_ref_001.jsonl"),
+      JSON.stringify(chapterPlan) + "\n",
+      "utf-8",
+    );
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_plan_ref_001",
+        input: "我认可你的设计方案，按照你的设计方案写下一章",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ type: string; action?: string; mode?: string; checkpoint?: { blueprintArtifactId?: string }; blueprint?: Record<string, unknown>; sourceArtifactIds?: string[] }> };
+    };
+    const cpNode = data.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    expect(cpNode).toBeUndefined();
+    const writeNextNode = data.graph?.nodes.find((n) => n.action === "write-next");
+    expect(writeNextNode?.blueprint?.status).toBe("confirmed");
+    expect(writeNextNode?.blueprint?.artifactId).toMatch(/^art_/);
+    expect(writeNextNode?.sourceArtifactIds).toContain("art_plan_35_001");
+
+    const jsonl = await readFile(join(artifactsDir, "sess_plan_ref_001.jsonl"), "utf-8");
+    const blueprintArtifacts = jsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type?: string; artifactId?: string; payload?: Record<string, unknown> })
+      .filter((entry) => entry.type === "chapter_blueprint");
+    const blueprint = blueprintArtifacts.find((entry) => entry.artifactId === writeNextNode?.blueprint?.artifactId);
+    expect(blueprint?.payload?.status).toBe("confirmed");
+    expect(blueprint?.payload?.sourceArtifactIds).toContain("art_plan_35_001");
+    expect(blueprint?.payload?.openingHook).toBe("翻牌时刻");
+    expect(JSON.stringify(blueprint?.payload)).toContain("棕色风衣男人");
+    expect(JSON.stringify(blueprint?.payload)).toContain("翻牌时刻");
+  });
+
+  it("auto-generated blueprint can recover a referenced design plan from recent assistant messages", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const artifactsDir = join(root, ".inkos", "assistant-artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+    const recentPlan = [
+      "第35章设计方案：《三命共鸣》",
+      "第一章段：林清雪和叶红鱼在安全屋质问万凡。",
+      "第二章段：董凝带来棕色风衣男人的牌局线索。",
+      "章末钩子：门外传来一句，翻牌的时候到了。",
+    ].join("\n");
+
+    const res = await app.request("http://localhost/api/assistant/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "sess_recent_plan_001",
+        input: "我认可你的设计方案，按照你的设计方案去写下一章节",
+        scope: { type: "book-list", bookIds: ["demo-book"] },
+        recentMessages: [
+          { role: "assistant", content: recentPlan },
+          { role: "user", content: "我认可你的设计方案，按照你的设计方案去写下一章节" },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      graph?: { nodes: Array<{ type: string; action?: string; mode?: string; checkpoint?: { blueprintArtifactId?: string }; blueprint?: Record<string, unknown> }> };
+    };
+    const cpNode = data.graph?.nodes.find((n) => n.type === "checkpoint" && n.mode === "blueprint-confirm");
+    expect(cpNode).toBeUndefined();
+    const writeNextNode = data.graph?.nodes.find((n) => n.action === "write-next");
+    expect(writeNextNode?.blueprint?.status).toBe("confirmed");
+    expect(writeNextNode?.blueprint?.artifactId).toMatch(/^art_/);
+
+    const jsonl = await readFile(join(artifactsDir, "sess_recent_plan_001.jsonl"), "utf-8");
+    expect(jsonl).toContain("\"type\":\"chapter_plan\"");
+    const blueprintArtifacts = jsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type?: string; artifactId?: string; payload?: Record<string, unknown> })
+      .filter((entry) => entry.type === "chapter_blueprint");
+    const blueprint = blueprintArtifacts.find((entry) => entry.artifactId === writeNextNode?.blueprint?.artifactId);
+    expect(blueprint?.payload?.status).toBe("confirmed");
+    expect(blueprint?.payload?.openingHook).toBe("三命共鸣");
+    expect(JSON.stringify(blueprint?.payload)).toContain("三命共鸣");
+    expect(JSON.stringify(blueprint?.payload)).toContain("棕色风衣男人");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -6845,4 +7184,733 @@ describe("P2.5 — full blueprint confirm/approve flow", () => {
     const writeNextNode = planData.graph?.nodes.find((n) => n.action === "write-next");
     expect(writeNextNode?.blueprint).toBeDefined();
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P5 Blueprint-Targeted-Revision Safety Tests
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Invariants verified:
+//  1. Original chapter file is NEVER overwritten by the P5 revision loop.
+//  2. A "blueprint-targeted-revise" chapter run is created with decision="unchanged"
+//     and candidateRevision inside the event data.
+//  3. Approving the run writes the candidate content to disk.
+//  4. TargetedBlueprintReviser errors surface as status="failed" with no candidate.
+//  5. If revised text still fails blueprint audit, candidateRevision.status="audit-failed".
+//  6. If revised text violates the user contract, status is forced to "still-failing".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Minimal valid confirmed chapter blueprint for P5 tests. */
+const P5_TEST_BLUEPRINT = {
+  openingHook: "林清雪冲入废弃仓库",
+  scenes: [
+    { beat: "发现线索", conflict: "时间压力", turn: "线索指向内鬼", payoff: "确认内鬼身份", cost: "暴露自己" },
+    { beat: "激烈对抗", conflict: "体力悬殊", turn: "反将一军", payoff: "成功脱身", cost: "受伤" },
+    { beat: "获取关键文件", conflict: "安保系统", turn: "断电机会", payoff: "拿到证据", cost: "留下痕迹" },
+    { beat: "撤退途中", conflict: "追兵赶来", turn: "陷阱反制", payoff: "成功甩脱", cost: "消耗体力" },
+    { beat: "最终抉择", conflict: "道德两难", turn: "选择揭露", payoff: "公义得申", cost: "失去盟友" },
+  ],
+  payoffRequired: "内鬼身份被揭露",
+  endingHook: "更大阴谋浮出水面",
+  contractSatisfaction: [],
+  status: "confirmed",
+};
+
+/** Build a blueprint artifact file so the server picks up the confirmed blueprint. */
+async function seedBlueprintArtifact(root: string, sessionId: string, blueprint: Record<string, unknown>): Promise<string> {
+  const artifactId = `bp-p5-test-${Date.now()}`;
+  const artifactsDir = join(root, ".inkos", "artifacts");
+  await mkdir(artifactsDir, { recursive: true });
+  await writeFile(join(artifactsDir, `${artifactId}.json`), JSON.stringify({
+    artifactId,
+    sessionId,
+    bookId: "demo-book",
+    type: "chapter_blueprint",
+    title: "P5测试蓝图",
+    payload: blueprint,
+    summary: "test",
+    searchableText: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    version: 1,
+  }, null, 2), "utf-8");
+  return artifactId;
+}
+
+describe("P5 blueprint-targeted-revision safety (write-next → candidate → approve)", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-p5-safety-"));
+    await writeFile(join(root, "inkos.json"), JSON.stringify(projectConfig, null, 2), "utf-8");
+    schedulerStartMock.mockReset();
+    schedulerStartPlans.length = 0;
+    initBookMock.mockReset();
+    writeNextChapterMock.mockReset();
+    planChapterMock.mockReset();
+    saveChapterIndexMock.mockReset();
+    saveChapterIndexMock.mockResolvedValue(undefined);
+    loadChapterIndexMock.mockReset();
+    loadChapterIndexMock.mockResolvedValue([]);
+    loadProjectConfigMock.mockReset();
+    loadProjectConfigMock.mockImplementation(async () => {
+      const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8")) as Record<string, unknown>;
+      return {
+        ...cloneProjectConfig(),
+        ...raw,
+        llm: { ...cloneProjectConfig().llm, ...((raw.llm ?? {}) as Record<string, unknown>) },
+        daemon: { ...cloneProjectConfig().daemon, ...((raw.daemon ?? {}) as Record<string, unknown>) },
+        modelOverrides: (raw.modelOverrides ?? {}) as Record<string, unknown>,
+        notify: [],
+      };
+    });
+    createLLMClientMock.mockReset();
+    createLLMClientMock.mockReturnValue({});
+    auditBlueprintFulfillmentMock.mockReset();
+    generateBlueprintEditorReportMock.mockReset();
+    targetedBlueprintReviserReviseMock.mockReset();
+    logger.info.mockReset();
+    logger.warn.mockReset();
+    logger.error.mockReset();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** Common setup: chapter file + confirmed blueprint artifact + write-next mock */
+  async function setupP5Scene(options: {
+    readonly originalContent?: string;
+    readonly revisedContent?: string;
+    readonly chapterNumber?: number;
+    readonly blueprintShouldRewriteBefore?: boolean;
+    readonly blueprintShouldRewriteAfter?: boolean;
+    readonly contractMustInclude?: string[];
+    readonly contractMustAvoid?: string[];
+    readonly reviserThrows?: boolean;
+  } = {}): Promise<{
+    readonly chapterPath: string;
+    readonly sessionId: string;
+    readonly artifactId: string;
+  }> {
+    const chapterNum = options.chapterNumber ?? 1;
+    const chapterPrefix = String(chapterNum).padStart(4, "0");
+    const originalContent = options.originalContent ?? "# 第1章\n主角发现了关键线索，但缺乏冲突。内容平淡，没有开篇钩子。";
+    const revisedContent = options.revisedContent ?? "# 第1章\n林清雪冲入废弃仓库，一脚踹开铁门！内鬼身份已被揭露，更大阴谋浮出水面。";
+
+    // Create chapter file
+    const chapterDir = join(root, "books", "demo-book", "chapters");
+    await mkdir(chapterDir, { recursive: true });
+    const chapterPath = join(chapterDir, `${chapterPrefix}_p5test.md`);
+    await writeFile(chapterPath, originalContent, "utf-8");
+
+    // Create book config
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({
+      id: "demo-book",
+      title: "P5测试书",
+      genre: "都市",
+      status: "active",
+      chapterWordCount: 2000,
+      targetChapters: 10,
+      language: "zh",
+    }), "utf-8");
+
+    // Seed confirmed blueprint artifact
+    const sessionId = `sess-p5-${Date.now()}`;
+    const artifactId = await seedBlueprintArtifact(root, sessionId, P5_TEST_BLUEPRINT);
+
+    // Configure chapter index mock
+    loadChapterIndexMock.mockResolvedValue([{
+      number: chapterNum, title: "P5测试章", status: "ready-for-review",
+      wordCount: originalContent.length, createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z", auditIssues: [], lengthWarnings: [],
+    }]);
+
+    // writeNextChapter returns chapterNumber so the server finds the right file
+    writeNextChapterMock.mockResolvedValue({
+      chapterNumber: chapterNum, title: "P5测试章", wordCount: 1800,
+      revised: false, status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    // P4 audit: the ORIGINAL chapter fails the blueprint (triggers P5)
+    const P4_FAILING: Record<string, unknown> = {
+      score: 42,
+      shouldRewrite: options.blueprintShouldRewriteBefore ?? true,
+      blockingIssues: ["开篇缺少行动钩子", "内鬼身份未揭露"],
+      openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "林清雪冲入废弃仓库" },
+      scenes: [], payoffRequired: { status: "missing", evidence: "" },
+      endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+    };
+    // P5 re-audit: the REVISED chapter passes (unless test says otherwise)
+    const P5_PASSING: Record<string, unknown> = {
+      score: 88,
+      shouldRewrite: options.blueprintShouldRewriteAfter ?? false,
+      blockingIssues: [],
+      openingHook: { status: "satisfied", evidence: "林清雪冲入废弃仓库", position: 0, withinFirst300Words: true, expected: "" },
+      scenes: [], payoffRequired: { status: "satisfied", evidence: "内鬼揭露" },
+      endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "更大阴谋" },
+    };
+    // First call (P4 audit on original) → failing; second call (P5 re-audit on revised) → passing
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce(P4_FAILING)
+      .mockReturnValueOnce(P5_PASSING);
+
+    // Editor report always has fixCount > 0 to trigger the revision
+    generateBlueprintEditorReportMock.mockReturnValue({
+      targetedRewritePlan: {
+        instructions: [
+          { element: "openingHook", issue: "缺少行动钩子", required: "林清雪冲入废弃仓库", instruction: "在首段插入行动开场" },
+        ],
+        fixCount: 1,
+        summary: "修复1处开篇问题",
+      },
+      blockingIssues: ["开篇缺少行动钩子"],
+      shouldRewrite: true,
+    });
+
+    if (options.reviserThrows) {
+      targetedBlueprintReviserReviseMock.mockRejectedValue(new Error("LLM connection timeout"));
+    } else {
+      targetedBlueprintReviserReviseMock.mockResolvedValue({
+        revisedText: revisedContent,
+        appliedFixes: ["在首段插入行动开场"],
+      });
+    }
+
+    return { chapterPath, sessionId, artifactId };
+  }
+
+  it("P5-1: original chapter file must not change after write-next triggers P5 revision", async () => {
+    const { chapterPath, sessionId } = await setupP5Scene();
+    const originalContent = await readFile(chapterPath, "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mustInclude: ["内鬼身份"],
+        sessionId,
+        blueprint: P5_TEST_BLUEPRINT,
+      }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    // Wait for P5 to run (write-next:verification event signals completion)
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string }> };
+      expect(eventsData.entries.some((e) => e.event === "write-next:verification")).toBe(true);
+    }, { timeout: 8000 });
+
+    // SAFETY INVARIANT: original chapter file must be unchanged
+    const contentAfter = await readFile(chapterPath, "utf-8");
+    expect(contentAfter).toBe(originalContent);
+  }, 12000);
+
+  it("P5-2: write-next creates blueprint-targeted-revise run in unchanged/pending-approval state", async () => {
+    const { sessionId } = await setupP5Scene();
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mustInclude: ["内鬼身份"],
+        sessionId,
+        blueprint: P5_TEST_BLUEPRINT,
+      }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    // Wait for the verification event with p5AutoRevision
+    let p5Data: Record<string, unknown> | undefined;
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const verData = verEvent!.data as Record<string, unknown>;
+      expect(verData.p5AutoRevision).toBeDefined();
+      p5Data = verData.p5AutoRevision as Record<string, unknown>;
+    }, { timeout: 8000 });
+
+    expect(p5Data!.status).toBe("candidate_pending_approval");
+    const runId = p5Data!.runId as string;
+    expect(typeof runId).toBe("string");
+    expect(runId.length).toBeGreaterThan(0);
+
+    // Verify the run exists and has correct shape
+    const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}`);
+    expect(runResponse.status).toBe(200);
+    const run = await runResponse.json() as Record<string, unknown>;
+    expect(run.actionType).toBe("blueprint-targeted-revise");
+    expect(run.status).toBe("succeeded");
+    expect(run.decision).toBe("unchanged");
+
+    // Verify the diff shows pendingApproval=true
+    const diffResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/diff`);
+    expect(diffResponse.status).toBe(200);
+    const diff = await diffResponse.json() as Record<string, unknown>;
+    expect(diff.pendingApproval).toBe(true);
+    expect(typeof diff.afterContent).toBe("string");
+    expect(diff.afterContent as string).toContain("林清雪冲入废弃仓库");
+  }, 12000);
+
+  it("P5-3: approving blueprint-targeted-revise run replaces chapter content and updates index", async () => {
+    const { chapterPath, sessionId } = await setupP5Scene();
+    const originalHeading = (await readFile(chapterPath, "utf-8")).split("\n")[0]!;
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const writeResponse = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    expect(writeResponse.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    // Wait until the p5AutoRevision runId is available
+    let runId: string | undefined;
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      const p5 = (verEvent?.data as Record<string, unknown>)?.p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5?.runId).toBeDefined();
+      runId = p5!.runId as string;
+    }, { timeout: 8000 });
+
+    // Before approval: original chapter content must still be intact
+    const beforeApprove = await readFile(chapterPath, "utf-8");
+    expect(beforeApprove).toContain("主角发现了关键线索");
+
+    // Approve
+    const approveResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId!}/approve`, {
+      method: "POST",
+    });
+    expect(approveResponse.status).toBe(200);
+    await expect(approveResponse.json()).resolves.toMatchObject({
+      ok: true,
+      runId: runId!,
+      decision: "applied",
+    });
+
+    // After approval: chapter file must contain the revised content
+    const afterApprove = await readFile(chapterPath, "utf-8");
+    expect(afterApprove).toContain("林清雪冲入废弃仓库");
+    expect(afterApprove).toContain("内鬼身份已被揭露");
+    // Heading must still be present (applyApprovedCandidateRevision re-adds it)
+    expect(afterApprove.startsWith(originalHeading)).toBe(true);
+
+    // Chapter index saveChapterIndex must have been called with status="ready-for-review"
+    expect(saveChapterIndexMock).toHaveBeenCalled();
+    const savedIndex = saveChapterIndexMock.mock.calls.at(-1)![1] as Array<Record<string, unknown>>;
+    const chapter = savedIndex.find((ch) => ch.number === 1);
+    expect(chapter?.status).toBe("ready-for-review");
+
+    // The approved run must now have decision="applied"
+    const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId!}`);
+    const run = await runResponse.json() as Record<string, unknown>;
+    expect(run.decision).toBe("applied");
+  }, 15000);
+
+  it("P5-4: TargetedBlueprintReviser error → p5AutoRevision.status=failed, no candidate run created", async () => {
+    const { sessionId } = await setupP5Scene({ reviserThrows: true });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let p5Data: Record<string, unknown> | undefined;
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const verData = verEvent!.data as Record<string, unknown>;
+      expect(verData.p5AutoRevision).toBeDefined();
+      p5Data = verData.p5AutoRevision as Record<string, unknown>;
+    }, { timeout: 8000 });
+
+    // SAFETY: error must be surfaced with status="failed"
+    expect(p5Data!.status).toBe("failed");
+    expect(typeof p5Data!.error).toBe("string");
+    expect(p5Data!.error as string).toContain("LLM connection timeout");
+    // No runId means no candidate was created
+    expect(p5Data!.runId).toBeUndefined();
+
+    // Verify no blueprint-targeted-revise run was created
+    const runsResponse = await app.request("http://localhost/api/books/demo-book/chapter-runs?limit=50");
+    const runsData = await runsResponse.json() as { runs: Array<{ actionType: string }> };
+    const p5Runs = runsData.runs.filter((r) => r.actionType === "blueprint-targeted-revise");
+    expect(p5Runs).toHaveLength(0);
+  }, 12000);
+
+  it("P5-5: revised text still fails blueprint audit → status=still-failing, candidateRevision.status=audit-failed", async () => {
+    const { sessionId } = await setupP5Scene({
+      blueprintShouldRewriteAfter: true, // P5 re-audit still fails
+      revisedContent: "# 第1章\n修订稿依然缺乏钩子。结尾没有悬念。",
+    });
+
+    // Override second audit call to still-failing
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 42, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        score: 50, shouldRewrite: true, blockingIssues: ["修订后仍无开篇钩子", "结尾悬念不足"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let p5Data: Record<string, unknown> | undefined;
+    let runId: string | undefined;
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const p5 = (verEvent!.data as Record<string, unknown>).p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5).toBeDefined();
+      p5Data = p5!;
+      runId = p5!.runId as string | undefined;
+    }, { timeout: 8000 });
+
+    // p5AutoRevision status must be still-failing
+    expect(p5Data!.status).toBe("still-failing");
+    expect(runId).toBeDefined();
+
+    // The run must exist and have correct top-level shape
+    const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId!}`);
+    const run = await runResponse.json() as { status: string; decision: string };
+    expect(run.status).toBe("succeeded");
+    expect(run.decision).toBe("unchanged");
+
+    // Check candidateRevision via the events endpoint
+    const eventsResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId!}/events`);
+    const eventsData = await eventsResponse.json() as { events: Array<{ type: string; data: unknown }> };
+    const successEvent = eventsData.events.find((e) => e.type === "success");
+    const runData = successEvent?.data as Record<string, unknown> | undefined;
+    const candidate = runData?.candidateRevision as Record<string, unknown> | undefined;
+    expect(candidate).toBeDefined();
+    expect(candidate!.status).toBe("audit-failed");
+    // Blocking issues must be populated
+    expect(Array.isArray(candidate!.auditIssues)).toBe(true);
+    expect((candidate!.auditIssues as string[]).length).toBeGreaterThan(0);
+  }, 12000);
+
+  it("P5-6: revised text violates user contract → status forced to still-failing", async () => {
+    const { sessionId } = await setupP5Scene({
+      // Revised content explicitly MISSING the required "内鬼身份揭露" phrase
+      revisedContent: "# 第1章\n林清雪进入仓库，什么都没发生，平静离开。",
+      // Blueprint re-audit passes (shouldRewrite=false)
+      blueprintShouldRewriteAfter: false,
+      // User contract requires "内鬼身份揭露" to appear
+      contractMustInclude: ["内鬼身份揭露"],
+    });
+
+    // Adjust the mocks: P4 failing, P5 blueprint passes, but contract verification will catch it
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 42, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        // Blueprint passes after revision
+        score: 82, shouldRewrite: false, blockingIssues: [],
+        openingHook: { status: "satisfied", evidence: "进入仓库", position: 0, withinFirst300Words: true, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "ok" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        // This contract mustInclude item is NOT in the revised content
+        mustInclude: ["内鬼身份揭露"],
+        sessionId,
+        blueprint: P5_TEST_BLUEPRINT,
+      }),
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let p5Data: Record<string, unknown> | undefined;
+    await vi.waitFor(async () => {
+      const eventsResponse = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const eventsData = await eventsResponse.json() as { entries: Array<{ event: string; data: unknown }> };
+      const verEvent = eventsData.entries.find((e) => e.event === "write-next:verification");
+      expect(verEvent).toBeDefined();
+      const p5 = (verEvent!.data as Record<string, unknown>).p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5).toBeDefined();
+      p5Data = p5!;
+    }, { timeout: 8000 });
+
+    // Blueprint audit passes, but contract verification forces still-failing
+    expect(p5Data!.status).toBe("still-failing");
+    // contractVerificationAfter must be present
+    const cva = p5Data!.contractVerificationAfter as Record<string, unknown> | undefined;
+    expect(cva).toBeDefined();
+    expect(cva!.shouldRewrite).toBe(true);
+    expect(Array.isArray(cva!.missingRequirements)).toBe(true);
+    // missingRequirements are formatted as "必须包含: <req>" by verifyContractSatisfaction
+    expect((cva!.missingRequirements as string[]).some((r) => r.includes("内鬼身份揭露"))).toBe(true);
+
+    // candidateRevision must reflect audit-failed because contract failed
+    const runId = p5Data!.runId as string;
+    expect(typeof runId).toBe("string");
+    const runResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}`);
+    const run = await runResponse.json() as { status: string; decision: string };
+    expect(run.status).toBe("succeeded");
+    expect(run.decision).toBe("unchanged");
+
+    // Check candidate via the events endpoint
+    const eventsResponse = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/events`);
+    const eventsData = await eventsResponse.json() as { events: Array<{ type: string; data: unknown }> };
+    const successEvent = eventsData.events.find((e) => e.type === "success");
+    const candidate = (successEvent?.data as Record<string, unknown>)?.candidateRevision as Record<string, unknown> | undefined;
+    expect(candidate?.status).toBe("audit-failed");
+    // Combined audit issues must contain contract failures (formatted as "契约未满足: 必须包含: ...")
+    const auditIssues = candidate?.auditIssues as string[] | undefined;
+    expect(auditIssues?.some((issue) => issue.includes("内鬼身份揭露"))).toBe(true);
+  }, 12000);
+
+  // ─── P5.1 — Approve Safety Gate ──────────────────────────────────────────
+
+  it("P5.1-1: approving audit-failed candidate without force returns 409 with candidateStatus + auditIssues", async () => {
+    const { sessionId } = await setupP5Scene({ blueprintShouldRewriteAfter: true });
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 40, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        score: 48, shouldRewrite: true, blockingIssues: ["修订后仍无开篇钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let runId!: string;
+    await vi.waitFor(async () => {
+      const ev = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const evData = await ev.json() as { entries: Array<{ event: string; data: unknown }> };
+      const p5 = (evData.entries.find((e) => e.event === "write-next:verification")?.data as Record<string, unknown>)?.p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5?.runId).toBeDefined();
+      runId = p5!.runId as string;
+    }, { timeout: 8000 });
+
+    // Approve WITHOUT force — must be blocked
+    const approveRes = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(approveRes.status).toBe(409);
+    const body = await approveRes.json() as Record<string, unknown>;
+    expect(typeof body.error).toBe("string");
+    expect(body.candidateStatus).toBe("audit-failed");
+    expect(Array.isArray(body.auditIssues)).toBe(true);
+    expect((body.auditIssues as string[]).length).toBeGreaterThan(0);
+  }, 14000);
+
+  it("P5.1-2: approving audit-failed candidate with { force: true } succeeds and records forcedAuditFailedApproval=true", async () => {
+    const { sessionId } = await setupP5Scene({ blueprintShouldRewriteAfter: true });
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 40, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        score: 48, shouldRewrite: true, blockingIssues: ["修订后仍无开篇钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let runId!: string;
+    await vi.waitFor(async () => {
+      const ev = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const evData = await ev.json() as { entries: Array<{ event: string; data: unknown }> };
+      const p5 = (evData.entries.find((e) => e.event === "write-next:verification")?.data as Record<string, unknown>)?.p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5?.runId).toBeDefined();
+      runId = p5!.runId as string;
+    }, { timeout: 8000 });
+
+    // Approve WITH force
+    const approveRes = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(approveRes.status).toBe(200);
+    const body = await approveRes.json() as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.forcedAuditFailedApproval).toBe(true);
+
+    // Re-fetch the run — it must now be applied
+    const runRes = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}`);
+    const run = await runRes.json() as { status: string; decision: string };
+    expect(run.decision).toBe("applied");
+  }, 14000);
+
+  it("P5.1-3: diff endpoint exposes candidateStatus and candidateAuditIssues for a P5 audit-failed run", async () => {
+    const { sessionId } = await setupP5Scene({ blueprintShouldRewriteAfter: true });
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 40, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        score: 48, shouldRewrite: true, blockingIssues: ["修订后开篇仍无钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let runId!: string;
+    await vi.waitFor(async () => {
+      const ev = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const evData = await ev.json() as { entries: Array<{ event: string; data: unknown }> };
+      const p5 = (evData.entries.find((e) => e.event === "write-next:verification")?.data as Record<string, unknown>)?.p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5?.runId).toBeDefined();
+      runId = p5!.runId as string;
+    }, { timeout: 8000 });
+
+    const diffRes = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/diff`);
+    expect(diffRes.status).toBe(200);
+    const diff = await diffRes.json() as Record<string, unknown>;
+    expect(diff.candidateStatus).toBe("audit-failed");
+    expect(Array.isArray(diff.candidateAuditIssues)).toBe(true);
+    expect((diff.candidateAuditIssues as string[]).length).toBeGreaterThan(0);
+    expect(diff.pendingApproval).toBe(true);
+  }, 14000);
+
+  it("P5.1-4: approving a ready-for-review candidate without force returns 200 (no regression)", async () => {
+    const { sessionId } = await setupP5Scene({ blueprintShouldRewriteAfter: false });
+    auditBlueprintFulfillmentMock.mockReset();
+    auditBlueprintFulfillmentMock
+      .mockReturnValueOnce({
+        score: 42, shouldRewrite: true, blockingIssues: ["开篇缺少行动钩子"],
+        openingHook: { status: "missing", evidence: "", position: 0, withinFirst300Words: false, expected: "" },
+        scenes: [], payoffRequired: { status: "missing", evidence: "" },
+        endingHook: { status: "missing", nearChapterEnd: false, evidence: "" },
+      })
+      .mockReturnValueOnce({
+        score: 88, shouldRewrite: false, blockingIssues: [],
+        openingHook: { status: "satisfied", evidence: "首句动作", position: 0, withinFirst300Words: true, expected: "" },
+        scenes: [], payoffRequired: { status: "satisfied", evidence: "ok" },
+        endingHook: { status: "satisfied", nearChapterEnd: true, evidence: "ok" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mustInclude: ["内鬼身份"], sessionId, blueprint: P5_TEST_BLUEPRINT }),
+    });
+    await vi.waitFor(() => expect(writeNextChapterMock).toHaveBeenCalled());
+
+    let runId!: string;
+    await vi.waitFor(async () => {
+      const ev = await app.request("http://localhost/api/runtime/events?bookId=demo-book&limit=100");
+      const evData = await ev.json() as { entries: Array<{ event: string; data: unknown }> };
+      const p5 = (evData.entries.find((e) => e.event === "write-next:verification")?.data as Record<string, unknown>)?.p5AutoRevision as Record<string, unknown> | undefined;
+      expect(p5?.runId).toBeDefined();
+      runId = p5!.runId as string;
+    }, { timeout: 8000 });
+
+    // ready-for-review candidate — approve without force must succeed
+    const approveRes = await app.request(`http://localhost/api/books/demo-book/chapter-runs/${runId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(approveRes.status).toBe(200);
+    const body = await approveRes.json() as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.forcedAuditFailedApproval).toBeUndefined();
+  }, 14000);
 });

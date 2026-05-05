@@ -15,7 +15,7 @@ interface StoredChapterRunLedger {
   readonly runs: ChapterRunRecord[];
 }
 
-const VALID_ACTION_TYPES: readonly ChapterRunActionType[] = ["revise", "rewrite", "anti-detect", "resync"];
+const VALID_ACTION_TYPES: readonly ChapterRunActionType[] = ["revise", "rewrite", "anti-detect", "resync", "blueprint-targeted-revise", "length-normalize"];
 const VALID_STATUSES: readonly ChapterRunStatus[] = ["running", "succeeded", "failed"];
 const VALID_DECISIONS: readonly ChapterRunDecision[] = ["applied", "unchanged", "failed"];
 const ASSISTANT_SOFT_DELETE_REASON = "assistant-soft-delete";

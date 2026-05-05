@@ -82,6 +82,7 @@ const AUDIT_PATTERNS = [
 
 const REVISE_PATTERNS = [
   /(?:修订|修改|重写).{0,4}(?:当前|本|这|第).{0,4}章/,
+  /(?:修订|修改|重写|改写).{0,12}(?:从|自|先从)?\s*\d+\s*章/,
   /(?:revise|rewrite).{0,5}(?:this|current)/i,
 ];
 

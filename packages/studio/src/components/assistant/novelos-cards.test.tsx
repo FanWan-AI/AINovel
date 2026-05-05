@@ -10,7 +10,7 @@ import { ContractCard, type ContractCardPayload } from "./ContractCard.js";
 import { BlueprintPreviewCard, type BlueprintPreviewPayload } from "./BlueprintPreviewCard.js";
 import { ContractVerificationCard, type VerificationReportPayload } from "./ContractVerificationCard.js";
 import { PlotCritiqueCard, type PlotCritiqueCardPayload } from "./PlotCritiqueCard.js";
-import { EditorReportCard, type EditorReportPayload } from "./EditorReportCard.js";
+import { EditorReportCard, P5RevisionCard, type EditorReportPayload, type P5AutoRevisionPayload } from "./EditorReportCard.js";
 
 describe("ContractCard", () => {
   it("renders contract with all sections", () => {
@@ -431,5 +431,160 @@ describe("EditorReportCard", () => {
     expect(html).toContain("契约满足率");
     expect(html).toContain("未满足 mustInclude: 误判反转");
     expect(html).toContain("增加反转或爽点释放");
+  });
+});
+
+// ── P5RevisionCard ──────────────────────────────────────────────────────
+
+const BASE_P5_EDITOR_REPORT: P5AutoRevisionPayload["editorReport"] = {
+  targetedRewritePlan: {
+    instructions: [
+      { element: "openingHook", issue: "开篇无钩子", required: "前300字内植入钩子", instruction: "在首段末尾添加悬念" },
+    ],
+    fixCount: 1,
+    summary: "修复1处开篇问题",
+  },
+  blockingIssues: ["开篇无钩子"],
+  shouldRewrite: true,
+};
+
+const BASE_P5_REVISED_FULFILLMENT: P5AutoRevisionPayload["revisedBlueprintFulfillment"] = {
+  score: 82,
+  shouldRewrite: false,
+  blockingIssues: [],
+};
+
+describe("P5RevisionCard", () => {
+  it("renders candidate_pending_approval status with pending notice", () => {
+    const revision: P5AutoRevisionPayload = {
+      editorReport: BASE_P5_EDITOR_REPORT,
+      appliedFixes: ["在第一段末尾添加悬念钩子"],
+      revisedBlueprintFulfillment: BASE_P5_REVISED_FULFILLMENT,
+      status: "candidate_pending_approval",
+      runId: "run-abc12345-pending",
+    };
+    const html = renderToStaticMarkup(createElement(P5RevisionCard, { revision }));
+    expect(html).toContain("p5-revision-card");
+    expect(html).toContain("蓝图定点修订候选（待批准）");
+    expect(html).toContain("已生成蓝图定点修订候选");
+    expect(html).toContain("run:run-abc1");
+    expect(html).toContain("score: 82");
+    expect(html).toContain("在第一段末尾添加悬念钩子");
+    expect(html).not.toContain("蓝图定点修订失败");
+    expect(html).not.toContain("仍存在的问题");
+  });
+
+  it("renders still-failing status with blocking issues", () => {
+    const revision: P5AutoRevisionPayload = {
+      editorReport: BASE_P5_EDITOR_REPORT,
+      appliedFixes: ["尝试修复开篇"],
+      revisedBlueprintFulfillment: {
+        score: 55,
+        shouldRewrite: true,
+        blockingIssues: ["开篇仍无钩子", "场景2缺少冲突转折"],
+      },
+      status: "still-failing",
+      runId: "run-def67890-failing",
+    };
+    const html = renderToStaticMarkup(createElement(P5RevisionCard, { revision }));
+    expect(html).toContain("p5-revision-card");
+    expect(html).toContain("蓝图定点修订候选（仍需复核）");
+    expect(html).toContain("修订候选仍存在蓝图问题");
+    expect(html).toContain("score: 55");
+    expect(html).toContain("⚠️ 修订后仍存在的问题");
+    expect(html).toContain("开篇仍无钩子");
+    expect(html).toContain("场景2缺少冲突转折");
+  });
+
+  it("renders failed status with error message", () => {
+    const revision: P5AutoRevisionPayload = {
+      status: "failed",
+      error: "LLM timeout after 30s",
+    };
+    const html = renderToStaticMarkup(createElement(P5RevisionCard, { revision }));
+    expect(html).toContain("p5-revision-card");
+    expect(html).toContain("蓝图定点修订失败");
+    expect(html).toContain("LLM timeout after 30s");
+    expect(html).not.toContain("已生成蓝图定点修订候选");
+    expect(html).not.toContain("score:");
+  });
+
+  it("renders failed status without error gracefully", () => {
+    const revision: P5AutoRevisionPayload = { status: "failed" };
+    const html = renderToStaticMarkup(createElement(P5RevisionCard, { revision }));
+    expect(html).toContain("蓝图定点修订失败");
+    expect(html).not.toContain("undefined");
+  });
+
+  it("shows fix target badges for each instruction element", () => {
+    const revision: P5AutoRevisionPayload = {
+      editorReport: {
+        targetedRewritePlan: {
+          instructions: [
+            { element: "openingHook", issue: "issue1", required: "req1", instruction: "inst1" },
+            { element: "scene-2", issue: "issue2", required: "req2", instruction: "inst2" },
+          ],
+          fixCount: 2,
+          summary: "修复2处",
+        },
+        blockingIssues: [],
+        shouldRewrite: true,
+      },
+      appliedFixes: [],
+      revisedBlueprintFulfillment: { score: 75, shouldRewrite: false, blockingIssues: [] },
+      status: "candidate_pending_approval",
+      runId: "run-xyz",
+    };
+    const html = renderToStaticMarkup(createElement(P5RevisionCard, { revision }));
+    expect(html).toContain("开篇钩子");   // openingHook label
+    expect(html).toContain("场景 2");     // scene-2 label
+    expect(html).toContain("修复目标（2 处）");
+  });
+});
+
+describe("ContractVerificationCard – p5AutoRevision integration", () => {
+  it("renders P5RevisionCard when p5AutoRevision is candidate_pending_approval", () => {
+    const report: VerificationReportPayload = {
+      satisfactionRate: 0.6,
+      items: [],
+      shouldRewrite: true,
+      p5AutoRevision: {
+        editorReport: BASE_P5_EDITOR_REPORT,
+        appliedFixes: ["修复钩子"],
+        revisedBlueprintFulfillment: { score: 80, shouldRewrite: false, blockingIssues: [] },
+        status: "candidate_pending_approval",
+        runId: "run-integration-test",
+      },
+    };
+    const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report }));
+    expect(html).toContain("p5-revision-card");
+    expect(html).toContain("蓝图定点修订候选（待批准）");
+    expect(html).toContain("score: 80");
+  });
+
+  it("renders P5RevisionCard when p5AutoRevision is failed", () => {
+    const report: VerificationReportPayload = {
+      satisfactionRate: 0.3,
+      items: [],
+      shouldRewrite: true,
+      p5AutoRevision: {
+        status: "failed",
+        error: "Connection refused",
+      },
+    };
+    const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report }));
+    expect(html).toContain("p5-revision-card");
+    expect(html).toContain("蓝图定点修订失败");
+    expect(html).toContain("Connection refused");
+  });
+
+  it("does not render P5RevisionCard when p5AutoRevision is absent", () => {
+    const report: VerificationReportPayload = {
+      satisfactionRate: 1.0,
+      items: [],
+      shouldRewrite: false,
+    };
+    const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report }));
+    expect(html).not.toContain("p5-revision-card");
   });
 });

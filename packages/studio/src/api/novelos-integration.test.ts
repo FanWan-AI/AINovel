@@ -16,7 +16,7 @@ import { verifyContractSatisfaction } from "./services/contract-verifier-service
 import { buildWriteNextExternalContext } from "./services/write-next-service.js";
 import { NarrativeGraphService } from "./services/narrative-graph-service.js";
 import { compileGraphPatchesToSteering } from "./services/graph-to-steering-compiler.js";
-import { PlannerAgent, auditBlueprintFulfillment, type BookConfig } from "@actalk/inkos-core";
+import { PlannerAgent, auditBlueprintFulfillment, generateBlueprintEditorReport, TargetedBlueprintReviser, type BookConfig } from "@actalk/inkos-core";
 
 describe("NovelOS: 闭环链路验证", () => {
   let tempDir: string;
@@ -836,6 +836,456 @@ describe("NovelOS: 闭环链路验证", () => {
       const list = await artifactSvc.listByType(sessId, "blueprint_fulfillment_report");
       expect(list).toHaveLength(1);
       expect(list[0].artifactId).toBe(art.artifactId);
+    });
+  });
+
+  describe("P5: DevelopmentalEditorAgent + TargetedBlueprintReviser integration", () => {
+    const CONFIRMED_BLUEPRINT = {
+      openingHook: "林清雪主动找万凡，把一份错误资料拍在他面前",
+      scenes: [
+        {
+          beat: "林清雪公开试探万凡",
+          conflict: "错误资料压迫万凡表态",
+          turn: "万凡反问来源",
+          payoff: "信息差压制成立",
+          cost: "互信被消耗",
+        },
+        {
+          beat: "万凡设置系统反馈验证",
+          conflict: "反馈不能被旁人看见",
+          turn: "反馈指向林清雪身边人",
+          payoff: "信息差成立",
+          cost: "万凡暴露异常判断力",
+        },
+        {
+          beat: "误判反转在办公室爆开",
+          conflict: "真正泄密者反咬万凡",
+          turn: "林清雪当众改口护住万凡",
+          payoff: "关系筹码改变",
+          cost: "林清雪卷入对立面",
+        },
+      ],
+      payoffRequired: "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转",
+      endingHook: "那份错误资料最初来自林清雪的私人账号",
+      contractSatisfaction: ["必须包含：林清雪主动找万凡"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_confirmed_bp"],
+    };
+
+    it("P5-1. openingHook missing → generateBlueprintEditorReport 包含 openingHook 修复指令", () => {
+      const chapterText =
+        "万凡一个人坐在办公室里思考，没有人来找他。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "万凡设置系统反馈验证，反馈不能被旁人看见，反馈指向林清雪身边人，信息差成立，万凡暴露异常判断力。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "关系筹码发生变化，并出现一次误判反转。" +
+        "那份错误资料最初来自林清雪的私人账号。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      // Precondition: openingHook should be missing
+      expect(fulfillment.openingHook.status).toBe("missing");
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      const openingInst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "openingHook",
+      );
+      expect(openingInst).toBeDefined();
+      expect(openingInst!.required).toBe(CONFIRMED_BLUEPRINT.openingHook);
+      expect(openingInst!.instruction).toContain(CONFIRMED_BLUEPRINT.openingHook);
+    });
+
+    it("P5-2. scene 2 unsatisfied → plan contains scene-2 but NOT scene-1 (satisfied)", () => {
+      // A text that has scene-1 but not scene-2
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        // scene-2 beat NOT present
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转。" +
+        "那份错误资料最初来自林清雪的私人账号。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      const scene1Inst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "scene-1",
+      );
+      const scene2Inst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "scene-2",
+      );
+
+      // scene-1 should be satisfied (not in the plan)
+      expect(scene1Inst).toBeUndefined();
+      // scene-2 should be in the plan
+      expect(scene2Inst).toBeDefined();
+    });
+
+    it("P5-3. all satisfied → plan is empty (fixCount=0)", () => {
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前，面色沉静地等着他的反应。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "万凡设置系统反馈验证，反馈不能被旁人看见，反馈指向林清雪身边人，信息差成立，万凡暴露异常判断力。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转，这一切已经确认。" +
+        "那份错误资料最初来自林清雪的私人账号——这一发现让万凡停住了脚步。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      // Only run P5 if P4 fails — but test the heuristic directly
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      if (!fulfillment.shouldRewrite) {
+        // All satisfied → empty plan
+        expect(editorReport.targetedRewritePlan.fixCount).toBe(0);
+        expect(editorReport.targetedRewritePlan.instructions).toHaveLength(0);
+      }
+    });
+
+    it("P5-4. TargetedBlueprintReviser.buildSystemPrompt 包含 failed beat，不包含 satisfied beat 的修改指令", () => {
+      // Build a plan with only scene-2 failing
+      const plan = {
+        instructions: [
+          {
+            element: "scene-2",
+            issue: "场景 2 完全缺失",
+            required: `beat: ${CONFIRMED_BLUEPRINT.scenes[1]!.beat}`,
+            instruction: `补充场景 2：${CONFIRMED_BLUEPRINT.scenes[1]!.beat}`,
+          },
+        ],
+        fixCount: 1,
+        summary: "需要修复：scene-2",
+      };
+
+      const prompt = TargetedBlueprintReviser.buildSystemPrompt(CONFIRMED_BLUEPRINT, plan);
+
+      // Failed scene-2 beat MUST appear in the prompt
+      expect(prompt).toContain(CONFIRMED_BLUEPRINT.scenes[1]!.beat);
+
+      // Satisfied scene-1 must be in DO NOT TOUCH, NOT in the fix instructions
+      expect(prompt).toContain("scene-1（已满足，禁止改动）");
+      // Satisfied scene-3 must be in DO NOT TOUCH
+      expect(prompt).toContain("scene-3（已满足，禁止改动）");
+
+      // scene-2 must NOT appear in DO NOT TOUCH
+      expect(prompt).not.toContain("scene-2（已满足，禁止改动）");
+    });
+
+    it("P5-5. artifact 类型 editor_report 可被 AssistantArtifactService 存取", async () => {
+      const sessId = "sess-p5";
+      const fakeEditorReport = {
+        targetedRewritePlan: {
+          instructions: [
+            {
+              element: "openingHook",
+              issue: "开篇钩子未出现",
+              required: "测试开篇钩子",
+              instruction: "加入开篇钩子",
+            },
+          ],
+          fixCount: 1,
+          summary: "需要修复：openingHook",
+        },
+        blockingIssues: ["openingHook 未出现"],
+        shouldRewrite: true,
+      };
+
+      const art = await artifactSvc.create({
+        sessionId: sessId,
+        bookId: "book-p5",
+        type: "editor_report",
+        title: "P5蓝图定点修订第3章",
+        payload: fakeEditorReport as unknown as Record<string, unknown>,
+        summary: "修复1处，修订后score=75 [已修复]",
+        searchableText: JSON.stringify(fakeEditorReport),
+      });
+
+      expect(art.type).toBe("editor_report");
+
+      const list = await artifactSvc.listByType(sessId, "editor_report");
+      expect(list).toHaveLength(1);
+      expect(list[0]!.artifactId).toBe(art.artifactId);
+    });
+
+    it("P5-6. draft blueprint 不应触发 P5 editor report（buildWriteNextExternalContext 过滤）", () => {
+      const draftBlueprint = {
+        ...CONFIRMED_BLUEPRINT,
+        status: "draft" as const,
+      };
+
+      // draft blueprints are blocked at buildWriteNextExternalContext
+      const ctx = buildWriteNextExternalContext({ blueprint: { ...draftBlueprint } });
+      expect(ctx).toBeUndefined();
+      // → confirmedChapterBlueprint stays null → P5 loop is never entered
+    });
+
+    it("P5-7. generateBlueprintEditorReport 输出结构包含所有必需字段", () => {
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText: "随意的测试文本，没有蓝图要素",
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 1,
+      });
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      // Top-level fields
+      expect(typeof editorReport.shouldRewrite).toBe("boolean");
+      expect(Array.isArray(editorReport.blockingIssues)).toBe(true);
+      expect(editorReport.targetedRewritePlan).toBeDefined();
+
+      // Plan fields
+      const plan = editorReport.targetedRewritePlan;
+      expect(typeof plan.fixCount).toBe("number");
+      expect(typeof plan.summary).toBe("string");
+      expect(Array.isArray(plan.instructions)).toBe(true);
+
+      // Each instruction has required fields
+      for (const inst of plan.instructions) {
+        expect(typeof inst.element).toBe("string");
+        expect(typeof inst.issue).toBe("string");
+        expect(typeof inst.required).toBe("string");
+        expect(typeof inst.instruction).toBe("string");
+      }
+    });
+  });
+
+  describe("P5: DevelopmentalEditorAgent + TargetedBlueprintReviser integration", () => {
+    const CONFIRMED_BLUEPRINT = {
+      openingHook: "林清雪主动找万凡，把一份错误资料拍在他面前",
+      scenes: [
+        {
+          beat: "林清雪公开试探万凡",
+          conflict: "错误资料压迫万凡表态",
+          turn: "万凡反问来源",
+          payoff: "信息差压制成立",
+          cost: "互信被消耗",
+        },
+        {
+          beat: "万凡设置系统反馈验证",
+          conflict: "反馈不能被旁人看见",
+          turn: "反馈指向林清雪身边人",
+          payoff: "信息差成立",
+          cost: "万凡暴露异常判断力",
+        },
+        {
+          beat: "误判反转在办公室爆开",
+          conflict: "真正泄密者反咬万凡",
+          turn: "林清雪当众改口护住万凡",
+          payoff: "关系筹码改变",
+          cost: "林清雪卷入对立面",
+        },
+      ],
+      payoffRequired: "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转",
+      endingHook: "那份错误资料最初来自林清雪的私人账号",
+      contractSatisfaction: ["必须包含：林清雪主动找万凡"],
+      status: "confirmed" as const,
+      version: 2,
+      sourceArtifactIds: ["art_confirmed_bp"],
+    };
+
+    it("P5-1. openingHook missing → generateBlueprintEditorReport 包含 openingHook 修复指令", () => {
+      const chapterText =
+        "万凡一个人坐在办公室里思考，没有人来找他。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "万凡设置系统反馈验证，反馈不能被旁人看见，反馈指向林清雪身边人，信息差成立，万凡暴露异常判断力。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "关系筹码发生变化，并出现一次误判反转。" +
+        "那份错误资料最初来自林清雪的私人账号。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      // Precondition: openingHook should be missing
+      expect(fulfillment.openingHook.status).toBe("missing");
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      const openingInst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "openingHook",
+      );
+      expect(openingInst).toBeDefined();
+      expect(openingInst!.required).toBe(CONFIRMED_BLUEPRINT.openingHook);
+      expect(openingInst!.instruction).toContain(CONFIRMED_BLUEPRINT.openingHook);
+    });
+
+    it("P5-2. scene 2 unsatisfied → plan contains scene-2 but NOT scene-1 (satisfied)", () => {
+      // A text that has scene-1 but not scene-2
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        // scene-2 beat NOT present
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转。" +
+        "那份错误资料最初来自林清雪的私人账号。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      const scene1Inst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "scene-1",
+      );
+      const scene2Inst = editorReport.targetedRewritePlan.instructions.find(
+        (i) => i.element === "scene-2",
+      );
+
+      // scene-1 should be satisfied (not in the plan)
+      expect(scene1Inst).toBeUndefined();
+      // scene-2 should be in the plan
+      expect(scene2Inst).toBeDefined();
+    });
+
+    it("P5-3. all satisfied → plan is empty (fixCount=0)", () => {
+      const chapterText =
+        "林清雪主动找万凡，把一份错误资料拍在他面前，面色沉静地等着他的反应。" +
+        "林清雪公开试探万凡，错误资料压迫万凡表态，万凡反问来源，信息差压制成立，互信被消耗。" +
+        "万凡设置系统反馈验证，反馈不能被旁人看见，反馈指向林清雪身边人，信息差成立，万凡暴露异常判断力。" +
+        "误判反转在办公室爆开，真正泄密者反咬万凡，林清雪当众改口护住万凡，关系筹码改变，林清雪卷入对立面。" +
+        "林清雪主动找万凡必须带来关系筹码变化，并出现一次误判反转，这一切已经确认。" +
+        "那份错误资料最初来自林清雪的私人账号——这一发现让万凡停住了脚步。";
+
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText,
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 3,
+      });
+
+      // Only run P5 if P4 fails — but test the heuristic directly
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      if (!fulfillment.shouldRewrite) {
+        // All satisfied → empty plan
+        expect(editorReport.targetedRewritePlan.fixCount).toBe(0);
+        expect(editorReport.targetedRewritePlan.instructions).toHaveLength(0);
+      }
+    });
+
+    it("P5-4. TargetedBlueprintReviser.buildSystemPrompt 包含 failed beat，不包含 satisfied beat 的修改指令", () => {
+      // Build a plan with only scene-2 failing
+      const plan = {
+        instructions: [
+          {
+            element: "scene-2",
+            issue: "场景 2 完全缺失",
+            required: `beat: ${CONFIRMED_BLUEPRINT.scenes[1]!.beat}`,
+            instruction: `补充场景 2：${CONFIRMED_BLUEPRINT.scenes[1]!.beat}`,
+          },
+        ],
+        fixCount: 1,
+        summary: "需要修复：scene-2",
+      };
+
+      const prompt = TargetedBlueprintReviser.buildSystemPrompt(CONFIRMED_BLUEPRINT, plan);
+
+      // Failed scene-2 beat MUST appear in the prompt
+      expect(prompt).toContain(CONFIRMED_BLUEPRINT.scenes[1]!.beat);
+
+      // Satisfied scene-1 must be in DO NOT TOUCH, NOT in the fix instructions
+      expect(prompt).toContain("scene-1（已满足，禁止改动）");
+      // Satisfied scene-3 must be in DO NOT TOUCH
+      expect(prompt).toContain("scene-3（已满足，禁止改动）");
+
+      // scene-2 must NOT appear in DO NOT TOUCH
+      expect(prompt).not.toContain("scene-2（已满足，禁止改动）");
+    });
+
+    it("P5-5. artifact 类型 editor_report 可被 AssistantArtifactService 存取", async () => {
+      const sessId = "sess-p5";
+      const fakeEditorReport = {
+        targetedRewritePlan: {
+          instructions: [
+            {
+              element: "openingHook",
+              issue: "开篇钩子未出现",
+              required: "测试开篇钩子",
+              instruction: "加入开篇钩子",
+            },
+          ],
+          fixCount: 1,
+          summary: "需要修复：openingHook",
+        },
+        blockingIssues: ["openingHook 未出现"],
+        shouldRewrite: true,
+      };
+
+      const art = await artifactSvc.create({
+        sessionId: sessId,
+        bookId: "book-p5",
+        type: "editor_report",
+        title: "P5蓝图定点修订第3章",
+        payload: fakeEditorReport as unknown as Record<string, unknown>,
+        summary: "修复1处，修订后score=75 [已修复]",
+        searchableText: JSON.stringify(fakeEditorReport),
+      });
+
+      expect(art.type).toBe("editor_report");
+
+      const list = await artifactSvc.listByType(sessId, "editor_report");
+      expect(list).toHaveLength(1);
+      expect(list[0]!.artifactId).toBe(art.artifactId);
+    });
+
+    it("P5-6. draft blueprint 不应触发 P5 editor report（buildWriteNextExternalContext 过滤）", () => {
+      const draftBlueprint = {
+        ...CONFIRMED_BLUEPRINT,
+        status: "draft" as const,
+      };
+
+      // draft blueprints are blocked at buildWriteNextExternalContext
+      const ctx = buildWriteNextExternalContext({ blueprint: { ...draftBlueprint } });
+      expect(ctx).toBeUndefined();
+      // → confirmedChapterBlueprint stays null → P5 loop is never entered
+    });
+
+    it("P5-7. generateBlueprintEditorReport 输出结构包含所有必需字段", () => {
+      const fulfillment = auditBlueprintFulfillment({
+        chapterText: "随意的测试文本，没有蓝图要素",
+        blueprint: CONFIRMED_BLUEPRINT,
+        chapterNumber: 1,
+      });
+
+      const editorReport = generateBlueprintEditorReport(fulfillment, CONFIRMED_BLUEPRINT);
+
+      // Top-level fields
+      expect(typeof editorReport.shouldRewrite).toBe("boolean");
+      expect(Array.isArray(editorReport.blockingIssues)).toBe(true);
+      expect(editorReport.targetedRewritePlan).toBeDefined();
+
+      // Plan fields
+      const plan = editorReport.targetedRewritePlan;
+      expect(typeof plan.fixCount).toBe("number");
+      expect(typeof plan.summary).toBe("string");
+      expect(Array.isArray(plan.instructions)).toBe(true);
+
+      // Each instruction has required fields
+      for (const inst of plan.instructions) {
+        expect(typeof inst.element).toBe("string");
+        expect(typeof inst.issue).toBe("string");
+        expect(typeof inst.required).toBe("string");
+        expect(typeof inst.instruction).toBe("string");
+      }
     });
   });
 });

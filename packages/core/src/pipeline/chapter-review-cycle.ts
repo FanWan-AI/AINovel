@@ -26,6 +26,16 @@ export interface ChapterReviewCycleResult {
   readonly totalUsage: ChapterReviewCycleUsage;
   readonly postReviseCount: number;
   readonly normalizeApplied: boolean;
+  readonly lengthNormalizationSnapshots: ReadonlyArray<{
+    readonly stage: "pre-audit" | "post-revision";
+    readonly mode: "compress" | "expand";
+    readonly beforeContent: string;
+    readonly afterContent: string;
+    readonly beforeCount: number;
+    readonly afterCount: number;
+    readonly applied: boolean;
+    readonly rejectedReason?: string;
+  }>;
 }
 
 export async function runChapterReviewCycle(params: {
@@ -70,6 +80,16 @@ export async function runChapterReviewCycle(params: {
     content: string;
     wordCount: number;
     applied: boolean;
+    snapshot?: {
+      readonly stage: "pre-audit" | "post-revision";
+      readonly mode: "compress" | "expand";
+      readonly beforeContent: string;
+      readonly afterContent: string;
+      readonly beforeCount: number;
+      readonly afterCount: number;
+      readonly applied: boolean;
+      readonly rejectedReason?: string;
+    };
     tokenUsage?: ChapterReviewCycleUsage;
   }>;
   readonly assertChapterContentNotEmpty: (content: string, stage: string) => void;
@@ -92,6 +112,7 @@ export async function runChapterReviewCycle(params: {
   let finalContent = params.initialOutput.content;
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
+  const lengthNormalizationSnapshots: ChapterReviewCycleResult["lengthNormalizationSnapshots"] extends ReadonlyArray<infer T> ? T[] : never[] = [];
 
   if (params.initialOutput.postWriteErrors.length > 0) {
     params.logWarn({
@@ -127,6 +148,9 @@ export async function runChapterReviewCycle(params: {
 
   const normalizedBeforeAudit = await params.normalizeDraftLengthIfNeeded(finalContent);
   totalUsage = params.addUsage(totalUsage, normalizedBeforeAudit.tokenUsage);
+  if (normalizedBeforeAudit.snapshot) {
+    lengthNormalizationSnapshots.push({ ...normalizedBeforeAudit.snapshot, stage: "pre-audit" });
+  }
   finalContent = normalizedBeforeAudit.content;
   finalWordCount = normalizedBeforeAudit.wordCount;
   normalizeApplied = normalizeApplied || normalizedBeforeAudit.applied;
@@ -173,6 +197,9 @@ export async function runChapterReviewCycle(params: {
       if (reviseOutput.revisedContent.length > 0) {
         const normalizedRevision = await params.normalizeDraftLengthIfNeeded(reviseOutput.revisedContent);
         totalUsage = params.addUsage(totalUsage, normalizedRevision.tokenUsage);
+        if (normalizedRevision.snapshot) {
+          lengthNormalizationSnapshots.push({ ...normalizedRevision.snapshot, stage: "post-revision" });
+        }
         postReviseCount = normalizedRevision.wordCount;
         normalizeApplied = normalizeApplied || normalizedRevision.applied;
 
@@ -217,5 +244,6 @@ export async function runChapterReviewCycle(params: {
     totalUsage,
     postReviseCount,
     normalizeApplied,
+    lengthNormalizationSnapshots,
   };
 }

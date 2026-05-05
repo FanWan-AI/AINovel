@@ -204,6 +204,18 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
     },
   },
   {
+    name: "read_chapter",
+    description: "读取指定章节的正文内容。用于直接查看某一章的实际文本，分析写作质量、核对情节、比较修订前后差异。支持 chapterNumber 指定章节号；不填则读取最新章。",
+    parameters: {
+      type: "object",
+      properties: {
+        bookId: { type: "string", description: "书籍ID" },
+        chapterNumber: { type: "number", description: "章节号（不填则读取最新已写章节）" },
+      },
+      required: ["bookId"],
+    },
+  },
+  {
     name: "write_truth_file",
     description: "【整文件覆盖】直接替换书的真相文件内容。用于扩展大纲、修改世界观、调整规则。注意：这是整文件覆盖写入，不是追加；不要用来改 current_state.md 的章节进度指针或 hack 章节号；不要用来补空章节。",
     parameters: {
@@ -237,8 +249,8 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 | get_book_status | 查看书的章数、字数、审计状态 |
 | read_truth_files | 读取长期记忆（状态卡、资源账本、伏笔池）和设定（世界观、卷纲、本书规则） |
 | create_book | 建书，生成世界观、卷纲、本书规则（自动加载题材 genre profile） |
-| plan_chapter | 先生成 chapter intent，确认本章目标/冲突/优先级 |
-| compose_chapter | 再生成 runtime context/rule stack，确认实际输入 |
+| plan_chapter | 【写稿管线·第1步】生成 chapter intent（**只在用户明确确认要执行写作后才能调用**，不是"设计"工具） |
+| compose_chapter | 【写稿管线·第2步】生成 runtime context/rule stack（**只在 plan_chapter 之后的写稿流程中调用**） |
 | write_draft | 写【下一章】草稿（只能续写最新章之后，不能补历史章） |
 | audit_chapter | 审计章节（32维度，按题材条件启用，含AI痕迹+敏感词检测） |
 | revise_chapter | 修订章节文字质量（不能补空章/改章号，五种模式） |
@@ -250,6 +262,7 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 | import_style | 从参考文本生成文风指南（统计+LLM分析） |
 | import_canon | 从正传导入正典参照，启用番外模式 |
 | import_chapters | 【整书重导】导入全部已有章节并重建真相文件 |
+| read_chapter | 读取指定章节正文内容，不填章节号则读最新章 |
 | write_truth_file | 【整文件覆盖】替换真相文件内容，不能用来改章节进度 |
 
 ## 长期记忆
@@ -277,6 +290,7 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 
 - 用户提供了题材/创意但没说要扫描市场 → 跳过 scan_market，直接 create_book
 - 用户说了书名/bookId → 直接操作，不需要先 list_books
+- 用户要分析章节质量、比较修订效果、核对情节细节 → 优先 read_chapter 读取正文，然后基于实际内容给出具体意见，不要基于猜测作判断
 - 每完成一步，简要汇报进展
 - 当用户要求“先把注意力拉回某条线”时，优先 update_current_focus，然后 plan_chapter / compose_chapter，再决定是否 write_draft 或 write_full_pipeline
 - 仿写流程：用户提供参考文本 → import_style → 生成 style_guide.md，后续写作自动参照
@@ -290,7 +304,32 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 - 不要用 write_truth_file 修改 current_state.md 的章节进度来"骗"系统跳到某一章
 - 不要用 revise_chapter 补缺失章节或改章节号。revise 只做文字质量修订
 - 用户说"补第 N 章"或"第 N 章是空的"时，先用 get_book_status 和 read_truth_files 判断真实状态，再决定用哪个工具
-- 不要在没有确认书籍状态的情况下直接调用写作工具`;
+- 不要在没有确认书籍状态的情况下直接调用写作工具
+- **不要因字数原因重复调用 revise_chapter**：revise 结果中如果 lengthWarnings 为空或只提到字数超出软上限，说明内容已按质量优先原则保留，无需再次修订；只有 auditIssues 中有新的 critical/blocking 问题时才需要再次 revise
+
+## 设计模式 vs 写作模式（严格区分）
+
+**"设计"≠"写稿"。** 触发 write_draft / write_full_pipeline 的唯一合法信号是用户明确说了"写"字且带有立即执行的语气（写下一章 / 开始写 / 续写 / 按照这个写 / 执行写作），或明确说了"继续"/"续写"。
+
+### 绝对不调用写稿工具的情形（evaluation/advice 模式）
+
+以下任何一种句式，都只能读内容后输出文字方案/建议，**绝对不调用** write_draft、write_full_pipeline、plan_chapter、compose_chapter、update_current_focus：
+
+- 含「设计一下」「你来设计」「你设计」「帮我设计」「帮我想想」「想想怎么写」「想想下一章写什么」「规划一下」「你来规划」「你来想」
+- 含「应该如何写」「如何写才能」「怎么写才能」「如何才能写」「如何写更」「怎么写更」「如何让...更」
+- 含「下一章（节）应该/怎么/如何写」（例如"下一章节应该如何写才能更加淫荡"——这是询问建议，不是命令写作）
+- 含「你来评价」「评价当前」「评价一下」「写的如何」「写得如何」「写得怎么样」
+- 含「看看写的」「看看目前」「分析一下」（不含"按照这个写"/"执行"/"开始写"等行动词）
+
+遇到上述句式：
+1. 先调用 read_chapter / read_truth_files / get_book_status 读取内容
+2. 以文字形式给出详细的剧情设计方案、评价或建议（结构、人物、场景节拍、情色安排、伏笔等细节都要覆盖）
+3. 方案末尾必须问：「要我按这个方案执行写作吗？」
+4. 等用户明确说「写」「执行」「按这个写」「好的去写」后，才调用写稿工具
+
+即使用户在评价/建议请求后附带了大量内容风格要求（如"要淫荡""要血脉喷张""要让人高潮""情节最好不要重复"），这些都是设计约束，不是写作指令——把它们写进设计方案里，等确认后再写。
+
+- update_current_focus 只在用户明确说"先把注意力拉到某条线上，然后写" 时调用；不能因为用户描述了内容风格就自动 update_current_focus 然后接着写`;
 
 export async function runAgentLoop(
   config: PipelineConfig,
@@ -406,11 +445,15 @@ export async function executeAgentTool(
           return JSON.stringify({ error: `第${chapterNum}章内容为空（0字）。revise_chapter 不能修订空章节。` });
         }
       }
-      const result = await pipeline.reviseDraft(
-        bookId,
-        chapterNum,
-        (args.mode as ReviseMode) ?? DEFAULT_REVISE_MODE,
-      );
+      const reviseMode = (args.mode as ReviseMode) ?? DEFAULT_REVISE_MODE;
+      // When a brief is provided, pass it as externalContext so the reviser receives
+      // the author's intent (e.g. "提升情欲烈度") and the governed-context planner
+      // can build the correct chapter intent for the revision.
+      const reviseBrief = typeof args.brief === "string" && args.brief.trim().length > 0 ? args.brief.trim() : undefined;
+      const revisePipeline = reviseBrief
+        ? new PipelineRunner({ ...config, externalContext: reviseBrief })
+        : pipeline;
+      const result = await revisePipeline.reviseDraft(bookId, chapterNum, reviseMode);
       return JSON.stringify(result);
     }
 
@@ -558,6 +601,45 @@ export async function executeAgentTool(
         chapters: [...chapters],
       });
       return JSON.stringify(result);
+    }
+
+    case "read_chapter": {
+      const bookId = args.bookId as string;
+      const bookDir = new (await import("../state/manager.js")).StateManager(config.projectRoot).bookDir(bookId);
+      const index = await state.loadChapterIndex(bookId);
+      if (index.length === 0) {
+        return JSON.stringify({ error: `书籍 ${bookId} 还没有任何已写章节。` });
+      }
+      let targetNum = args.chapterNumber as number | undefined;
+      if (targetNum === undefined) {
+        targetNum = Math.max(...index.map((ch) => ch.number));
+      }
+      const chapter = index.find((ch) => ch.number === targetNum);
+      if (!chapter) {
+        return JSON.stringify({ error: `第${targetNum}章不存在。当前已写章节：${index.map((ch) => ch.number).join(", ")}` });
+      }
+      const { readdir, readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const chaptersDir = join(bookDir, "chapters");
+      let files: string[];
+      try {
+        files = await readdir(chaptersDir);
+      } catch {
+        return JSON.stringify({ error: `章节目录不存在：${chaptersDir}` });
+      }
+      const paddedNum = String(targetNum).padStart(4, "0");
+      const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      if (!chapterFile) {
+        return JSON.stringify({ error: `第${targetNum}章文件未找到（目录：${chaptersDir}，前缀：${paddedNum}）` });
+      }
+      const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
+      return JSON.stringify({
+        bookId,
+        chapterNumber: targetNum,
+        chapterFile,
+        wordCount: chapter.wordCount,
+        content: raw,
+      });
     }
 
     case "write_truth_file": {

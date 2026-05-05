@@ -34,6 +34,7 @@ const ACTION_LABELS: Record<string, string> = {
   rewrite: "重生成",
   "anti-detect": "降低AI痕迹",
   resync: "同步",
+  "length-normalize": "审计前字数归一化",
 };
 
 function formatTime(iso: string): string {

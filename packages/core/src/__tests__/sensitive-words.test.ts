@@ -22,15 +22,11 @@ describe("analyzeSensitiveWords", () => {
     expect(criticalIssues[0]!.category).toBe("敏感词");
   });
 
-  it("detects sexual terms as warn severity", () => {
+  it("does not score adult-oriented wording as sensitive by default", () => {
     const content = "他看到了一些淫荡的画面。";
     const result = analyzeSensitiveWords(content);
-    expect(result.found.length).toBeGreaterThan(0);
-    const warnMatches = result.found.filter((f) => f.severity === "warn");
-    expect(warnMatches.length).toBeGreaterThan(0);
-    // Issues should have warning severity for warn words
-    const warningIssues = result.issues.filter((i) => i.severity === "warning");
-    expect(warningIssues.length).toBeGreaterThan(0);
+    expect(result.found).toHaveLength(0);
+    expect(result.issues).toHaveLength(0);
   });
 
   it("detects extreme violence terms as warn severity", () => {
@@ -75,14 +71,14 @@ describe("analyzeSensitiveWords", () => {
     expect(result.found).toHaveLength(0);
   });
 
-  it("detects multiple categories simultaneously", () => {
+  it("detects blocked terms and platform-risk warnings simultaneously", () => {
     const content = "法轮功的信徒在广场上进行了淫荡的仪式，场面极其血腥，有人被肢解。";
     const result = analyzeSensitiveWords(content);
     const blockCount = result.found.filter((f) => f.severity === "block").length;
     const warnCount = result.found.filter((f) => f.severity === "warn").length;
     expect(blockCount).toBeGreaterThan(0);
     expect(warnCount).toBeGreaterThan(0);
-    // Should have issues for both political and sexual/violence
+    // Should have issues for political and extreme-violence terms; adult wording is ignored by default.
     expect(result.issues.length).toBeGreaterThanOrEqual(2);
   });
 });

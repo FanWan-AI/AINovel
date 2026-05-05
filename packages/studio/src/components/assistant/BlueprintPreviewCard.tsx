@@ -38,6 +38,12 @@ export interface BlueprintPreviewPayload {
   readonly status?: BlueprintStatus;
   /** Incremented each time the blueprint is edited or confirmed. */
   readonly version?: number;
+  /** User's original instruction text (A/B/C decisions) — injected by plan-next after execution. */
+  readonly userInstruction?: string;
+  /** Plan goal derived by planChapter (injected by plan-next). */
+  readonly planGoal?: string;
+  /** Plan conflicts derived by planChapter (injected by plan-next). */
+  readonly planConflicts?: ReadonlyArray<string>;
 }
 
 export function BlueprintPreviewCard({
@@ -116,6 +122,28 @@ export function BlueprintPreviewCard({
               <li key={i} className="text-xs text-muted-foreground">• {item}</li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {(blueprint.userInstruction || (blueprint.planGoal)) && (
+        <div className="mt-2 pt-2 border-t border-amber-500/20 rounded-md bg-amber-50/40 dark:bg-amber-950/20 p-2.5" data-testid="blueprint-user-decisions">
+          <div className="text-xs font-semibold text-amber-600 dark:text-amber-400 mb-1">⚠️ 待确认：你的指令决策</div>
+          {blueprint.userInstruction && (
+            <div className="text-xs text-amber-700 dark:text-amber-300 whitespace-pre-wrap mb-1.5 leading-relaxed">
+              {blueprint.userInstruction}
+            </div>
+          )}
+          {blueprint.planGoal && (
+            <div className="text-xs text-muted-foreground mt-1">
+              <span className="font-medium">规划目标：</span>{blueprint.planGoal}
+            </div>
+          )}
+          {blueprint.planConflicts && blueprint.planConflicts.length > 0 && (
+            <div className="text-xs text-muted-foreground mt-0.5">
+              <span className="font-medium">核心冲突：</span>{blueprint.planConflicts.join("；")}
+            </div>
+          )}
+          <div className="text-xs text-amber-500 mt-1.5">请核对上方蓝图内容是否已反映你的决策，如有偏差请点击"编辑蓝图"修正后再确认。</div>
         </div>
       )}
 

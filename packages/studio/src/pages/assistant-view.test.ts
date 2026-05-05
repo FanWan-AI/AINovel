@@ -30,6 +30,7 @@ import {
   createAssistantTaskPlanDraft,
   createAssistantInitialState,
   detectAssistantBookAction,
+  extractAssistantAuditChapter,
   requestAssistantConfirmation,
   parseAssistantTaskRecoveryPayload,
   parseAssistantCrudDeleteRequest,
@@ -348,6 +349,27 @@ describe("AssistantView", () => {
     expect(detectAssistantBookAction("写第24章")).toBe("write-next");
     expect(detectAssistantBookAction("continue writing the next chapter")).toBe("write-next");
     expect(detectAssistantBookAction("next chapter with stronger conflict")).toBe("write-next");
+  });
+
+  it("extracts chapter numbers even when the user omits 第 in colloquial phrasing", () => {
+    expect(extractAssistantAuditChapter("从24章开始修复衔接问题")).toBe(24);
+    expect(extractAssistantAuditChapter("先审计24章")).toBe(24);
+    expect(extractAssistantAuditChapter("审计第24章")).toBe(24);
+  });
+
+  it("does NOT detect write-next when prompt is a question or opinion inquiry", () => {
+    // Contains "你觉得" — clearly asking AI's opinion, not a write command
+    expect(detectAssistantBookAction("你觉得下一章节写男主和第二个女主上床发生关系如何")).toBeNull();
+    // Ends with "如何" — question form
+    expect(detectAssistantBookAction("写下一章，让男女主相遇如何")).toBeNull();
+    // Ends with "怎么样"
+    expect(detectAssistantBookAction("下一章节写冲突高潮怎么样")).toBeNull();
+    // Ends with "好吗"
+    expect(detectAssistantBookAction("写下一章好吗")).toBeNull();
+    // Ends with question mark
+    expect(detectAssistantBookAction("写下一章？")).toBeNull();
+    // Pure command (no question) must still trigger
+    expect(detectAssistantBookAction("写下一章，男女主相遇")).toBe("write-next");
   });
 
   it("hits target book and enters execution directly for book+write request in one sentence", () => {
@@ -1057,6 +1079,83 @@ describe("AssistantView", () => {
     }).not.toThrow();
     const html = renderToStaticMarkup(createElement(ContractVerificationCard, { report: pendingCard.payload as never }));
     expect(html).toContain("正在验证");
+  });
+
+  it("passes p5AutoRevision payload through to verification card for candidate_pending_approval", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 4,
+        report: { satisfactionRate: 0.5, items: [], shouldRewrite: true },
+        contractSatisfaction: 0.5,
+        satisfiedRequirements: [],
+        missingRequirements: [],
+        p5AutoRevision: {
+          status: "candidate_pending_approval",
+          runId: "run-p5-test-123",
+          editorReport: {
+            targetedRewritePlan: { instructions: [], fixCount: 1, summary: "修1处" },
+            blockingIssues: [],
+            shouldRewrite: true,
+          },
+          appliedFixes: ["修复钩子"],
+          revisedBlueprintFulfillment: { score: 78, shouldRewrite: false, blockingIssues: [] },
+        },
+      },
+      timestamp: 5000,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    expect(next.messages).toHaveLength(1);
+    const cardPayload = next.messages[0]!.cards![0]!.payload as Record<string, unknown>;
+    const p5 = cardPayload.p5AutoRevision as Record<string, unknown>;
+    expect(p5).toBeDefined();
+    expect(p5.status).toBe("candidate_pending_approval");
+    expect(p5.runId).toBe("run-p5-test-123");
+  });
+
+  it("passes p5AutoRevision with status=failed through to verification card", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 6,
+        report: { satisfactionRate: 0.2, items: [], shouldRewrite: true },
+        contractSatisfaction: 0.2,
+        satisfiedRequirements: [],
+        missingRequirements: [],
+        p5AutoRevision: {
+          status: "failed",
+          error: "LLM connection timeout",
+        },
+      },
+      timestamp: 6000,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    const p5 = (next.messages[0]!.cards![0]!.payload as Record<string, unknown>).p5AutoRevision as Record<string, unknown>;
+    expect(p5.status).toBe("failed");
+    expect(p5.error).toBe("LLM connection timeout");
+  });
+
+  it("does not include p5AutoRevision in verification card when absent from payload", () => {
+    const initial = createAssistantInitialState();
+    const message = {
+      event: "write-next:verification",
+      data: {
+        bookId: "book-1",
+        chapterNumber: 2,
+        report: { satisfactionRate: 1.0, items: [], shouldRewrite: false },
+        contractSatisfaction: 1.0,
+        satisfiedRequirements: [],
+        missingRequirements: [],
+      },
+      timestamp: 3000,
+    };
+    const next = applyAssistantTaskEventFromSSE(initial, message);
+    const cardPayload = next.messages[0]!.cards![0]!.payload as Record<string, unknown>;
+    expect(cardPayload.p5AutoRevision).toBeUndefined();
   });
 });
 

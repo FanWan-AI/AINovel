@@ -41,6 +41,22 @@ describe("load/save chapter runs", () => {
     expect(loadChapterRuns("book-1", storage).runs).toEqual(runs);
   });
 
+  it("preserves P5 candidateStatus for audit-failed stored runs", () => {
+    const runs: ReadonlyArray<ChapterRunRecord> = [{
+      id: "run-p5",
+      chapterNumber: 25,
+      actionType: "blueprint-targeted-revise",
+      status: "unchanged",
+      startedAt: 100,
+      candidateStatus: "audit-failed",
+    }];
+    expect(saveChapterRuns("book-1", runs, storage)).toBeNull();
+    expect(loadChapterRuns("book-1", storage).runs[0]).toMatchObject({
+      id: "run-p5",
+      candidateStatus: "audit-failed",
+    });
+  });
+
   it("returns read error key when storage contains invalid JSON", () => {
     storage.setItem("inkos-chapter-runs-v1:book-1", "not-json");
     expect(loadChapterRuns("book-1", storage).error).toBe("chapterTaskCenter.storageReadFailed");

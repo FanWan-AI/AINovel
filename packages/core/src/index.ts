@@ -118,6 +118,17 @@ export { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./agents/settl
 export { parseSettlementOutput, type SettlementOutput } from "./agents/settler-parser.js";
 export { parseSettlerDeltaOutput, type SettlerDeltaOutput } from "./agents/settler-delta-parser.js";
 export { FanficCanonImporter, type FanficCanonOutput } from "./agents/fanfic-canon-importer.js";
+export {
+  generateBlueprintEditorReport,
+  type BlueprintEditorReport,
+  type TargetedRewritePlan,
+  type TargetedRewriteInstruction,
+} from "./agents/developmental-editor-agent.js";
+export {
+  TargetedBlueprintReviser,
+  type TargetedReviseInput,
+  type TargetedReviseOutput,
+} from "./agents/targeted-blueprint-reviser.js";
 export { getFanficDimensionConfig, FANFIC_DIMENSIONS, type FanficDimensionConfig } from "./agents/fanfic-dimensions.js";
 export { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./agents/fanfic-prompt-sections.js";
 
@@ -146,7 +157,7 @@ export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./uti
 export { analyzeHookHealth } from "./utils/hook-health.js";
 
 // Pipeline
-export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ChapterActionDecision, type ChapterActionResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary, type WorldConsistencyDimension, type WorldConsistencyIssueEvidence, type WorldConsistencyIssue, type WorldConsistencySectionReport, type MarketSignalRecommendation, type WorldConsistencyRepairTask, type WorldConsistencyMarketReport } from "./pipeline/runner.js";
+export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type LengthNormalizationSnapshot, type PlanChapterResult, type ComposeChapterResult, type ChapterActionDecision, type ChapterActionResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary, type WorldConsistencyDimension, type WorldConsistencyIssueEvidence, type WorldConsistencyIssue, type WorldConsistencySectionReport, type MarketSignalRecommendation, type WorldConsistencyRepairTask, type WorldConsistencyMarketReport } from "./pipeline/runner.js";
 export { Scheduler, type SchedulerConfig, type RunPlan, type RunPlanMode, type RunPlanBookScope } from "./pipeline/scheduler.js";
 export { runAgentLoop, AGENT_TOOLS as AGENT_TOOLS, type AgentLoopOptions } from "./pipeline/agent.js";
 export { detectChapter, detectAndRewrite, loadDetectionHistory, type DetectChapterResult, type DetectAndRewriteResult } from "./pipeline/detection-runner.js";

@@ -2,6 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
+  canApproveChapterStatus,
+  canRejectChapterStatus,
   getTopActionIds,
   parseChapterLifecycleEvent,
   ReleaseCandidatePanel,
@@ -73,6 +75,21 @@ describe("translateChapterStatus", () => {
       expect(label).not.toBe(status);
       expect(label).toMatch(/^chapter\./);
     }
+  });
+});
+
+describe("chapter review action visibility", () => {
+  it("allows approving only ready-for-review chapters", () => {
+    expect(canApproveChapterStatus("ready-for-review")).toBe(true);
+    expect(canApproveChapterStatus("audit-failed")).toBe(false);
+    expect(canApproveChapterStatus("approved")).toBe(false);
+  });
+
+  it("allows rejecting both ready-for-review and audit-failed chapters", () => {
+    expect(canRejectChapterStatus("ready-for-review")).toBe(true);
+    expect(canRejectChapterStatus("audit-failed")).toBe(true);
+    expect(canRejectChapterStatus("approved")).toBe(false);
+    expect(canRejectChapterStatus("drafted")).toBe(false);
   });
 });
 

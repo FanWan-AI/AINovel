@@ -163,5 +163,13 @@ function formatSteeringContract(contract: NonNullable<WriteNextInput["steeringCo
   }
   if (contract.payoffRequired) lines.push(`### Payoff Required\n${contract.payoffRequired.trim()}`);
   if (contract.endingHook) lines.push(`### Ending Hook\n${contract.endingHook.trim()}`);
+  // Include the full design proposal so the writer can follow it precisely.
+  // rawRequest contains the complete chapter design text output by the agent.
+  const rawReq = typeof (contract as Record<string, unknown>).rawRequest === "string"
+    ? ((contract as Record<string, unknown>).rawRequest as string).trim()
+    : undefined;
+  if (rawReq && rawReq.length > 0) {
+    lines.push(`### 参考设计方案（严格按此创作）\n${rawReq.slice(0, 5000)}`);
+  }
   return lines.join("\n\n");
 }

@@ -21,6 +21,7 @@ import {
 } from "../components/assistant/WorldConsistencyMarketCard";
 import { CandidateComparisonCard } from "../components/assistant/CandidateComparisonCard";
 import { CheckpointApprovalCard } from "../components/assistant/CheckpointApprovalCard";
+import { BlueprintCheckpointCard } from "../components/assistant/BlueprintCheckpointCard";
 import { ContractCard, type ContractCardPayload } from "../components/assistant/ContractCard";
 import { BlueprintPreviewCard, type BlueprintPreviewPayload } from "../components/assistant/BlueprintPreviewCard";
 import { ContractVerificationCard, type VerificationReportPayload } from "../components/assistant/ContractVerificationCard";
@@ -394,6 +395,7 @@ interface AssistantStreamCallbacks {
   readonly onMessage: (content: string) => void;
   readonly onDone: (result: { ok: boolean; response?: string; error?: string; cards?: ReadonlyArray<AssistantMessageCard> }) => void;
   readonly abortSignal?: AbortSignal;
+  readonly recentMessages?: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
 }
 
 function normalizeAssistantStreamError(error: unknown): string {
@@ -424,7 +426,7 @@ async function streamAssistantChat(
     response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, scopeBookTitles, scopeBookIds, sessionId }),
+      body: JSON.stringify({ prompt, scopeBookTitles, scopeBookIds, sessionId, recentMessages: callbacks.recentMessages }),
       signal: callbacks.abortSignal,
     });
   } catch (e) {
@@ -512,8 +514,11 @@ async function streamAssistantChat(
   }
 }
 const BOOK_STATUS_ACTIVE = "active";
-const WRITE_NEXT_ACTION_PATTERN = /写下一章|下一章节?写|下一章写|创作下一章|写第\s*\d+\s*章|继续写|续写|write[-\s]?next|next\s*chapter|continue\s*writing/iu;
+const WRITE_NEXT_ACTION_PATTERN = /写下一章|下一章节?写(?!什么|啥|哪)|下一章写|创作下一章|写第\s*\d+\s*章|继续写|续写|落实下一章|按.{0,15}(?:设计|方案|规划).{0,10}(?:写|生成|落实|执行)|write[-\s]?next|next\s*chapter|continue\s*writing/iu;
 const AUDIT_ACTION_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
+// Prompts that contain these patterns are questions/opinion requests, not action commands.
+// e.g. "你觉得下一章节写...如何" or "你来设计一下" must go to chat, not trigger write-next.
+const QUESTION_INTENT_GUARD = /你(?:觉得|感觉|认为|看看|说说)|(?:如何|怎么[样子]?|好不好|好吗|可以吗|行吗|合适吗|适合吗)[？?]?\s*$|[？?]\s*$|写什么|写啥|设计一下|你来设计|帮.{0,4}设计|不知道.{0,15}(?:写|章节)|创作力/u;
 const CRUD_READ_ACTION_PATTERN = /查询|查看|检索|read|search/iu;
 const CRUD_DELETE_ACTION_PATTERN = /删除|delete/iu;
 const CRUD_RESTORE_ACTION_PATTERN = /恢复|restore/iu;
@@ -524,7 +529,7 @@ const CRUD_DIMENSION_CHARACTER_PATTERN = /角色|character/iu;
 const CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
 const NOVEL_QA_HINT_PATTERN = /主角|角色|人物|设定|世界观|伏笔|章节|剧情|冲突|书里|book|chapter|character|hook|volume/iu;
 const CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
-const AUDIT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
+const AUDIT_CHAPTER_ZH_PATTERN = /(?:第\s*)?(\d+)\s*章/u;
 const AUDIT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 
 // --- Smart book context resolution ---
@@ -1287,6 +1292,7 @@ export function applyAssistantTaskEventFromSSE(state: AssistantComposerState, me
       ...(Array.isArray(payload.sourceArtifactIds) ? { sourceArtifactIds: payload.sourceArtifactIds } : {}),
       ...(typeof payload.graphPatchConsumption === "object" && payload.graphPatchConsumption !== null ? { graphPatchConsumption: payload.graphPatchConsumption } : {}),
       ...(typeof payload.blueprintFulfillment === "object" && payload.blueprintFulfillment !== null ? { blueprintFulfillment: payload.blueprintFulfillment } : {}),
+      ...(typeof payload.p5AutoRevision === "object" && payload.p5AutoRevision !== null ? { p5AutoRevision: payload.p5AutoRevision } : {}),
       ...(typeof payload.warning === "string" ? { warning: payload.warning } : {}),
     };
     const now = message.timestamp ?? Date.now();
@@ -1482,11 +1488,27 @@ export function reconcileAssistantTaskFromSnapshot(
   }
   const done = snapshot.status !== "running";
   const candidateSelection = resolveAssistantCandidateSelection(snapshot);
-  const pendingCheckpoint = resolveAssistantPendingCheckpoint(snapshot);
+  const snapshotPendingCheckpoint = resolveAssistantPendingCheckpoint(snapshot);
   const goalToBookProgress = resolveAssistantGoalToBookProgress(snapshot);
-  const executionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
+  const snapshotExecutionStatus = snapshot.nodes && Object.values(snapshot.nodes).some((node) => node.status === "waiting_approval")
     ? "waiting_approval"
     : snapshot.status;
+  // If the snapshot hasn't caught up to a checkpoint that was signalled via SSE (race condition:
+  // an in-flight poll resolves with a stale snapshot before the server persists awaitingApproval),
+  // preserve the existing pendingCheckpoint unless the snapshot confirms the node was resolved.
+  const existingCheckpointNodeId = state.taskExecution.pendingCheckpoint?.nodeId;
+  const checkpointNodeInSnapshot = existingCheckpointNodeId && snapshot.nodes ? snapshot.nodes[existingCheckpointNodeId] : null;
+  const checkpointResolvedInSnapshot = checkpointNodeInSnapshot?.status === "succeeded" || checkpointNodeInSnapshot?.status === "failed";
+  const pendingCheckpoint = snapshotPendingCheckpoint ?? (
+    state.taskExecution.pendingCheckpoint && !checkpointResolvedInSnapshot
+      ? state.taskExecution.pendingCheckpoint
+      : null
+  );
+  // If we have a preserved (SSE-derived) pendingCheckpoint but the snapshot is stale, keep
+  // the executionStatus as "waiting_approval" so the polling interval doesn't restart.
+  const executionStatus = pendingCheckpoint && snapshotExecutionStatus === "running"
+    ? "waiting_approval"
+    : snapshotExecutionStatus;
   return {
     ...state,
     loading: done || executionStatus === "waiting_approval" ? false : state.loading,
@@ -1855,6 +1877,8 @@ export function resolveAssistantTemplateSuggestedActions(
 export function detectAssistantBookAction(prompt: string): AssistantBookActionType | null {
   const normalized = prompt.trim().toLowerCase();
   if (!normalized) return null;
+  // Question/opinion prompts are not action commands — route to chat instead.
+  if (QUESTION_INTENT_GUARD.test(prompt.trim())) return null;
   if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return "write-next";
   if (AUDIT_ACTION_PATTERN.test(normalized)) return "audit";
   return null;
@@ -1870,6 +1894,12 @@ function isBookSelectionOnlyPrompt(
   if (CRUD_DELETE_ACTION_PATTERN.test(normalized) || CRUD_RESTORE_ACTION_PATTERN.test(normalized)) return false;
   if (WORLD_REPORT_ACTION_PATTERN.test(normalized) || CRUD_READ_ACTION_PATTERN.test(normalized)) return false;
   if (GENERATION_INTENT_PATTERN.test(normalized) || AUDIT_ACTION_PATTERN.test(normalized)) return false;
+
+  // If the prompt contains question/opinion indicators, it's not a mere book selection
+  if (/[?？]|[吗呢吧啊哦]{1,2}\s*$|(?:觉得|感觉|认为|怎么|怎样|如何|分析|评价|是否|能否|可以|吸引)/u.test(normalized)) return false;
+
+  // If the raw prompt is much longer than the book title, the user is asking something, not just selecting
+  if (normalized.length > matchedBook.title.length + 20) return false;
 
   const normalizeSelectionToken = (value: string): string => value
     .trim()
@@ -1929,11 +1959,11 @@ function inferAssistantReadRequestFromPrompt(prompt: string): {
 
   if (GENERATION_INTENT_PATTERN.test(normalized)) return null;
 
-  // Skip complex prompts that contain modification/advice intent — route to agent chat instead
-  if (/修改|调整|怎么办|如何|不符|偏离|问题|建议|帮我|你去/iu.test(normalized)) return null;
+  // Skip complex prompts that contain modification/advice/creative-planning intent — route to agent chat instead
+  if (/修改|调整|怎么办|如何|不符|偏离|问题|建议|帮我|你去|怎么写|怎样写|想让|觉得|展示|出现|吸引|我要让/iu.test(normalized)) return null;
 
-  // Skip long prompts (>40 chars) — they're likely complex requests for the agent
-  if (normalized.length > 40) return null;
+  // Skip long prompts (>30 chars) — they're likely complex requests for the agent
+  if (normalized.length > 30) return null;
 
   const looksLikeNovelQ = NOVEL_QA_HINT_PATTERN.test(normalized);
   if (!looksLikeNovelQ) {
@@ -3339,8 +3369,10 @@ export function AssistantView({
       const abortController = new AbortController();
       chatAbortRef.current = abortController;
       const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
+      const recentChatMessages = state.messages.slice(-4).map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }));
       void streamAssistantChat(agentPrompt, contextTitles, contextBookIds, assistantSessionIdRef.current, {
         abortSignal: abortController.signal,
+        recentMessages: recentChatMessages,
         onProgress: (status) => {
           setState((prev) => {
             const logs = appendStreamingProgressLine(prev.streamingProgress, status);
@@ -3553,9 +3585,11 @@ export function AssistantView({
     chatAbortRef.current = abortController;
 
     const agentPrompt = buildAssistantAgentInstruction(normalizedPrompt, contextTitles);
+    const recentChatMessages = state.messages.slice(-4).map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }));
 
     void streamAssistantChat(agentPrompt, contextTitles, contextBookIds, assistantSessionIdRef.current, {
       abortSignal: abortController.signal,
+      recentMessages: recentChatMessages,
       onProgress: (status) => {
         setState((prev) => {
           const logs = appendStreamingProgressLine(prev.streamingProgress, status);
@@ -3643,7 +3677,9 @@ export function AssistantView({
     }
     setState((prev) => confirmAssistantPendingAction(prev));
     try {
-      const sessionId = `asst_s_${Date.now().toString(36)}`;
+      // Reuse the current chat session ID so artifacts saved during the design
+      // conversation (chapter_plan, steering contracts) are accessible to the planner.
+      const sessionId = assistantSessionIdRef.current;
       const scope = state.taskPlan.action === "goal-to-book"
         ? { type: "book-list" as const, bookIds: [...state.taskPlan.targetBookIds] }
         : state.taskPlan.action === "write-next"
@@ -3660,6 +3696,10 @@ export function AssistantView({
         sessionId,
         input: state.taskPlan.prompt,
         scope,
+        recentMessages: state.messages.slice(-12).map((message) => ({
+          role: message.role,
+          content: message.content.slice(0, 10000),
+        })),
         ...(state.taskPlan.action === "goal-to-book" ? { intentType: "goal-to-book" as const } : {}),
       });
       const executeResult = await postApi<{
@@ -3940,12 +3980,26 @@ export function AssistantView({
             />
           )}
           {state.taskExecution?.pendingCheckpoint && (
-            <CheckpointApprovalCard
-              nodeId={state.taskExecution.pendingCheckpoint.nodeId}
-              label={state.taskExecution.pendingCheckpoint.label}
-              disabled={false}
-              onApprove={handleApproveCheckpoint}
-            />
+            state.taskExecution.pendingCheckpoint.mode === "blueprint-confirm" && state.taskExecution.pendingCheckpoint.blueprintArtifactId
+              ? (
+                <BlueprintCheckpointCard
+                  nodeId={state.taskExecution.pendingCheckpoint.nodeId}
+                  blueprintArtifactId={state.taskExecution.pendingCheckpoint.blueprintArtifactId}
+                  sessionId={state.taskExecution.sessionId ?? assistantSessionIdRef.current}
+                  bookId={chatBookContext?.id}
+                  taskId={state.taskExecution.taskId}
+                  disabled={false}
+                  onApprove={handleApproveCheckpoint}
+                />
+              )
+              : (
+                <CheckpointApprovalCard
+                  nodeId={state.taskExecution.pendingCheckpoint.nodeId}
+                  label={state.taskExecution.pendingCheckpoint.label}
+                  disabled={false}
+                  onApprove={handleApproveCheckpoint}
+                />
+              )
           )}
           {state.qualityReport && (
             <QualityReportCard

@@ -102,6 +102,8 @@ interface ChapterRunSummaryData {
   readonly appliedBrief: string | null;
   readonly startedAt: string;
   readonly finishedAt: string | null;
+  readonly candidateStatus?: "ready-for-review" | "audit-failed";
+  readonly candidateAuditIssues?: ReadonlyArray<string>;
 }
 
 type ReviseMode = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "chapter-redesign";
@@ -166,6 +168,14 @@ export function translateChapterStatus(status: string, t: TFunction): string {
     "audit-failed": () => t("chapter.auditFailed"),
   };
   return map[status]?.() ?? status;
+}
+
+export function canApproveChapterStatus(status: string): boolean {
+  return status === "ready-for-review";
+}
+
+export function canRejectChapterStatus(status: string): boolean {
+  return status === "ready-for-review" || status === "audit-failed";
 }
 
 /** Returns the two top-level action IDs rendered in the header.
@@ -651,11 +661,11 @@ export function BookDetail({
     }
   };
 
-  const approveChapterDiffRun = async (runId: string) => {
+  const approveChapterDiffRun = async (runId: string, force = false) => {
     setChapterDiffApproving(true);
     setChapterDiffError(null);
     try {
-      await postApi(`/books/${bookId}/chapter-runs/${runId}/approve`);
+      await postApi(`/books/${bookId}/chapter-runs/${runId}/approve`, force ? { force: true } : undefined);
       await openChapterDiffDialog(runId);
       await refetchChapterRunSummary();
       refetch();
@@ -1045,6 +1055,8 @@ export function BookDetail({
         <div className="divide-y divide-border/20">
           {chapters.map((ch, index) => {
             const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
+            const canApproveChapter = canApproveChapterStatus(ch.status);
+            const canRejectChapter = canRejectChapterStatus(ch.status);
             return (
               <div key={ch.number} className={`group hover:bg-primary/[0.02] transition-colors fade-in ${staggerClass}`}>
                 {/* Info row */}
@@ -1072,24 +1084,28 @@ export function BookDetail({
                 {/* Action row */}
                 <div className="flex items-center gap-1.5 pr-6 pb-3.5 pt-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <div className="w-10 shrink-0" />
-                  {ch.status === "ready-for-review" && (
+                  {(canApproveChapter || canRejectChapter) && (
                     <>
-                      <button
-                        onClick={async () => { await postApi(`/books/${bookId}/chapters/${ch.number}/approve`); refetch(); }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-emerald-200/60 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500 hover:text-white transition-all"
-                        title={t("book.approve")}
-                      >
-                        <Check size={13} />
-                        {t("book.approve")}
-                      </button>
-                      <button
-                        onClick={async () => { await postApi(`/books/${bookId}/chapters/${ch.number}/reject`); refetch(); }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-destructive/20 bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all"
-                        title={t("book.reject")}
-                      >
-                        <X size={13} />
-                        {t("book.reject")}
-                      </button>
+                      {canApproveChapter && (
+                        <button
+                          onClick={async () => { await postApi(`/books/${bookId}/chapters/${ch.number}/approve`); refetch(); }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-emerald-200/60 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500 hover:text-white transition-all"
+                          title={t("book.approve")}
+                        >
+                          <Check size={13} />
+                          {t("book.approve")}
+                        </button>
+                      )}
+                      {canRejectChapter && (
+                        <button
+                          onClick={async () => { await postApi(`/books/${bookId}/chapters/${ch.number}/reject`); refetch(); }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-destructive/20 bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all"
+                          title={t("book.reject")}
+                        >
+                          <X size={13} />
+                          {t("book.reject")}
+                        </button>
+                      )}
                       <div className="w-px h-4 bg-border/40 mx-0.5" />
                     </>
                   )}

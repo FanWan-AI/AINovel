@@ -95,10 +95,34 @@ export class LengthNormalizerAgent extends BaseAgent {
       ? `\n## Reduced Control Block\n${input.reducedControlBlock}\n`
       : "";
 
+    // Compute a "nearest-edge" practical target to prevent the LLM from
+    // over-cutting/over-expanding when the chapter is only slightly outside the
+    // soft range.  Instead of anchoring on the full original target (which may
+    // be far away), we aim for just inside the soft boundary so the LLM only
+    // makes the minimum necessary adjustment.
+    //
+    // compress: aim for max(target, softMax * 0.95) — never ask for deeper
+    //   cuts than needed just to reach the abstract target.
+    // expand:   aim for min(target, softMin * 1.05) — same logic in reverse.
+    //
+    // When the chapter is far over (originalCount > softMax * 2), the
+    // practical target naturally collapses back toward the original target
+    // because softMax * 0.95 < target is impossible (target < softMax always),
+    // so the formula always produces the larger of the two values for compress.
+    const practicalTarget = mode === "compress"
+      ? Math.max(input.lengthSpec.target, Math.floor(input.lengthSpec.softMax * 0.95))
+      : Math.min(input.lengthSpec.target, Math.ceil(input.lengthSpec.softMin * 1.05));
+
+    const targetNote = practicalTarget !== input.lengthSpec.target
+      ? mode === "compress"
+        ? `（只需压缩至此处，无需继续压缩至原始目标 ${input.lengthSpec.target}）`
+        : `（只需扩写至此处，无需继续扩写至原始目标 ${input.lengthSpec.target}）`
+      : "";
+
     return `请对下面正文做一次${mode === "compress" ? "压缩" : "扩写"}修正。
 
 ## Length Spec
-- Target: ${input.lengthSpec.target}
+- Target: ~${practicalTarget} ${targetNote}
 - Soft Range: ${input.lengthSpec.softMin}-${input.lengthSpec.softMax}
 - Hard Range: ${input.lengthSpec.hardMin}-${input.lengthSpec.hardMax}
 - Counting Mode: ${input.lengthSpec.countingMode}
@@ -111,6 +135,8 @@ ${originalCount}
 - 保留正文中的关键标记、人物名、地点名和已有事实
 - 不要凭空新增子情节
 - 不要插入解释性总结或分析
+- ⚠️ 输出字数不得低于 ${input.lengthSpec.hardMin}（低于此值将被系统丢弃，绝对禁止）
+- ⚠️ 输出字数不得高于 ${input.lengthSpec.hardMax}（高于此值章节不合格）
 - 输出修正后的完整正文，不要加标签
 
 ${intentBlock}${controlBlock}

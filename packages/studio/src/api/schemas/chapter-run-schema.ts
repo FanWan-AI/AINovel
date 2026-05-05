@@ -2,7 +2,7 @@ export const CHAPTER_RUN_SCHEMA_VERSION = 1;
 export const CHAPTER_RUN_DEFAULT_LIMIT = 20;
 export const CHAPTER_RUN_MAX_LIMIT = 100;
 
-export type ChapterRunActionType = "revise" | "rewrite" | "anti-detect" | "resync";
+export type ChapterRunActionType = "revise" | "rewrite" | "anti-detect" | "resync" | "blueprint-targeted-revise" | "length-normalize";
 export type ChapterRunStatus = "running" | "succeeded" | "failed";
 export type ChapterRunDecision = "applied" | "unchanged" | "failed";
 

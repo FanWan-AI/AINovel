@@ -1128,7 +1128,7 @@ describe("PipelineRunner", () => {
     );
 
     try {
-      await runner.writeNextChapter(bookId, 220);
+      const result = await runner.writeNextChapter(bookId, 220);
 
       expect(planChapter).toHaveBeenCalledTimes(1);
       expect(composeChapter).toHaveBeenCalledTimes(1);
@@ -1211,7 +1211,7 @@ describe("PipelineRunner", () => {
     );
 
     try {
-      await runner.writeNextChapter(bookId, 220);
+      const result = await runner.writeNextChapter(bookId, 220);
 
       expect(planChapter).toHaveBeenCalledTimes(1);
       const writeInput = writeChapter.mock.calls[0]?.[0];
@@ -1532,7 +1532,7 @@ describe("PipelineRunner", () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const writerDraft = "中段正文。".repeat(40);
     const overlongRevision = "修订后正文。".repeat(60);
-    const normalizedRevision = "归一正文。".repeat(40);
+    const normalizedRevision = "归一正文。".repeat(52);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -1603,7 +1603,7 @@ describe("PipelineRunner", () => {
   it("normalizes overlong writer output once before audit", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const overlongDraft = "冗余句子。".repeat(60);
-    const normalizedDraft = "压缩后的正文。".repeat(30);
+    const normalizedDraft = "压缩后的正文。".repeat(40);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -1639,10 +1639,19 @@ describe("PipelineRunner", () => {
     );
 
     try {
-      await runner.writeNextChapter(bookId, 220);
+      const result = await runner.writeNextChapter(bookId, 220);
 
       expect(normalizeChapter).toHaveBeenCalledTimes(1);
       expect(auditChapter.mock.calls[0]?.[1]).toBe(normalizedDraft);
+      expect(result.lengthNormalizationSnapshots?.[0]).toMatchObject({
+        stage: "pre-audit",
+        mode: "compress",
+        beforeCount: overlongDraft.length,
+        afterCount: normalizedDraft.length,
+        applied: true,
+      });
+      expect(result.lengthNormalizationSnapshots?.[0]?.beforeContent).toBe(overlongDraft);
+      expect(result.lengthNormalizationSnapshots?.[0]?.afterContent).toBe(normalizedDraft);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1754,6 +1763,60 @@ describe("PipelineRunner", () => {
       expect((result as { lengthTelemetry?: { normalizeApplied: boolean } }).lengthTelemetry?.normalizeApplied).toBe(false);
       expect(chapterMeta?.lengthWarnings?.[0]).toContain("超出硬区间");
       expect(chapterMeta?.lengthTelemetry?.lengthWarning).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a destructive compression even when it lands inside the hard range", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const overlongDraft = "冗余句子。".repeat(60);
+    const guttedDraft = "压缩正文。".repeat(40);
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: overlongDraft,
+        wordCount: overlongDraft.length,
+      }),
+    );
+    vi.mocked(LengthNormalizerAgent.prototype.normalizeChapter).mockResolvedValue({
+      normalizedContent: guttedDraft,
+      finalCount: guttedDraft.length,
+      applied: true,
+      mode: "compress",
+      tokenUsage: ZERO_USAGE,
+    });
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: overlongDraft,
+        wordCount: overlongDraft.length,
+      }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const chapterIndex = await state.loadChapterIndex(bookId);
+      const chapterMeta = chapterIndex.find((entry) => entry.number === 1);
+
+      expect(result.lengthTelemetry?.normalizeApplied).toBe(false);
+      expect(result.lengthTelemetry?.finalCount).toBe(overlongDraft.length);
+      expect(result.lengthNormalizationSnapshots?.[0]).toMatchObject({
+        stage: "pre-audit",
+        mode: "compress",
+        beforeCount: overlongDraft.length,
+        afterCount: guttedDraft.length,
+        applied: false,
+      });
+      expect(result.lengthNormalizationSnapshots?.[0]?.rejectedReason).toContain("压缩幅度");
+      expect(chapterMeta?.wordCount).toBe(overlongDraft.length);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

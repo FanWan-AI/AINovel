@@ -1,0 +1,777 @@
+
+# 一、详细设计说明：Narrative Cockpit 图谱改剧情闭环
+
+## 1. 背景
+
+NovelOS 的核心卖点不应该只是“AI 会续写”，而是：
+
+> 用户能通过可视化剧情因果网络，直接操控人物关系、伏笔、秘密、冲突和规则，然后让 AI 把这些结构写进下一章，并证明它写进去了。
+
+当前已有基础：
+
+- 后端已有 `NarrativeGraphService`
+- 已有 `NarrativeGraphPatch`
+- 已有 `Graph-to-Steering Compiler`
+- write-next 已能合并 graph patch steering hints
+- verification 已能输出 patch consumption
+
+但目前断点很明显：
+
+1. 未确认 patch 也可能进入 write-next。
+2. 前端 `StoryGraphView` 仍是旧展示面板。
+3. “变更队列”只是本地 state，不会持久化。
+4. 用户无法从前端完成 patch -> impact -> apply -> write-next。
+5. 图谱编辑没有形成“我掌控剧情”的产品体验。
+
+所以本轮目标是完成一个真正可演示的王牌闭环。
+
+---
+
+## 2. 目标
+
+### 一句话目标
+
+把 StoryGraphView 升级为 Narrative Cockpit：用户在图谱里编辑故事因果，系统生成影响分析，用户确认后影响下一章写作，写完后验证是否兑现。
+
+### 用户路径
+
+1. 用户进入剧情驾驶舱。
+2. 选择一本书。
+3. 点击人物、关系、伏笔、秘密、冲突等节点或边。
+4. 选择一个剧情动作，例如：
+   - “让林清雪下一章主动试探万凡”
+   - “把这个伏笔安排到下一章兑现”
+   - “让这个秘密被错误理解”
+5. 系统创建 GraphPatch。
+6. 右侧或底部显示影响分析：
+   - 风险等级
+   - 影响人物
+   - 影响伏笔
+   - 可能矛盾
+   - 下一章必须包含什么
+   - 下一章不能怎么写
+7. 用户确认应用 patch。
+8. patch 状态变为 applied。
+9. 用户点击“从这些变更写下一章”。
+10. write-next 读取 applied patch，编译成 steering contract。
+11. 章节生成后 verification 显示：
+   - 哪些 patch 已 consumed
+   - 哪些 partially_consumed
+   - 哪些 pending
+   - 每个 patch 的满足证据和缺失原因
+
+---
+
+## 3. 产品原则
+
+### 3.1 用户必须有掌控感
+
+不要让用户觉得“我点了个按钮，AI 自己乱想”。
+
+前端必须明确显示：
+
+- “你改了什么”
+- “这会影响什么”
+- “下一章必须写什么”
+- “有哪些风险”
+- “确认后才会进入写作”
+- “写完后是否兑现”
+
+### 3.2 图谱不是数据库表，是剧情因果仪表盘
+
+UI 不要像 CRUD 后台。它应该像创作驾驶舱：
+
+- 中央是故事网络。
+- 右侧是当前节点的“剧情控制面板”。
+- 底部是“变更队列 / 剧情因果预览”。
+- 用户看到每次操作带来的剧情连锁反应。
+
+### 3.3 后端必须安全
+
+核心规则：
+
+- draft / impact_analyzed / approved patch 不能进入正式 write-next。
+- 只有 applied patch 才能影响写作。
+- consumed / partially_consumed patch 不能重复无限注入。
+- rollback 后不能继续影响写作。
+- preview 可以看 steering，但必须标记 previewOnly。
+
+### 3.4 后端必须聪明
+
+不要只做机械字段映射。
+
+例如用户把关系改成“主动试探合作”，系统要推导：
+
+- mustInclude: 林清雪主动试探万凡
+- mustAvoid: 林清雪无理由完全信任万凡
+- sceneBeats: 林清雪主动制造一次接触，并观察万凡反应
+- payoffRequired: 万凡用信息差反制或获得局部主动
+- endingHook: 试探引出新的误判或秘密
+
+这才像智能创作系统。
+
+---
+
+## 4. 现有代码关联
+
+### 后端相关
+
+- `packages/studio/src/api/schemas/narrative-graph-schema.ts`
+  - 定义 NarrativeGraph、Node、Edge、Patch、ImpactAnalysis。
+- `packages/studio/src/api/services/narrative-graph-service.ts`
+  - 当前负责 load/save graph、create/apply/rollback/list patches。
+- `packages/studio/src/api/services/graph-to-steering-compiler.ts`
+  - 将 patch 转成 mustInclude/mustAvoid/sceneBeats。
+- `packages/studio/src/api/server.ts`
+  - narrative graph API
+  - write-next 读取 graph patch
+  - verification patch consumption
+- `packages/studio/src/api/novelos-integration.test.ts`
+- `packages/studio/src/api/services/novelos-p2p5.test.ts`
+
+### 前端相关
+
+- `packages/studio/src/pages/StoryGraphView.tsx`
+  - 当前主要是旧 story graph 展示。
+  - 本轮核心改造对象。
+- `packages/studio/src/pages/story-graph-view.test.ts`
+  - 补前端交互测试。
+- `packages/studio/src/hooks/use-api.ts`
+  - 可继续复用。
+- 可新增：
+  - `packages/studio/src/components/narrative-graph/NarrativePatchQueue.tsx`
+  - `packages/studio/src/components/narrative-graph/ImpactAnalysisDrawer.tsx`
+  - `packages/studio/src/components/narrative-graph/GraphActionPanel.tsx`
+  - `packages/studio/src/components/narrative-graph/SteeringPreviewCard.tsx`
+
+---
+
+## 5. 后端设计
+
+### 5.1 Patch 状态机
+
+建议明确状态流：
+
+```ts
+draft
+  -> impact_analyzed
+  -> applied
+  -> consumed
+  -> partially_consumed
+  -> rolled_back
+  -> rejected
+```
+
+含义：
+
+- `draft`: 还没做影响分析，通常暂不用。
+- `impact_analyzed`: 已生成影响分析，但用户还没确认。
+- `applied`: 用户已确认，允许进入 write-next。
+- `consumed`: 下一章已完全体现。
+- `partially_consumed`: 下一章部分体现，后续不自动注入或可按策略继续。
+- `rolled_back`: 已回滚。
+- `rejected`: 用户拒绝。
+
+### 5.2 getUnconsumedPatches 修正
+
+当前危险点：
+
+```ts
+return patches.filter((p) =>
+  p.status === "applied" ||
+  p.status === "impact_analyzed" ||
+  p.status === "approved"
+);
+```
+
+必须改为：
+
+```ts
+return patches.filter((p) => p.status === "applied");
+```
+
+如果需要 preview，新增独立方法：
+
+```ts
+getPreviewablePatches(bookId): impact_analyzed | approved | applied
+```
+
+正式 write-next 只能用 applied。
+
+### 5.3 API 设计
+
+已有 API 可以保留，但建议增强。
+
+#### 获取图谱
+
+```http
+GET /api/books/:id/narrative-graph
+```
+
+返回：
+
+```ts
+{
+  graph: NarrativeGraph;
+  patches: NarrativeGraphPatchSummary[];
+}
+```
+
+也可以继续分开请求 patches。
+
+#### 创建 patch
+
+```http
+POST /api/books/:id/narrative-graph/patches
+```
+
+请求：
+
+```ts
+{
+  operations: NarrativeGraphOperation[];
+  reason: string;
+  source?: "node-action" | "edge-action" | "freeform";
+  actionLabel?: string;
+}
+```
+
+返回：
+
+```ts
+{
+  patch: NarrativeGraphPatch;
+}
+```
+
+要求：
+
+- 自动生成 impactAnalysis。
+- status 为 `impact_analyzed`。
+- 不修改 graph。
+- 不进入 write-next。
+
+#### 应用 patch
+
+```http
+POST /api/books/:id/narrative-graph/patches/:patchId/apply
+```
+
+返回：
+
+```ts
+{
+  ok: true;
+  graph: NarrativeGraph;
+  patch: NarrativeGraphPatch;
+}
+```
+
+要求：
+
+- status 变为 `applied`。
+- 修改 narrative_graph.json。
+- patch JSONL 追加 applied entry。
+- applied patch 可进入 write-next。
+
+#### 回滚 patch
+
+```http
+POST /api/books/:id/narrative-graph/patches/:patchId/rollback
+```
+
+要求：
+
+- graph 恢复。
+- patch 状态变 `rolled_back`。
+- rolled_back patch 不进入 write-next。
+
+#### 预览 steering
+
+```http
+POST /api/books/:id/narrative-graph/patches/:patchId/compile-steering
+```
+
+请求：
+
+```ts
+{
+  includeDraft?: boolean;
+}
+```
+
+返回：
+
+```ts
+{
+  steering: GraphSteeringResult;
+  previewOnly: boolean;
+}
+```
+
+规则：
+
+- 默认只编译 applied。
+- 如果 patch 未 applied，除非 `includeDraft: true`，否则返回空或 409。
+- `includeDraft: true` 时返回 `previewOnly: true`。
+
+### 5.4 ImpactAnalysis 智能化
+
+当前 impact 不能太机械。要根据 operation 类型推导剧情含义。
+
+#### relationship / edge update
+
+如果 edge type 是：
+
+- `tests`
+- `loves`
+- `protects`
+- `betrays`
+- `owes`
+- `hides`
+- `misjudges`
+
+生成：
+
+```ts
+nextChapterSteeringHints: {
+  mustInclude: [
+    "体现关系变化：林清雪主动试探万凡"
+  ],
+  mustAvoid: [
+    "不要只用旁白总结关系变化",
+    "不要让林清雪无理由完全信任万凡"
+  ],
+  sceneBeats: [
+    "林清雪主动制造一次与万凡的接触",
+    "万凡察觉试探并做出反制或选择",
+    "双方关系出现新的信息差"
+  ],
+  payoffRequired: "万凡通过信息差获得局部主动",
+  endingHook: "试探引出新的误判或隐藏秘密"
+}
+```
+
+#### hook node
+
+如果 hook 被标记为下一章兑现：
+
+```ts
+mustInclude: ["伏笔实体或线索必须出现"]
+sceneBeats: ["角色主动触发该伏笔"]
+payoffRequired: "伏笔必须推进或部分兑现"
+endingHook: "伏笔兑现后引出更大问题"
+```
+
+#### secret node
+
+```ts
+mustInclude: ["秘密被部分暴露或被误解"]
+mustAvoid: ["直接完整揭露全部真相"]
+sceneBeats: ["某角色获得不完整信息并做出错误判断"]
+endingHook: "秘密的另一层仍未揭开"
+```
+
+#### conflict node
+
+```ts
+mustInclude: ["冲突必须升级为可见行动"]
+mustAvoid: ["主角只分析不行动"]
+sceneBeats: ["对手施压", "主角主动选择", "选择带来代价"]
+payoffRequired: "主角用行动扳回一局"
+```
+
+### 5.5 Graph-to-Steering Compiler
+
+必须输出 patch-level requirements：
+
+```ts
+interface PatchRequirements {
+  patchId: string;
+  mustInclude: string[];
+  mustAvoid: string[];
+  sceneBeats: string[];
+  payoffRequired?: string;
+  endingHook?: string;
+}
+```
+
+用于 verification 后决定：
+
+- consumed
+- partially_consumed
+- pending
+
+### 5.6 write-next 接入规则
+
+在 `/api/books/:id/write-next` 中：
+
+1. 读取 `getUnconsumedPatches(id)`。
+2. 编译 steering。
+3. 合并进 `steeringContract`。
+4. `sourceArtifactIds` 包含 patchId。
+5. 写完后验证：
+   - mustInclude
+   - mustAvoid
+   - sceneBeats
+   - payoff
+   - endingHook
+6. 生成 `graphPatchConsumption`。
+7. 对 consumed/partially_consumed patch 更新状态。
+8. pending 保留 applied，等待后续章节继续兑现。
+
+---
+
+## 6. 前端设计
+
+### 6.1 页面定位
+
+页面名：剧情驾驶舱 / Narrative Cockpit
+
+布局：
+
+```text
+┌───────────────────────────────────────────────┐
+│ 顶部：书籍选择 / 搜索 / 图层 / 生成下一章       │
+├──────────────┬───────────────────┬────────────┤
+│ 左侧图层栏    │ 中央图谱画布        │ 右侧控制面板 │
+│ 人物/伏笔/规则│ 节点、边、关系强度   │ 节点详情     │
+│ 时间线/冲突   │ 高亮影响路径         │ 操作按钮     │
+├──────────────┴───────────────────┴────────────┤
+│ 底部：Patch Queue / Impact Preview / Steering │
+└───────────────────────────────────────────────┘
+```
+
+### 6.2 顶部栏
+
+内容：
+
+- 书籍选择
+- 搜索人物/伏笔/秘密
+- 图层开关
+- “刷新图谱”
+- “查看待应用变更”
+- “从已应用变更写下一章”
+
+按钮状态：
+
+- 如果没有 applied patch：
+  - “从已应用变更写下一章” disabled
+  - tooltip: “请先确认至少一个图谱变更”
+- 如果有 applied patch：
+  - 显示数量：`3 个变更待正文兑现`
+
+### 6.3 中央图谱画布
+
+要求：
+
+- 节点颜色按类型区分。
+- applied patch 影响到的节点/边要高亮。
+- impact_analyzed 但未 apply 的变更用虚线或黄色外圈提示。
+- consumed patch 对应节点显示绿色标记。
+- pending patch 显示橙色标记。
+
+交互：
+
+- 点击节点：右侧显示 Node Control Panel。
+- 点击边：右侧显示 Relationship Control Panel。
+- hover 节点：显示摘要和证据来源。
+- 搜索后高亮命中节点。
+
+### 6.4 右侧 Node Control Panel
+
+#### 顶部
+
+显示：
+
+- 类型徽章
+- label
+- summary
+- status
+- confidence
+- evidence
+
+#### 中部：剧情动作
+
+不同类型显示不同动作。
+
+人物节点：
+
+- 强化主动目标
+- 制造误判
+- 下一章主动行动
+- 暴露一个弱点
+- 与某人关系升级
+
+伏笔节点：
+
+- 下一章兑现
+- 延后兑现
+- 升级风险
+- 与某人物绑定
+
+秘密节点：
+
+- 部分暴露
+- 被错误理解
+- 让反派先知道
+- 作为章尾钩子
+
+冲突节点：
+
+- 下一章升级
+- 转成正面对抗
+- 转成关系撕裂
+- 让主角主动破局
+
+关系边：
+
+- 改为主动试探
+- 改为短暂合作
+- 改为互相利用
+- 改为保护但隐瞒
+- 改为误判加深
+
+### 6.5 Action Builder
+
+点击动作后弹一个小配置框，不要直接提交。
+
+例如“改为主动试探”：
+
+字段：
+
+- 目标关系描述：默认“林清雪主动试探万凡”
+- 下一章必须出现：默认自动填
+- 不允许出现：默认自动填
+- 期望爽点：默认自动填
+- 风险等级：自动估算
+- 备注：用户可写
+
+按钮：
+
+- “生成影响分析”
+- “取消”
+
+这样用户会觉得自己在导演，而不是点魔法按钮。
+
+### 6.6 Impact Drawer
+
+生成 patch 后打开。
+
+内容分区：
+
+#### 你刚刚改变了什么
+
+```text
+关系变化：
+林清雪 -> 万凡
+从：谨慎观察
+到：主动试探合作
+```
+
+#### 影响范围
+
+- 影响人物：林清雪、万凡
+- 影响伏笔：铜镜秘密、系统异常
+- 影响章节：第 24-26 章
+- 风险：medium
+
+#### 可能矛盾
+
+列出 contradictions：
+
+- 林清雪不能无理由完全信任万凡
+- 万凡不能被动等待她来推动剧情
+
+#### 下一章硬约束预览
+
+```text
+Must Include
+- 林清雪主动找万凡
+- 林清雪进行一次试探
+- 万凡识破部分试探
+
+Must Avoid
+- 林清雪无理由完全信任万凡
+- 万凡被动等待消息
+
+Scene Beats
+1. 林清雪主动制造接触
+2. 万凡察觉试探
+3. 双方因信息差发生反转
+4. 关系进入合作但互防状态
+```
+
+#### 推荐戏剧蓝图
+
+显示 3-6 个 beats：
+
+1. 开场钩子
+2. 压力
+3. 主动选择
+4. 反转
+5. 爽点
+6. 章尾钩子
+
+按钮：
+
+- “确认应用”
+- “只保存为草稿”
+- “编辑约束”
+- “放弃变更”
+
+### 6.7 Patch Queue
+
+每个 patch 卡片：
+
+- 状态：
+  - 待确认
+  - 已应用，待正文兑现
+  - 已兑现
+  - 部分兑现
+  - 已回滚
+- 风险等级
+- reason
+- nextChapterSteeringHints 摘要
+- 操作按钮：
+  - 预览约束
+  - 确认应用
+  - 回滚
+  - 从该变更写下一章
+
+### 6.8 写完后的反馈
+
+Verification card 中必须展示：
+
+```text
+图谱变更兑现情况
+
+✅ patch_123 林清雪主动试探合作
+已兑现：
+- 林清雪主动找万凡
+- 发生一次试探
+证据：
+“林清雪没有等万凡联系，而是直接推开地下室的门……”
+
+🟡 patch_456 铜镜伏笔
+部分兑现：
+- 铜镜出现了
+未兑现：
+- 没有引出新的误判
+建议：
+下一章继续推进
+```
+
+---
+
+## 7. 鲁棒性要求
+
+### 7.1 API 失败
+
+前端要处理：
+
+- 创建 patch 失败
+- apply 失败
+- rollback 失败
+- compile-steering 失败
+- write-next 失败
+
+显示：
+
+- 明确错误
+- 可重试
+- 不丢失当前用户输入
+
+### 7.2 冲突 patch
+
+如果两个未应用 patch 互相矛盾：
+
+- Impact Drawer 必须显示 contradiction。
+- 高风险 patch 需要二次确认。
+- critical patch 不允许直接 apply，除非用户强制。
+
+### 7.3 旧图谱兼容
+
+如果 narrative graph 为空：
+
+- 从旧 story graph 派生显示。
+- UI 提示：“当前为自动派生图谱，首次应用变更后会保存为 Narrative Graph。”
+- 不要空白页。
+
+### 7.4 并发/重复点击
+
+- apply 按钮 loading 时禁用。
+- 同一个 patch 不可重复 apply。
+- consumed patch 不可 rollback，或 rollback 时要明确提示会影响历史写作状态。
+
+---
+
+## 8. 验收标准
+
+### 8.1 后端验收
+
+必须通过：
+
+1. 创建 patch 后状态为 `impact_analyzed`。
+2. 未 apply patch 不进入 `getUnconsumedPatches`。
+3. apply 后进入 `getUnconsumedPatches`。
+4. rollback 后不进入 `getUnconsumedPatches`。
+5. consumed 后不进入 `getUnconsumedPatches`。
+6. compile-steering 默认只编译 applied。
+7. includeDraft preview 可编译未应用 patch，但返回 `previewOnly: true`。
+8. relationship patch 能生成 mustInclude/mustAvoid/sceneBeats。
+9. hook patch 能生成 payoffRequired。
+10. write-next 能消费 applied patch。
+11. verification 能输出 patch-level consumption reason。
+
+### 8.2 前端验收
+
+用户能完成：
+
+1. 打开剧情驾驶舱。
+2. 选择书。
+3. 点击人物或关系。
+4. 选择剧情动作。
+5. 编辑动作参数。
+6. 生成影响分析。
+7. 在 Patch Queue 中看到真实 patch。
+8. 点击预览约束。
+9. 点击确认应用。
+10. applied patch 高亮。
+11. 点击“从已应用变更写下一章”。
+12. 写完后看到兑现情况。
+
+### 8.3 端到端验收
+
+固定场景：
+
+> 把林清雪对万凡的关系改成“主动试探合作”。
+
+必须满足：
+
+1. 创建 patch。
+2. impactAnalysis 包含林清雪、万凡。
+3. mustInclude 包含“林清雪主动试探万凡”。
+4. mustAvoid 包含“林清雪无理由完全信任万凡”。
+5. apply 后 write-next contract 包含 patchId。
+6. writer prompt 或 externalContext 包含该关系变化。
+7. verification 显示 patch consumed 或 pending。
+8. 若 pending，必须说明缺失项。
+
+### 8.4 测试命令
+
+必须通过：
+
+```bash
+pnpm --filter @actalk/inkos-studio typecheck
+pnpm --filter @actalk/inkos-studio test
+pnpm --filter @actalk/inkos-core typecheck
+```
+
+如果改 core：
+
+```bash
+pnpm --filter @actalk/inkos-core test
+```
+
+---

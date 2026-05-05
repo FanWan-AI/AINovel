@@ -21,7 +21,8 @@ export type AssistantArtifactType =
   | "impact_analysis"
   | "quality_report"
   | "contract_verification"
-  | "blueprint_fulfillment_report";
+  | "blueprint_fulfillment_report"
+  | "editor_report";
 
 export interface AssistantArtifact {
   readonly artifactId: string;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StringKey } from "./use-i18n";
 
-export type ChapterRunActionType = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "resync" | "chapter-redesign";
+export type ChapterRunActionType = "spot-fix" | "polish" | "rework" | "rewrite" | "anti-detect" | "resync" | "chapter-redesign" | "blueprint-targeted-revise";
 export type ChapterRunStatus = "running" | "success" | "failed" | "unchanged";
 export type ChapterLifecycleAction = "revise" | "rewrite" | "anti-detect" | "resync";
 export type ChapterLifecycleStage = "success" | "fail" | "unchanged";
@@ -16,6 +16,8 @@ export interface ChapterRunRecord {
   readonly durationMs?: number;
   readonly briefSummary?: string;
   readonly reason?: string;
+  /** P5 blueprint-targeted-revise: status of the candidate revision ("ready-for-review" | "audit-failed") */
+  readonly candidateStatus?: "ready-for-review" | "audit-failed";
 }
 
 interface StartChapterRunInput {
@@ -83,6 +85,9 @@ function normalizeRuns(data: unknown): ReadonlyArray<ChapterRunRecord> {
       durationMs: typeof entry.durationMs === "number" ? entry.durationMs : undefined,
       briefSummary: trimSummary(entry.briefSummary),
       reason: trimSummary(entry.reason),
+      candidateStatus: entry.candidateStatus === "ready-for-review" || entry.candidateStatus === "audit-failed"
+        ? entry.candidateStatus
+        : undefined,
     });
   }
   return runs.sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_STORED_RUNS);

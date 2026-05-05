@@ -11,12 +11,17 @@ import {
   loadProjectConfig,
   ChapterBlueprintSchema,
   auditBlueprintFulfillment,
+  TargetedBlueprintReviser,
+  generateBlueprintEditorReport,
+  type BlueprintEditorReport,
+  type TargetedReviseOutput,
   type PipelineConfig,
   type ChapterBlueprint,
   type ProjectConfig,
   type RunPlan,
   type LogSink,
   type LogEntry,
+  type LengthNormalizationSnapshot,
   type BlueprintFulfillmentReport,
 } from "@actalk/inkos-core";
 import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
@@ -102,6 +107,29 @@ interface GraphPatchConsumption {
   consumed: string[];
   pending: string[];
   partiallyConsumed: string[];
+}
+
+/** P5 auto-revision result included in write-next:verification when a blueprint re-write loop ran. */
+interface P5AutoRevisionResult {
+  editorReport?: BlueprintEditorReport;
+  appliedFixes?: ReadonlyArray<string>;
+  revisedBlueprintFulfillment?: BlueprintFulfillmentReport;
+  /**
+   * "candidate_pending_approval" — revised content saved as a chapter-run candidate awaiting user approval.
+   * "still-failing" — revised content saved as a candidate but re-audit still shows blueprint/contract issues.
+   * "failed" — LLM revision threw an error; no candidate was created.
+   */
+  status: "candidate_pending_approval" | "still-failing" | "failed";
+  /** runId of the created chapter-run candidate (absent only when status is "failed"). */
+  runId?: string;
+  /** Error message when status is "failed". */
+  error?: string;
+  /** Result of re-running contract verification on the revised text (present when a steeringContract was active). */
+  contractVerificationAfter?: {
+    readonly satisfactionRate: number;
+    readonly shouldRewrite: boolean;
+    readonly missingRequirements: ReadonlyArray<string>;
+  };
 }
 import type { NarrativeGraphOperation } from "./schemas/narrative-graph-schema.js";
 import {
@@ -1052,7 +1080,7 @@ interface AssistantMetricsResponse {
 
 const ASSISTANT_AUDIT_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 const ASSISTANT_OPTIMIZE_PATTERN = /修复|优化|optimi[sz]e|fix|改写/iu;
-const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|下一章.*写|继续写|续写|写.*下一章|write[-\s]?next|continue\s*writing/iu;
+const ASSISTANT_WRITE_NEXT_PATTERN = /写下一章|下一章(?!.{0,20}(?:写什么|写啥|写哪)).*写|继续写|续写|写.*下一章|落实下一章|按.{0,15}(?:设计|方案|规划).{0,10}(?:写|生成|落实|执行)|write[-\s]?next|continue\s*writing/iu;
 const ASSISTANT_DRAFT_PATTERN = /write[\s_-]?draft|写.*草稿|草稿|执行.*write/iu;
 const ASSISTANT_GENERATE_STRUCTURE_PATTERN = /生成.*结构|初始化.*大纲|蓝图|generate.*structure|create.*outline/iu;
 const ASSISTANT_RELEASE_CANDIDATE_PATTERN = /发布候选|release\s*candidate|可发布|候选确认/iu;
@@ -1067,7 +1095,7 @@ const ASSISTANT_CRUD_DIMENSION_HOOK_PATTERN = /伏笔|hook/iu;
 const ASSISTANT_CRUD_RUN_ID_PATTERN = /(run[_-][a-z0-9-]+)/iu;
 const ASSISTANT_CRUD_RESTORE_ID_PATTERN = /(asst_restore_[a-z0-9]+)/iu;
 const ASSISTANT_INTERNAL_API_BASE = "http://localhost";
-const ASSISTANT_CHAPTER_ZH_PATTERN = /第\s*(\d+)\s*章/u;
+const ASSISTANT_CHAPTER_ZH_PATTERN = /(?:第\s*)?(\d+)\s*章/u;
 const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
 const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
@@ -1229,6 +1257,173 @@ function buildBlueprintFromContract(
   };
 }
 
+const ASSISTANT_CHAPTER_PLAN_RESPONSE_RE = /(?:下一章|第\s*\d+\s*章).{0,20}(?:设计方案|方案|怎么写|规划|章段|核心爽点|设计|全新设计)/u;
+const ASSISTANT_PLAN_REFERENCE_RE = /(?:按|按照|照|就按|采用|执行).{0,10}(?:你|刚才|上面|这个|那个)?.{0,10}(?:设计方案|方案|规划|思路|设计).{0,12}(?:写|执行|生成|下一章|章节|落实)/u;
+const ASSISTANT_PLAN_ACCEPTANCE_RE = /(?:喜欢|认可|确认|同意|可以|就这样|没问题|按这个|按你的|按你这个|按照这个|按照你的).{0,30}(?:设计|方案|规划|思路|下一章|章节).{0,30}(?:写|去写|开始|执行|生成|下一章|章节)/u;
+
+function uniqueStrings(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+function shouldPersistChapterPlanArtifact(userText: string, responseText: string): boolean {
+  const combined = `${userText}\n${responseText}`;
+  if (!ASSISTANT_CHAPTER_PLAN_RESPONSE_RE.test(combined)) return false;
+  return /(?:第一|第二|第三|第四|第五|第六|开篇|章末|场景|爽点|系统|钩子|冲突|反转|payoff|hook)/u.test(responseText);
+}
+
+function normalizeChapterPlanLine(line: string): string {
+  return line
+    .replace(/^\s{0,3}(?:#{1,6}|[-*]|\d+[.)、]|[①②③④⑤⑥⑦⑧⑨⑩])\s*/u, "")
+    .replace(/\*\*/g, "")
+    .trim();
+}
+
+function isChapterPlanNoiseLine(line: string): boolean {
+  if (line.length < 4) return true;
+  if (/^(?:好的|好，|老板|我理解|我明白|你要的是|核心升级点|核心背景|时间\/地点\/状态|时间|地点|状态|设计思路|剧情框架|爽点类型|具体设计|本章结论|维度|章节类型|外部冲突|内部张力|身体细节|魅惑语言|下一章入口)$/u.test(line)) return true;
+  if (/^(?:---+|\|?\s*:?-{2,}:?\s*\|)/u.test(line)) return true;
+  if (/^\|.*\|$/u.test(line)) return true;
+  if (/^(?:如果|要不要|你觉得|确认后|满意的话|随时说|我直接|需要我)/u.test(line)) return true;
+  return false;
+}
+
+function isChapterPlanSceneHeading(line: string): boolean {
+  return /^(?:第[一二三四五六七八九十]+(?:段|章段|阶段|幕)|场景[一二三四五六七八九十\d]+|开篇|章末|结尾|高潮|反转|钩子|第一轮|第二轮|第三轮|第四轮|第五轮|第六轮)/u.test(line);
+}
+
+function trimChapterPlanBeat(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+function extractChapterPlanSceneBeats(text: string): string[] {
+  const rawLines = text
+    .split(/\r?\n/)
+    .map(normalizeChapterPlanLine)
+    .filter((line) => line.length > 0 && !isChapterPlanNoiseLine(line));
+
+  const beats: string[] = [];
+  for (let i = 0; i < rawLines.length; i += 1) {
+    const line = rawLines[i]!;
+    const isHeading = isChapterPlanSceneHeading(line)
+      || /(?:场景|章段|冲突|反转|交锋|升级|兑现|危机|回收|钩子)/u.test(line);
+    if (!isHeading) continue;
+
+    const detailLines: string[] = [];
+    for (let j = i + 1; j < rawLines.length && detailLines.length < 6; j += 1) {
+      const next = rawLines[j]!;
+      if (isChapterPlanSceneHeading(next)) break;
+      if (isChapterPlanNoiseLine(next)) continue;
+      if (/^(?:🔥|⭐|✅|⚠️|🎯|📊|💡|核心|说明|男频爽点|视觉爽点)/u.test(next)) continue;
+      detailLines.push(next);
+    }
+
+    const beat = detailLines.length > 0
+      ? `${line}：${detailLines.join("；")}`
+      : line;
+    beats.push(trimChapterPlanBeat(beat));
+  }
+
+  if (beats.length === 0) {
+    for (const line of rawLines) {
+      if (/(?:必须|规矩|轮流|同时|全裸|赴约|主角|女主|系统|钩子|冲突|反转|交锋|升级|兑现|危机|回收)/u.test(line)) {
+        beats.push(trimChapterPlanBeat(line));
+      }
+    }
+  }
+
+  return uniqueStrings(beats).slice(0, 8);
+}
+
+function extractChapterPlanGoal(text: string): string | undefined {
+  const titleMatch = text.match(/第\s*\d+\s*章.{0,20}(?:《([^》]{2,40})》|方案[:：]\s*([^\n]{2,80}))/u);
+  const title = titleMatch?.[1] ?? titleMatch?.[2];
+  if (title) return title.trim();
+  const firstBeat = extractChapterPlanSceneBeats(text)[0];
+  return firstBeat ? firstBeat.slice(0, 80) : undefined;
+}
+
+function compactAssistantRecentMessageForAgentContext(
+  message: { role: "user" | "assistant"; content: string },
+  options: { preserveDetail?: boolean } = {},
+): string {
+  const roleLabel = message.role === "user" ? "用户" : "助手";
+  const content = message.content.trim();
+  if (content.length === 0) return `${roleLabel}：（空）`;
+
+  if (options.preserveDetail) {
+    return `${roleLabel}：${content}`;
+  }
+
+  if (message.role === "assistant" && shouldPersistChapterPlanArtifact("", content)) {
+    const goal = extractChapterPlanGoal(content);
+    const sceneBeats = extractChapterPlanSceneBeats(content).slice(0, 5);
+    const lines = [
+      `${roleLabel}：上一轮章节方案摘要${goal ? `：${goal}` : ""}`,
+      ...sceneBeats.map((beat) => `- ${beat}`),
+    ];
+    return lines.join("\n").slice(0, 1_000);
+  }
+
+  const compact = content.replace(/\s{3,}/g, " ").slice(0, 900);
+  return `${roleLabel}：${compact}${content.length > 900 ? "…" : ""}`;
+}
+
+function normalizeForRepeatedResponseCompare(value: string): string {
+  return value.replace(/\s+/g, "").replace(/[，。！？、：:；;'"“”‘’`*#\-—·（）()[\]{}<>《》「」]/g, "");
+}
+
+function dedupeRepeatedAssistantResponse(responseText: string): string {
+  const text = responseText.trim();
+  if (text.length < 100) return text;
+
+  const headingMatches = [...text.matchAll(/(?:^|\n)\s*(?:#{1,6}\s*)?(第\s*(\d+)\s*章.{0,50}(?:设计方案|方案)[^\n]*)/gu)];
+  const seenHeadings = new Map<string, number>();
+  const seenChapterPlanNumbers = new Map<string, number>();
+  for (const match of headingMatches) {
+    const heading = normalizeForRepeatedResponseCompare(match[1] ?? "");
+    const chapterNumber = match[2];
+    const start = match.index ?? 0;
+    if (chapterNumber) {
+      const firstChapterPlanStart = seenChapterPlanNumbers.get(chapterNumber);
+      if (firstChapterPlanStart !== undefined && start - firstChapterPlanStart > 50) {
+        return text.slice(0, start).trim();
+      }
+      seenChapterPlanNumbers.set(chapterNumber, start);
+    }
+    if (heading.length < 6) continue;
+    const firstStart = seenHeadings.get(heading);
+    if (firstStart !== undefined && start - firstStart > 50) {
+      return text.slice(0, start).trim();
+    }
+    seenHeadings.set(heading, start);
+  }
+
+  const midpoint = Math.floor(text.length / 2);
+  const maxOffset = Math.min(500, Math.floor(text.length * 0.08));
+  for (let offset = -maxOffset; offset <= maxOffset; offset += 20) {
+    const splitAt = midpoint + offset;
+    if (splitAt < 500 || splitAt >= text.length - 500) continue;
+    const left = text.slice(0, splitAt).trim();
+    const right = text.slice(splitAt).trim();
+    if (normalizeForRepeatedResponseCompare(left) === normalizeForRepeatedResponseCompare(right)) {
+      return left;
+    }
+  }
+
+  return text;
+}
+
+function isMetaWritingQualityRequirement(value: string): boolean {
+  return /(?:观众|读者|写得|写不好|细节|动作|神态|描写|文笔|质量|爽|撩|逼真|漏骨|沦陷|毁灭)/u.test(value);
+}
+
+function isExplicitChapterPlanAcceptance(input: string): boolean {
+  return ASSISTANT_PLAN_ACCEPTANCE_RE.test(input) || (
+    ASSISTANT_PLAN_REFERENCE_RE.test(input)
+    && /(?:喜欢|认可|确认|同意|可以|就这样|没问题|去写|写下一章|开始写|执行)/u.test(input)
+  );
+}
+
 function buildSteeringResponseText(
   contract: { mustInclude: ReadonlyArray<string>; mustAvoid: ReadonlyArray<string>; priority: string; sourceArtifactIds: ReadonlyArray<string> },
   blueprint: { scenes: ReadonlyArray<unknown> },
@@ -1286,10 +1481,16 @@ async function loadLatestSteeringArtifacts(
   };
   try {
     const artifacts = sessionId ? await svc.listRecentSessionArtifacts(sessionId, 50) : [];
+    // Track creation times so we can prefer a newer chapter_plan over an older steering contract
+    let latestContractCreatedAt: string | undefined;
     for (const art of artifacts) {
       if (art.type === "chapter_steering_contract" && !result.contract) {
         const full = await svc.getById(art.artifactId, sessionId, bookId);
-        if (full) { result.contract = full.payload; result.sourceArtifactIds.push(art.artifactId); }
+        if (full) {
+          result.contract = full.payload;
+          result.sourceArtifactIds.push(art.artifactId);
+          latestContractCreatedAt = art.createdAt;
+        }
       }
       if (art.type === "chapter_blueprint" && !result.blueprint) {
         const full = await svc.getById(art.artifactId, sessionId, bookId);
@@ -1305,6 +1506,52 @@ async function loadLatestSteeringArtifacts(
             result.pendingBlueprintStatus = typeof full.payload.status === "string" ? full.payload.status : "draft";
           }
         }
+      }
+    }
+    // If a chapter_plan artifact exists that is NEWER than the loaded steering contract,
+    // it means the user asked the agent to design a new chapter AFTER the previous write.
+    // In that case, override result.contract with the newer design plan.
+    // Also handles the fallback when no contract/blueprint was found at all.
+    const shouldCheckChapterPlan = !result.blueprint && (
+      !result.contract ||        // no contract found: use chapter_plan as fallback
+      latestContractCreatedAt !== undefined  // contract found but may be outdated
+    );
+    if (shouldCheckChapterPlan) {
+      for (const art of artifacts) {
+        if (art.type !== "chapter_plan") continue;
+        // Only override an existing contract if this plan is strictly newer
+        if (result.contract && latestContractCreatedAt !== undefined && art.createdAt <= latestContractCreatedAt) continue;
+        const full = await svc.getById(art.artifactId, sessionId, bookId);
+        if (!full) continue;
+        const payload = full.payload as Record<string, unknown>;
+        const planText = typeof payload.response === "string"
+          ? payload.response
+          : (full.searchableText ?? "");
+        if (!planText.trim()) continue;
+        const payloadBeats = Array.isArray(payload.sceneBeats)
+          ? (payload.sceneBeats as unknown[]).filter((v): v is string => typeof v === "string")
+          : [];
+        const sceneBeats = uniqueStrings([
+          ...payloadBeats,
+          ...extractChapterPlanSceneBeats(planText),
+        ]);
+        const goal = typeof payload.goal === "string"
+          ? payload.goal
+          : extractChapterPlanGoal(planText);
+        result.contract = {
+          priority: "hard",
+          mustInclude: sceneBeats.slice(0, 6),
+          mustAvoid: [] as string[],
+          sceneBeats,
+          ...(goal ? { goal } : {}),
+          rawRequest: planText.slice(0, 8000),
+          sourceArtifactIds: [art.artifactId],
+          userContractPriority: "hard",
+        };
+        // When overriding a stale steering contract, replace it in sourceArtifactIds
+        // (remove old contract id and add the new plan id)
+        result.sourceArtifactIds = [art.artifactId];
+        break;
       }
     }
   } catch { /* best-effort */ }
@@ -1393,6 +1640,9 @@ function resolveAssistantPlanIntent(input: string): AssistantPlanIntent | null {
   // "写下一章" and "write_draft" both map to write_next
   if (ASSISTANT_WRITE_NEXT_PATTERN.test(normalized) || ASSISTANT_DRAFT_PATTERN.test(normalized)) {
     return "write_next";
+  }
+  if (ASSISTANT_REVISE_INTENT_PATTERN.test(normalized)) {
+    return "audit_and_optimize";
   }
   if (ASSISTANT_AUDIT_PATTERN.test(normalized) && ASSISTANT_OPTIMIZE_PATTERN.test(normalized)) {
     return "audit_and_optimize";
@@ -2026,7 +2276,7 @@ function parseAssistantCrudReadBody(rawBody: unknown): { ok: true; value: { dime
   const body = rawBody as Record<string, unknown>;
   const dimension = typeof body.dimension === "string" ? body.dimension.trim() : "";
   const bookId = typeof body.bookId === "string" ? body.bookId.trim() : "";
-  const chapter = typeof body.chapter === "number" ? body.chapter : Number.NaN;
+  const chapter = typeof body.chapter === "number" ? body.chapter : undefined;
   const errors: Array<{ field: string; message: string }> = [];
   if (dimension !== "book" && dimension !== "volume" && dimension !== "chapter" && dimension !== "character" && dimension !== "hook") {
     errors.push({ field: "dimension", message: "dimension must be one of book/volume/chapter/character/hook" });
@@ -2646,6 +2896,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   function toChapterRunResponse(run: ChapterRunRecord): Record<string, unknown> {
+    const candidate = extractCandidateRevision(run);
     return {
       runId: run.runId,
       bookId: run.bookId,
@@ -2658,6 +2909,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
       error: run.error,
+      ...(candidate ? {
+        candidateStatus: candidate.status,
+        candidateAuditIssues: [...candidate.auditIssues],
+      } : {}),
     };
   }
 
@@ -2915,6 +3170,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             if (!response.ok) {
               throw new Error(await parseApiErrorMessage(response));
             }
+            // After plan-next succeeds, update the draft blueprint artifact bound to the
+            // cp1 checkpoint (if any) so the blueprint preview reflects the new plan goal/
+            // conflicts AND the user's original instruction. Without this, cp1 shows the
+            // old draft blueprint created *before* the user gave their answers.
+            try {
+              const planBody = await response.clone().json() as Record<string, unknown>;
+              const planResult = typeof planBody.plan === "object" && planBody.plan !== null
+                ? planBody.plan as Record<string, unknown>
+                : null;
+              if (planResult && context.sessionId) {
+                const taskGraph = assistantTaskGraphs.get(context.taskId);
+                const cpNode = taskGraph?.nodes.find(
+                  (n) => n.type === "checkpoint" && n.mode === "blueprint-confirm",
+                );
+                const bpArtifactId = cpNode?.checkpoint?.blueprintArtifactId;
+                if (bpArtifactId) {
+                  const existing = await artifactService.getById(bpArtifactId, context.sessionId);
+                  if (existing && existing.payload.status !== "confirmed") {
+                    const planGoal = typeof planResult.goal === "string" ? planResult.goal : undefined;
+                    const planConflicts = Array.isArray(planResult.conflicts) ? planResult.conflicts as string[] : [];
+                    const updatedPayload: Record<string, unknown> = {
+                      ...existing.payload,
+                      ...(planGoal ? { planGoal } : {}),
+                      ...(planConflicts.length > 0 ? { planConflicts } : {}),
+                      ...(node.planInput ? { userInstruction: node.planInput } : {}),
+                    };
+                    await artifactService.update(bpArtifactId, context.sessionId, {
+                      payload: updatedPayload,
+                      summary: `Blueprint (plan-updated): ${planGoal ?? "no goal"}`,
+                      searchableText: `${node.planInput ?? ""}\n${planGoal ?? ""}\n${planConflicts.join(" ")}`,
+                    });
+                  }
+                }
+              }
+            } catch { /* best-effort: do not fail plan-next if the update fails */ }
           },
         };
       }
@@ -4328,6 +4618,48 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   }
 
+  async function recordLengthNormalizationVersionRuns(
+    bookId: string,
+    chapterNumber: number,
+    snapshots: ReadonlyArray<LengthNormalizationSnapshot> | undefined,
+  ): Promise<void> {
+    const appliedSnapshots = (snapshots ?? []).filter((snapshot) =>
+      snapshot.applied
+      && snapshot.beforeContent.trim().length > 0
+      && snapshot.afterContent.trim().length > 0
+      && snapshot.beforeContent.trim() !== snapshot.afterContent.trim()
+    );
+    for (const snapshot of appliedSnapshots) {
+      try {
+        const run = await chapterRunStore.createRun({
+          bookId,
+          chapter: chapterNumber,
+          actionType: "length-normalize",
+          appliedBrief: `审计前字数归一化 ${snapshot.beforeCount} -> ${snapshot.afterCount}`,
+        });
+        await completeChapterRun({
+          bookId,
+          runId: run.runId,
+          status: "succeeded",
+          decision: "applied",
+          data: {
+            beforeContent: snapshot.beforeContent,
+            afterContent: snapshot.afterContent,
+            lengthNormalization: {
+              stage: snapshot.stage,
+              mode: snapshot.mode,
+              beforeCount: snapshot.beforeCount,
+              afterCount: snapshot.afterCount,
+              applied: snapshot.applied,
+            },
+          },
+        });
+      } catch {
+        // Best-effort transparency record; never fail the write itself.
+      }
+    }
+  }
+
   // --- Books ---
 
   app.get("/api/books", async (c) => {
@@ -4800,7 +5132,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
 
     // Shared SSE callbacks used by all mode branches.
-    type WriteResult = { chapterNumber: number; status: string; title: string; wordCount: number };
+    type WriteResult = {
+      chapterNumber: number;
+      status: string;
+      title: string;
+      wordCount: number;
+      lengthNormalizationSnapshots?: ReadonlyArray<LengthNormalizationSnapshot>;
+    };
     const onWriteComplete = async (result: WriteResult): Promise<void> => {
       const baseDetails = { status: result.status, title: result.title, wordCount: result.wordCount };
       const hasContract = Boolean(effectiveSteeringInput.steeringContract || effectiveSteeringInput.blueprint || (effectiveSteeringInput.mustInclude && effectiveSteeringInput.mustInclude.length > 0) || mergedSceneBeats.length > 0);
@@ -4819,6 +5157,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         },
       });
       const chapterSnippet = await readLatestChapterSnippet(id, result.chapterNumber);
+      await recordLengthNormalizationVersionRuns(id, result.chapterNumber, result.lengthNormalizationSnapshots);
       if (chapterSnippet) {
         await refreshBookMemory(id, result.chapterNumber, "write-next", baseDetails, chapterSnippet);
       }
@@ -4964,12 +5303,180 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             }
           }
 
-          broadcast("write-next:verification", { bookId: id, chapterNumber: result.chapterNumber, report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}) });
+          // ── Blueprint P5 Auto-Revision Loop ────────────────────────────
+          // When P4 audit fails on a confirmed blueprint, attempt one targeted
+          // LLM revision. Instead of directly overwriting the chapter file,
+          // the revised content is saved as a chapter-run candidate awaiting
+          // user approval. Maximum one attempt per write-next call.
+          let p5AutoRevision: P5AutoRevisionResult | undefined;
+          if (blueprintFulfillment?.shouldRewrite && confirmedChapterBlueprint) {
+            let editorReport: BlueprintEditorReport | undefined;
+            try {
+              // Step 1: Generate targeted rewrite plan (heuristic, no LLM)
+              editorReport = generateBlueprintEditorReport(
+                blueprintFulfillment,
+                confirmedChapterBlueprint,
+              );
+
+              if (editorReport.targetedRewritePlan.fixCount > 0) {
+                // Step 2: Get LLM client for the revision
+                const pipelineConfig = await buildPipelineConfig();
+                const reviser = new TargetedBlueprintReviser({
+                  client: pipelineConfig.client,
+                  model: pipelineConfig.model,
+                  projectRoot: root,
+                  bookId: id,
+                });
+
+                // Step 3: Run the LLM revision
+                const reviseResult: TargetedReviseOutput = await reviser.revise({
+                  chapterText: fullContent,
+                  blueprint: confirmedChapterBlueprint,
+                  plan: editorReport.targetedRewritePlan,
+                  chapterNumber: result.chapterNumber,
+                });
+
+                if (reviseResult.revisedText.length > 0) {
+                  // Step 4: Re-audit the revised content against the blueprint.
+                  const revisedFulfillment = auditBlueprintFulfillment({
+                    chapterText: reviseResult.revisedText,
+                    blueprint: confirmedChapterBlueprint,
+                    chapterNumber: result.chapterNumber,
+                  });
+
+                  // Step 4b: Re-verify user contract on the revised text (if a contract was active).
+                  // If the revised text violates mustInclude/mustAvoid, the candidate must be
+                  // marked still-failing even if the blueprint audit passed.
+                  let contractVerificationAfter: P5AutoRevisionResult["contractVerificationAfter"];
+                  const contractForP5 = effectiveSteeringInput.steeringContract
+                    ?? ((effectiveSteeringInput.mustInclude?.length ?? 0) > 0 || (effectiveSteeringInput.mustAvoid?.length ?? 0) > 0
+                      ? { mustInclude: effectiveSteeringInput.mustInclude ?? [], mustAvoid: effectiveSteeringInput.mustAvoid ?? [], sceneBeats: [] as string[] }
+                      : null);
+                  if (contractForP5) {
+                    const contractReport = verifyContractSatisfaction({
+                      chapterText: reviseResult.revisedText,
+                      mustInclude: contractForP5.mustInclude ?? [],
+                      mustAvoid: contractForP5.mustAvoid ?? [],
+                      sceneBeats: (contractForP5 as { sceneBeats?: string[] }).sceneBeats ?? [],
+                      goal: (contractForP5 as { goal?: string }).goal,
+                    });
+                    contractVerificationAfter = {
+                      satisfactionRate: contractReport.satisfactionRate,
+                      shouldRewrite: contractReport.shouldRewrite,
+                      missingRequirements: contractReport.items
+                        .filter((item) => item.status === "missing")
+                        .map((item) => item.requirement),
+                    };
+                  }
+
+                  // Effective fail = blueprint still needs rewrite OR contract verification failed.
+                  const p5ShouldFail = revisedFulfillment.shouldRewrite
+                    || (contractVerificationAfter?.shouldRewrite ?? false);
+
+                  // Combined audit issues: blueprint blocking issues + contract missing requirements.
+                  const combinedAuditIssues: string[] = [
+                    ...(revisedFulfillment.shouldRewrite ? revisedFulfillment.blockingIssues : []),
+                    ...(contractVerificationAfter?.missingRequirements.map((r) => `契约未满足: ${r}`) ?? []),
+                  ];
+
+                  // Step 5: Strip heading from revisedText for candidateRevision.content.
+                  // applyApprovedCandidateRevision re-adds the heading from the current file,
+                  // so candidate.content must be the chapter body only (no leading "# …" line).
+                  const revisedLines = reviseResult.revisedText.split(/\r?\n/);
+                  const hasHeading = revisedLines[0]?.trim().startsWith("# ");
+                  const candidateContent = hasHeading
+                    ? revisedLines.slice(1).join("\n").trimStart()
+                    : reviseResult.revisedText;
+
+                  // Step 6: Create a chapter-run candidate (decision="unchanged" = pending approval).
+                  // Never write the revised content to disk here; the user must approve via the
+                  // POST /api/books/:id/chapter-runs/:runId/approve endpoint.
+                  // contentOnly: true marks that only chapter text is changed (no truth files).
+                  const p5Run = await chapterRunStore.createRun({
+                    bookId: id,
+                    chapter: result.chapterNumber,
+                    actionType: "blueprint-targeted-revise",
+                    appliedBrief: `P5蓝图定点修订 score: ${blueprintFulfillment.score}→${revisedFulfillment.score}`,
+                  });
+
+                  const candidateRevision: ManualCandidateRevision = {
+                    content: candidateContent,
+                    wordCount: candidateContent.trim().length,
+                    updatedState: "",   // P5 does not update truth files (contentOnly)
+                    updatedLedger: "",  // P5 does not update truth files (contentOnly)
+                    updatedHooks: "",   // P5 does not update truth files (contentOnly)
+                    // status reflects the combined blueprint + contract result
+                    status: p5ShouldFail ? "audit-failed" : "ready-for-review",
+                    auditIssues: combinedAuditIssues,
+                  };
+
+                  await completeChapterRun({
+                    bookId: id,
+                    runId: p5Run.runId,
+                    status: "succeeded",
+                    decision: "unchanged", // signals pending-approval
+                    data: {
+                      beforeContent: fullContent,
+                      afterContent: reviseResult.revisedText,
+                      candidateRevision,
+                      editorReport,
+                      appliedFixes: reviseResult.appliedFixes,
+                      // Store both before/after fulfillment for audit trail
+                      blueprintFulfillmentBefore: blueprintFulfillment,
+                      blueprintFulfillmentAfter: revisedFulfillment,
+                      ...(contractVerificationAfter ? { contractVerificationAfter } : {}),
+                      // Marker: P5 only rewrites chapter body, never truth files
+                      contentOnly: true,
+                    },
+                  });
+
+                  const p5Status: P5AutoRevisionResult["status"] = p5ShouldFail
+                    ? "still-failing"
+                    : "candidate_pending_approval";
+
+                  p5AutoRevision = {
+                    runId: p5Run.runId,
+                    editorReport,
+                    appliedFixes: reviseResult.appliedFixes,
+                    revisedBlueprintFulfillment: revisedFulfillment,
+                    status: p5Status,
+                    ...(contractVerificationAfter ? { contractVerificationAfter } : {}),
+                  };
+
+                  // Step 7: Save editor_report artifact
+                  if (sessId) {
+                    await artifactService.create({
+                      sessionId: sessId, bookId: id, type: "editor_report",
+                      title: `P5蓝图定点修订第${result.chapterNumber}章`,
+                      payload: {
+                        runId: p5Run.runId,
+                        editorReport: editorReport as unknown as Record<string, unknown>,
+                        appliedFixes: reviseResult.appliedFixes,
+                        revisedScore: revisedFulfillment.score,
+                        status: p5Status,
+                      } as Record<string, unknown>,
+                      summary: `修复${editorReport.targetedRewritePlan.fixCount}处，修订后score=${revisedFulfillment.score}${p5Status === "candidate_pending_approval" ? " [待批准]" : " [仍需重写]"}`,
+                      searchableText: JSON.stringify(editorReport),
+                    });
+                  }
+                }
+              }
+            } catch (e) {
+              // Surface the error in the broadcast payload instead of silently swallowing it.
+              p5AutoRevision = {
+                status: "failed",
+                error: e instanceof Error ? e.message : String(e),
+                ...(editorReport ? { editorReport } : {}),
+              };
+            }
+          }
+
+          broadcast("write-next:verification", { bookId: id, chapterNumber: result.chapterNumber, report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}), ...(p5AutoRevision ? { p5AutoRevision } : {}) });
           if (sessId) {
             await artifactService.create({
               sessionId: sessId, bookId: id, type: "contract_verification",
               title: `验证第${result.chapterNumber}章`,
-              payload: { report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}) } as unknown as Record<string, unknown>,
+              payload: { report, ...verificationSummary, ...(blueprintFulfillment ? { blueprintFulfillment } : {}), ...(p5AutoRevision ? { p5AutoRevision } : {}) } as unknown as Record<string, unknown>,
               summary: `rate=${report.satisfactionRate}${report.shouldRewrite ? " [未满足]" : ""}`,
               searchableText: JSON.stringify(verificationSummary),
             });
@@ -5012,7 +5519,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         chapterNumber,
         briefUsed: planBrief !== undefined,
       });
-      planPipeline.planChapter(id, planInput ?? directBrief)
+      // If a steering contract carries a rawRequest (full design proposal text from the agent),
+      // prepend it to planInput so the plan stage also follows the design, not just the terse
+      // user confirmation message like "非常棒 按照你的设计来写".
+      const rawDesignForPlan = typeof (effectiveSteeringInput.steeringContract as Record<string, unknown> | undefined)?.rawRequest === "string"
+        ? ((effectiveSteeringInput.steeringContract as Record<string, unknown>).rawRequest as string).trim().slice(0, 2000)
+        : undefined;
+      const enrichedPlanInput = rawDesignForPlan
+        ? `【参考设计方案 - 严格按此规划本章意图】\n${rawDesignForPlan}\n\n${planInput ?? directBrief ?? ""}`.trim()
+        : (planInput ?? directBrief);
+      planPipeline.planChapter(id, enrichedPlanInput)
         .then(async (plan) => {
           const planChapterNumber = resolvePlanOrFallbackChapterNumber(plan);
           emitActionEvent("plan", "success", {
@@ -5591,6 +6107,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const unchangedReason = run.decision === "unchanged"
       ? (run.unchangedReason ?? NO_REVISIONS_APPLIED_MESSAGE)
       : run.unchangedReason;
+
+    // Expose P5-specific fields so the frontend can gate approval and show audit details.
+    // These are read from the terminal success event's run data.
+    const terminalEvent = [...run.events].reverse().find((e) => e.type === "success" || e.type === "fail");
+    const runData = terminalEvent?.data as Record<string, unknown> | undefined;
+    const candidateRevision = extractCandidateRevision(run);
+    const p5Fields: Record<string, unknown> = {};
+    if (candidateRevision) {
+      p5Fields["candidateStatus"] = candidateRevision.status;
+      p5Fields["candidateAuditIssues"] = candidateRevision.auditIssues;
+    }
+    if (runData?.["contentOnly"] === true) p5Fields["contentOnly"] = true;
+    if (runData?.["blueprintFulfillmentBefore"]) p5Fields["blueprintFulfillmentBefore"] = runData["blueprintFulfillmentBefore"];
+    if (runData?.["blueprintFulfillmentAfter"]) p5Fields["blueprintFulfillmentAfter"] = runData["blueprintFulfillmentAfter"];
+    if (runData?.["contractVerificationAfter"]) p5Fields["contractVerificationAfter"] = runData["contractVerificationAfter"];
+
     return c.json({
       ...toChapterRunResponse(run),
       beforeContent: diff.beforeContent,
@@ -5598,6 +6130,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       briefTrace: diff.briefTrace,
       pendingApproval: diff.pendingApproval,
       unchangedReason,
+      ...p5Fields,
     });
   });
 
@@ -5617,6 +6150,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ error: "No candidate revision available for approval" }, 409);
     }
 
+    // Safety gate: audit-failed candidates for blueprint-targeted-revise runs require
+    // explicit { force: true } in the request body. Regular revise runs are unaffected
+    // so as not to change existing behavior.
+    const rawApproveBody = await c.req.json().catch(() => null);
+    const forceApply = typeof rawApproveBody === "object"
+      && rawApproveBody !== null
+      && (rawApproveBody as Record<string, unknown>)["force"] === true;
+
+    if (run.actionType === "blueprint-targeted-revise" && candidate.status === "audit-failed" && !forceApply) {
+      return c.json({
+        error: "候选修订未通过蓝图审计，请在确认风险后使用 { force: true } 强制应用。",
+        candidateStatus: candidate.status,
+        auditIssues: [...candidate.auditIssues],
+      }, 409);
+    }
+
     try {
       await applyApprovedCandidateRevision({
         bookId: id,
@@ -5624,6 +6173,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         candidate,
       });
 
+      const isForced = candidate.status === "audit-failed" && forceApply;
       const diff = parseDiffData(run);
       await completeChapterRun({
         bookId: id,
@@ -5631,12 +6181,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         status: "succeeded",
         decision: "applied",
         unchangedReason: null,
-        message: "Candidate revision approved by user.",
+        message: isForced ? "Audit-failed candidate force-approved by user." : "Candidate revision approved by user.",
         data: {
           beforeContent: diff.beforeContent,
           afterContent: candidate.content,
           briefTrace: diff.briefTrace,
           approvedFromUnchangedRun: true,
+          ...(isForced ? { forcedAuditFailedApproval: true } : {}),
         },
       });
 
@@ -5652,16 +6203,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         details: {
           approvedFromRunId: runId,
           decision: "applied",
-          message: "Candidate revision approved by user.",
+          message: isForced ? "Audit-failed candidate force-approved by user." : "Candidate revision approved by user.",
+          ...(isForced ? { forcedAuditFailedApproval: true } : {}),
         },
       });
+
+      // Refresh book memory after approval so the assistant reads the new chapter content.
+      // Best-effort: failures must not block the API response.
+      const approvedSnippet = await readLatestChapterSnippet(id, run.chapter).catch(() => "");
+      await refreshBookMemory(id, run.chapter, "revise", {
+        approvedFromRunId: runId,
+        contentOnly: run.actionType === "blueprint-targeted-revise",
+        ...(isForced ? { forcedAuditFailedApproval: true } : {}),
+      }, approvedSnippet || undefined).catch(() => undefined);
 
       return c.json({
         ok: true,
         runId,
         chapter: run.chapter,
         decision: "applied",
-        message: "Candidate revision approved and persisted.",
+        message: isForced ? "Audit-failed candidate force-applied and persisted." : "Candidate revision approved and persisted.",
+        ...(isForced ? { forcedAuditFailedApproval: true } : {}),
       });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
@@ -5975,6 +6537,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const scopeBookIds = Array.isArray(payload.scopeBookIds)
       ? (payload.scopeBookIds as unknown[]).filter((value): value is string => typeof value === "string" && isSafeBookId(value))
       : [];
+    const recentMessages: ReadonlyArray<{ role: "user" | "assistant"; content: string }> = Array.isArray(payload.recentMessages)
+      ? (payload.recentMessages as unknown[])
+          .filter((m): m is { role: string; content: string } =>
+            typeof m === "object" && m !== null
+            && typeof (m as { content?: unknown }).content === "string")
+          .slice(-4)
+          .map((m) => ({ role: m.role === "assistant" ? "assistant" as const : "user" as const, content: (m.content as string).slice(0, 1500) }))
+      : [];
     if (!prompt) {
       return c.json({
         code: "ASSISTANT_CHAT_VALIDATION_FAILED",
@@ -6055,8 +6625,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           });
           broadcast("log", "工具调用：resolve_context");
 
+          // Strip instruction-wrapper metadata (【当前锁定书籍】/【执行要求】/【用户请求】) so that
+          // resolveContext and compileSteeringContract only see the user's actual request text.
+          const cleanUserText = extractAssistantUserRequest(prompt);
+
           // Resolve references and extract requirements
-          const resolved = resolveContext({ sessionId: sessId, userText: prompt, recentArtifacts, bookId: novelosBookId });
+          const resolved = resolveContext({ sessionId: sessId, userText: cleanUserText, recentArtifacts, bookId: novelosBookId });
 
           // Fetch referenced critique payloads
           let critiquePayload: Record<string, unknown> | undefined;
@@ -6076,7 +6650,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
           // Compile steering contract
           const contract = compileSteeringContract({
-            userText: prompt,
+            userText: cleanUserText,
             resolvedRequirements: resolved.extractedUserRequirements,
             referencedCritiquePayload: critiquePayload as Parameters<typeof compileSteeringContract>[0]["referencedCritiquePayload"],
             sourceArtifactIds: resolved.resolvedReferences.map((r) => r.artifactId),
@@ -6119,8 +6693,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             data: JSON.stringify({
               ok: true,
               response: responseText,
+              // Only send the blueprint card — the contract details are already shown in the
+              // response text markdown. Including both would render duplicate "下一章写作契约" blocks.
               cards: [
-                { type: "contract", payload: contract },
                 { type: "blueprint", payload: blueprintCardPayload },
               ],
             }),
@@ -6229,8 +6804,50 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       : "";
     const memoryContext = await assistantMemoryService.buildAgentContext(scopeBookIds);
     const memoryPrompt = memoryContext.promptBlock.trim();
+    const recentContextBlock = recentMessages.length > 0
+      ? `【近期对话上下文】
+以下内容仅用于理解指代和延续任务，不要复述近期对话原文。重要：如果用户说“按方案继续/按照你的设计写”，则提取结构化约束后调用 write_draft；但如果用户说的是“设计一下/你来设计/你设计/帮我设计/想想写什么”，则只输出文字设计方案，不调用 write_draft，方案末尾询问用户是否执行写作。
+${recentMessages.map((m, index) => compactAssistantRecentMessageForAgentContext(m, {
+  preserveDetail: index >= Math.max(0, recentMessages.length - 2),
+})).join("\n---\n")}`
+      : "";
+
+    // ── Deterministic intent classification (eval-mode guard) ─────────────────
+    // Strategy: two-signal approach.
+    //   1. HARD_WRITE_SIGNAL_RE  — explicit write commands  → force write mode
+    //   2. EVAL_SIGNAL_RE        — design/evaluation phrases → force eval mode
+    // Eval mode is also triggered CONTEXT-AWARE: if the last assistant message
+    // was a design output (ended with "要我按这个方案写吗?"), and the user's reply
+    // contains no hard write signal, we assume they are still iterating on design.
+    const cleanTextForConstraint = extractAssistantUserRequest(prompt);
+
+    // Hard write commands — presence of any of these overrides eval mode
+    const HARD_WRITE_SIGNAL_RE =
+      /写下一章|继续写|续写|开始写|马上写|立刻写|现在写|执行写作|就按.{0,10}写|按照.{0,20}(?:设计|方案|规划).{0,12}(?:写|生成|落实|执行)/u;
+
+    // Design / evaluation request phrases — any of these triggers eval mode
+    const EVAL_SIGNAL_RE =
+      /(?:设计一下|再来设计|你来设计|来设计一下|你设计|再设计|重新设计|如何设计|再来一版|再来个方案|帮我设计|帮我想想|应该如何写|如何写才能|怎么写才能|写的如何|写得如何|写得怎|如何才能写|如何写.{0,6}更|怎么写.{0,6}更|如何让.{0,15}更|下一章节?.{0,15}(?:应该|需要)?(?:如何|怎么|怎样)写|你来评价|评价.{0,20}(?:小说|写法|章节|剧情)|分析一下|想想怎么写|规划一下|你来规划|不够.{0,25}再.{0,8}(?:设计|来一版|想想)|还是.{0,20}(?:不够|不行|没新意|不刺激).{0,15}(?:再|重新).{0,6}(?:设计|来))/u;
+
+    // Context-aware: if last assistant message was a design output (asked "要我写吗?"),
+    // and current input has no hard write signal, keep in eval mode for design iteration.
+    const lastAssistantMsgForEval = [...recentMessages].reverse().find((m) => m.role === "assistant");
+    const prevWasDesignOutput = lastAssistantMsgForEval !== undefined
+      && /(?:要我(?:按|按照)?这个?(?:方案|设计|规划)?(?:执行写作|写|开始写|续写)?吗|需要我现在.{0,8}(?:执行写作|写)|直接启动.{0,15}write_draft|是否.{0,8}执行写作|我可以.{0,5}(?:plan_chapter|compose_chapter|write))/u
+        .test(lastAssistantMsgForEval.content);
+
+    const isEvalAdviceOnly =
+      (EVAL_SIGNAL_RE.test(cleanTextForConstraint) || prevWasDesignOutput)
+      && !HARD_WRITE_SIGNAL_RE.test(cleanTextForConstraint);
+
+    const evalConstraintBlock = isEvalAdviceOnly
+      ? "[系统约束：evaluation-mode] 此请求为评价/建议/设计模式。只能调用 read_chapter、read_truth_files、get_book_status 等读取类工具，然后以文字形式输出分析、设计方案或建议。绝对禁止调用 write_draft、write_full_pipeline、plan_chapter、compose_chapter、update_current_focus。输出方案后询问用户：「要我按这个方案执行写作吗？」"
+      : "";
+
     const agentPrompt = [
       memoryPrompt ? `【记忆上下文】\n${memoryPrompt}` : "",
+      recentContextBlock,
+      evalConstraintBlock,
       `${prompt}${scopeHint}`,
     ]
       .filter((section) => section.length > 0)
@@ -6293,7 +6910,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         );
 
         const rawResponse = result || lastResponse || "处理完成。";
-        const finalResponse = buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse);
+        const finalResponse = dedupeRepeatedAssistantResponse(buildGroundedAssistantResponse(prompt, toolOutcomes, rawResponse));
         const outputDecision = await promptInjectionGuard.inspectOutput({
           route: c.req.path,
           requestId: promptInjectionGuard.getRequestId(c),
@@ -6322,6 +6939,33 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 title: `剧情分析: ${novelosBookId}`,
                 payload: { llmResponse: finalResponse },
                 summary: finalResponse.slice(0, 200),
+                searchableText: finalResponse,
+              });
+            } catch { /* best-effort */ }
+          })();
+        }
+        // Background: if the assistant produced a concrete next-chapter design,
+        // persist it as a chapter_plan artifact. This lets follow-up prompts like
+        // "按你的设计方案写下一章" resolve to a real plan instead of only the latest
+        // user emphasis sentence.
+        if (sessionId && novelosBookId && shouldPersistChapterPlanArtifact(prompt, finalResponse)) {
+          void (async () => {
+            try {
+              const sceneBeats = extractChapterPlanSceneBeats(finalResponse);
+              const goal = extractChapterPlanGoal(finalResponse);
+              await artifactService.create({
+                sessionId,
+                bookId: novelosBookId,
+                type: "chapter_plan",
+                title: `章节方案: ${novelosBookId}`,
+                payload: {
+                  userRequest: prompt,
+                  response: finalResponse,
+                  sceneBeats,
+                  ...(goal ? { goal } : {}),
+                  createdFrom: "assistant_chat",
+                },
+                summary: `章节方案：${goal ?? sceneBeats[0] ?? "下一章方案"}`,
                 searchableText: finalResponse,
               });
             } catch { /* best-effort */ }
@@ -6705,6 +7349,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (!input) {
       errors.push({ field: "input", message: "input must be a non-empty string" });
     }
+    const planRecentMessages: ReadonlyArray<{ role: "user" | "assistant"; content: string }> = Array.isArray(body.recentMessages)
+      ? (body.recentMessages as unknown[])
+          .filter((m): m is { role?: unknown; content: string } =>
+            typeof m === "object" && m !== null && typeof (m as { content?: unknown }).content === "string")
+          .slice(-8)
+          .map((m) => ({
+            role: m.role === "assistant" ? "assistant" as const : "user" as const,
+            content: m.content.slice(0, 5000),
+          }))
+      : [];
     if (errors.length > 0) {
       return c.json({ code: "ASSISTANT_PLAN_VALIDATION_FAILED", errors }, 422);
     }
@@ -6729,7 +7383,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       sessionId,
       userText: input,
       selectedBookIds: parsedScope.scope.type === "book-list" ? parsedScope.scope.bookIds : [],
-      recentMessages: [],
+      recentMessages: planRecentMessages,
       recentArtifacts: sessionId ? await artifactService.listRecentSessionArtifacts(sessionId, 20) : [],
     });
     // Map routed intent types to plan intents
@@ -6866,14 +7520,67 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           };
         }),
       };
+    } else if (intent === "write_next" && !needsBlueprintConfirm && ASSISTANT_PLAN_REFERENCE_RE.test(input)) {
+      // Inline fallback: user accepted a plan from recent messages but no artifact was found
+      // (e.g. session mismatch, or plan not yet persisted). Search recent messages directly.
+      const inlinePlanMsg = [...planRecentMessages].reverse().find(
+        (m) => m.role === "assistant" && shouldPersistChapterPlanArtifact(input, m.content),
+      );
+      if (inlinePlanMsg) {
+        const beats = extractChapterPlanSceneBeats(inlinePlanMsg.content);
+        const goal = extractChapterPlanGoal(inlinePlanMsg.content);
+        const inlineContract: Record<string, unknown> = {
+          priority: "hard",
+          mustInclude: beats.slice(0, 6),
+          mustAvoid: [] as string[],
+          sceneBeats: beats,
+          ...(goal ? { goal } : {}),
+          rawRequest: inlinePlanMsg.content.slice(0, 8000),
+          sourceArtifactIds: [] as string[],
+          userContractPriority: "hard",
+        };
+        graph = {
+          ...graph,
+          nodes: graph.nodes.map((node) => {
+            if (node.action !== "write-next") return node;
+            return { ...node, steeringContract: inlineContract };
+          }),
+        };
+      }
     }
     // For plot-driven write-next intents, prepend a blueprint-confirm checkpoint before write-next nodes
     if (needsBlueprintConfirm) {
       const planBookId = parsedScope.scope.type === "book-list" && parsedScope.scope.bookIds.length === 1
         ? parsedScope.scope.bookIds[0] : undefined;
+      const explicitBlueprintAccepted = isExplicitChapterPlanAcceptance(input);
 
       // Resolve blueprint artifact id: confirmed > pending > auto-generate
       let bpArtifactId = latestSteering?.blueprintArtifactId ?? latestSteering?.pendingBlueprintArtifactId;
+      let acceptedBlueprintPayload: Record<string, unknown> | undefined;
+
+      const confirmBlueprintArtifactForAcceptedPlan = async (artifactId: string): Promise<Record<string, unknown> | undefined> => {
+        if (!explicitBlueprintAccepted) return undefined;
+        const art = await artifactService.getById(artifactId, sessionId, planBookId);
+        if (!art || art.type !== "chapter_blueprint") return undefined;
+        const payload = art.payload as Record<string, unknown>;
+        const currentStatus = typeof payload.status === "string" ? payload.status : "draft";
+        const currentVersion = typeof payload.version === "number" ? payload.version : 1;
+        const confirmedPayload = {
+          ...payload,
+          artifactId,
+          status: "confirmed",
+          version: currentStatus === "confirmed" ? currentVersion : currentVersion + 1,
+          confirmedAt: new Date().toISOString(),
+          confirmedBy: "explicit-plan-acceptance",
+        };
+        await artifactService.update(artifactId, sessionId, {
+          bookId: planBookId,
+          payload: confirmedPayload,
+          summary: `Blueprint v${confirmedPayload.version}: confirmed by explicit plan acceptance`,
+          searchableText: JSON.stringify(confirmedPayload),
+        });
+        return confirmedPayload;
+      };
 
       // If no blueprint artifact exists, auto-generate a draft blueprint so the checkpoint can be bound
       if (!bpArtifactId) {
@@ -6882,12 +7589,95 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           // No steering contract in session — compile a minimal one from user input
           const recentArts = sessionId ? await artifactService.listRecentSessionArtifacts(sessionId, 20) : [];
           const resolvedCtx = resolveContext({ sessionId, userText: input, recentArtifacts: recentArts, bookId: planBookId });
+          let referencedPlanText = "";
+          let referencedPlanGoal: string | undefined;
+          let referencedPlanBeats: string[] = [];
+          const referencedPlanArtifactIds: string[] = [];
+          const inlinePlanMessage = ASSISTANT_PLAN_REFERENCE_RE.test(input)
+            ? [...planRecentMessages].reverse().find((message) =>
+                message.role === "assistant" && shouldPersistChapterPlanArtifact(input, message.content),
+              )
+            : undefined;
+          const inlinePlanArtifactId = inlinePlanMessage
+            ? (await artifactService.create({
+                sessionId,
+                bookId: planBookId,
+                type: "chapter_plan",
+                title: `章节方案: ${planBookId ?? "当前书籍"}`,
+                payload: {
+                  userRequest: input,
+                  response: inlinePlanMessage.content,
+                  sceneBeats: extractChapterPlanSceneBeats(inlinePlanMessage.content),
+                  ...(extractChapterPlanGoal(inlinePlanMessage.content) ? { goal: extractChapterPlanGoal(inlinePlanMessage.content) } : {}),
+                  createdFrom: "assistant_plan_recent_message",
+                },
+                summary: `章节方案：${extractChapterPlanGoal(inlinePlanMessage.content) ?? "最近对话方案"}`,
+                searchableText: inlinePlanMessage.content,
+              })).artifactId
+            : undefined;
+          const referencedPlanIds = uniqueStrings([
+            ...resolvedCtx.resolvedReferences.map((r) => r.artifactId),
+            ...(inlinePlanArtifactId ? [inlinePlanArtifactId] : []),
+            ...(ASSISTANT_PLAN_REFERENCE_RE.test(input)
+              ? recentArts.filter((art) => art.type === "chapter_plan").map((art) => art.artifactId).slice(0, 1)
+              : []),
+          ]);
+          for (const artifactId of referencedPlanIds) {
+            const art = await artifactService.getById(artifactId, sessionId, planBookId);
+            if (!art || art.type !== "chapter_plan") continue;
+            referencedPlanArtifactIds.push(art.artifactId);
+            const payload = art.payload as Record<string, unknown>;
+            const response = typeof payload.response === "string" ? payload.response : "";
+            referencedPlanText = response || art.searchableText || "";
+            referencedPlanGoal = typeof payload.goal === "string"
+              ? payload.goal
+              : extractChapterPlanGoal(referencedPlanText);
+            const payloadBeats = Array.isArray(payload.sceneBeats)
+              ? payload.sceneBeats.filter((value): value is string => typeof value === "string")
+              : [];
+            referencedPlanBeats = uniqueStrings([
+              ...payloadBeats,
+              ...extractChapterPlanSceneBeats(referencedPlanText),
+            ]);
+            break;
+          }
           const compiledFromInput = compileSteeringContract({
             userText: input,
             resolvedRequirements: resolvedCtx.extractedUserRequirements,
-            sourceArtifactIds: resolvedCtx.resolvedReferences.map((r) => r.artifactId),
+            sourceArtifactIds: uniqueStrings([
+              ...resolvedCtx.resolvedReferences.map((r) => r.artifactId),
+              ...referencedPlanArtifactIds,
+            ]),
           });
-          contractForBp = compiledFromInput as unknown as Record<string, unknown>;
+          const sourceArtifactIds = uniqueStrings([
+            ...compiledFromInput.sourceArtifactIds,
+            ...referencedPlanArtifactIds,
+          ]);
+          const hasReferencedPlan = referencedPlanText.trim().length > 0;
+          const compiledSceneBeats = Array.isArray(compiledFromInput.sceneBeats) ? compiledFromInput.sceneBeats : [];
+          const compiledMustInclude = Array.isArray(compiledFromInput.mustInclude) ? compiledFromInput.mustInclude : [];
+          const mustIncludeForBlueprint = hasReferencedPlan
+            ? compiledMustInclude.filter((item) => !isMetaWritingQualityRequirement(item))
+            : compiledMustInclude;
+          const acceptedPlanHardRequirements = hasReferencedPlan
+            ? referencedPlanBeats.slice(0, 6)
+            : [];
+          contractForBp = {
+            ...(compiledFromInput as unknown as Record<string, unknown>),
+            ...(referencedPlanGoal ? { goal: referencedPlanGoal } : {}),
+            mustInclude: uniqueStrings([
+              ...mustIncludeForBlueprint,
+              ...acceptedPlanHardRequirements,
+            ]),
+            sceneBeats: hasReferencedPlan
+              ? uniqueStrings([...referencedPlanBeats, ...compiledSceneBeats])
+              : uniqueStrings([...compiledSceneBeats, ...referencedPlanBeats]),
+            priority: (ASSISTANT_PLAN_ACCEPTANCE_RE.test(input) || hasReferencedPlan) ? "hard" : compiledFromInput.priority,
+            sourceArtifactIds,
+            rawRequest: referencedPlanText
+              ? `${input}\n\n[引用章节方案]\n${referencedPlanText.slice(0, 5000)}`
+              : compiledFromInput.rawRequest,
+          };
           await artifactService.create({
             sessionId,
             bookId: planBookId,
@@ -6895,7 +7685,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             title: "章节干预契约",
             payload: contractForBp,
             summary: `Contract: auto-generated from plan input`,
-            searchableText: input,
+            searchableText: typeof contractForBp.rawRequest === "string" ? contractForBp.rawRequest : input,
           });
         }
 
@@ -6911,9 +7701,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         const autoBp = buildBlueprintFromContract(contractFields, planBookId ?? "");
         const autoBpPayload: Record<string, unknown> = {
           ...(autoBp as unknown as Record<string, unknown>),
-          status: "draft",
+          status: explicitBlueprintAccepted ? "confirmed" : "draft",
           version: 1,
-          sourceArtifactIds: latestSteering?.sourceArtifactIds ?? [],
+          ...(explicitBlueprintAccepted ? {
+            confirmedAt: new Date().toISOString(),
+            confirmedBy: "explicit-plan-acceptance",
+          } : {}),
+          sourceArtifactIds: Array.isArray(contractForBp.sourceArtifactIds)
+            ? contractForBp.sourceArtifactIds as string[]
+            : latestSteering?.sourceArtifactIds ?? [],
         };
         const autoBpArt = await artifactService.create({
           sessionId,
@@ -6921,7 +7717,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           type: "chapter_blueprint",
           title: "章节戏剧蓝图",
           payload: autoBpPayload,
-          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=draft (auto-generated)`,
+          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=${explicitBlueprintAccepted ? "confirmed" : "draft"} (auto-generated)`,
           searchableText: JSON.stringify(autoBpPayload),
         });
         // Self-describe: include artifactId in payload
@@ -6929,16 +7725,36 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         await artifactService.update(autoBpArt.artifactId, sessionId, {
           bookId: planBookId,
           payload: autoBpPayloadWithId,
-          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=draft (auto-generated)`,
+          summary: `Blueprint v1: ${autoBp.scenes.length} scenes, status=${explicitBlueprintAccepted ? "confirmed" : "draft"} (auto-generated)`,
           searchableText: JSON.stringify(autoBpPayloadWithId),
         });
         bpArtifactId = autoBpArt.artifactId;
+        acceptedBlueprintPayload = explicitBlueprintAccepted ? autoBpPayloadWithId : undefined;
+      } else if (explicitBlueprintAccepted) {
+        acceptedBlueprintPayload = await confirmBlueprintArtifactForAcceptedPlan(bpArtifactId);
       }
 
       const writeNextNodeIds = graph.nodes
         .filter((n) => n.type === "task" && n.action === "write-next")
         .map((n) => n.nodeId);
-      if (writeNextNodeIds.length > 0 && bpArtifactId) {
+      if (writeNextNodeIds.length > 0 && explicitBlueprintAccepted && acceptedBlueprintPayload) {
+        graph = {
+          ...graph,
+          nodes: graph.nodes.map((node) => {
+            if (node.action !== "write-next") return node;
+            const existingSourceIds = Array.isArray(node.sourceArtifactIds) ? node.sourceArtifactIds : [];
+            const bpSourceIds = Array.isArray(acceptedBlueprintPayload!.sourceArtifactIds)
+              ? acceptedBlueprintPayload!.sourceArtifactIds.filter((value): value is string => typeof value === "string")
+              : [];
+            return {
+              ...node,
+              blueprint: acceptedBlueprintPayload,
+              sourceArtifactIds: uniqueStrings([...existingSourceIds, bpArtifactId!, ...bpSourceIds]),
+            };
+          }),
+        };
+      }
+      if (writeNextNodeIds.length > 0 && bpArtifactId && !explicitBlueprintAccepted) {
         const cpNodeId = nextAssistantCheckpointNodeId(graph);
         const cpNode: TaskNode = {
           nodeId: cpNodeId,
@@ -8058,6 +8874,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         blueprint: blueprintArt.artifactId,
       },
     });
+  });
+
+  // --- Blueprint fetch (GET) ---
+
+  app.get("/api/assistant/artifact/:artifactId", async (c) => {
+    const artifactId = c.req.param("artifactId");
+    const sessionId = c.req.query("sessionId") ?? "";
+    const bookId = c.req.query("bookId");
+    const art = await artifactService.getById(artifactId, sessionId, bookId);
+    if (!art) {
+      return c.json({ code: "ARTIFACT_NOT_FOUND", message: `Artifact ${artifactId} not found` }, 404);
+    }
+    return c.json({ artifact: art });
   });
 
   // --- Blueprint edit (PUT) ---

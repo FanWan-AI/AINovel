@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import type { StringKey, TFunction } from "../../hooks/use-i18n";
 import type { ChapterRunActionType, ChapterRunRecord, ChapterRunStatus } from "../../hooks/use-chapter-runs";
 
@@ -26,12 +26,13 @@ export function formatRunDuration(durationMs: number | undefined, t: TFunction):
   return `${seconds}s`;
 }
 
-function actionTypeLabel(actionType: ChapterRunActionType, t: TFunction): string {
+export function actionTypeLabel(actionType: ChapterRunActionType, t: TFunction): string {
   if (actionType === "spot-fix") return t("book.spotFix");
   if (actionType === "polish") return t("book.polish");
   if (actionType === "rework") return t("book.rework");
   if (actionType === "rewrite") return t("book.rewrite");
   if (actionType === "anti-detect") return t("book.antiDetect");
+  if (actionType === "blueprint-targeted-revise") return "蓝图定点修订";
   return t("chapterTaskCenter.actionResync");
 }
 
@@ -61,6 +62,19 @@ export function filterTaskRuns(
     if (actionFilter !== "all" && run.actionType !== actionFilter) return false;
     return true;
   });
+}
+
+/**
+ * Returns true when a run is a P5 blueprint-targeted-revise whose candidate
+ * did not pass audit (status === "audit-failed"). Used by the diff dialog
+ * and the task center to surface a safety warning.
+ */
+export function isAuditFailedP5Run(run: ChapterRunRecord): boolean {
+  return (
+    run.actionType === "blueprint-targeted-revise"
+    && run.status === "unchanged"
+    && run.candidateStatus === "audit-failed"
+  );
 }
 
 export function ChapterTaskCenter({
@@ -145,6 +159,7 @@ export function ChapterTaskCenter({
               <option value="rework">{t("book.rework")}</option>
               <option value="rewrite">{t("book.rewrite")}</option>
               <option value="anti-detect">{t("book.antiDetect")}</option>
+              <option value="blueprint-targeted-revise">蓝图定点修订</option>
               <option value="resync">{t("chapterTaskCenter.actionResync")}</option>
             </select>
           </div>
@@ -200,6 +215,13 @@ export function ChapterTaskCenter({
                       )}
                     </div>
                   </div>
+                  {/* P5 audit-failed safety warning */}
+                  {isAuditFailedP5Run(run) && (
+                    <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+                      <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                      <span><span className="font-semibold">蓝图定点修订未通过审计</span> — 修订稿存在未解决的问题，强制应用前请先核查。</span>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-muted-foreground">
                     <div><span className="font-semibold">{t("chapterTaskCenter.fieldDuration")}</span> {formatRunDuration(run.durationMs, t)}</div>
                     <div className="md:col-span-2"><span className="font-semibold">{t("chapterTaskCenter.fieldSummary")}</span> {run.briefSummary ?? t("chapterTaskCenter.noSummary")}</div>

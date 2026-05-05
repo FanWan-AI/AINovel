@@ -17,6 +17,9 @@ export interface ChapterRunDiffPayload {
   readonly afterContent: string | null;
   readonly briefTrace: ReadonlyArray<ChapterRunBriefTraceItem>;
   readonly pendingApproval?: boolean;
+  /** P5 fields — present only for blueprint-targeted-revise runs */
+  readonly candidateStatus?: "ready-for-review" | "audit-failed";
+  readonly candidateAuditIssues?: ReadonlyArray<string>;
 }
 
 interface ChapterDiffDialogProps {
@@ -27,7 +30,7 @@ interface ChapterDiffDialogProps {
   readonly payload: ChapterRunDiffPayload | null;
   readonly t: TFunction;
   readonly onClose: () => void;
-  readonly onApprove?: (runId: string) => Promise<void>;
+  readonly onApprove?: (runId: string, force?: boolean) => Promise<void>;
 }
 
 type SegmentKind = "same" | "add" | "remove";
@@ -314,7 +317,7 @@ export function ChapterDiffDialog({
                       <span className="font-semibold">{t("chapterDiff.unchangedReasonLabel")}</span>{" "}
                       {payload.unchangedReason ?? t("chapterDiff.unchangedReasonFallback")}
                     </div>
-                    {payload.pendingApproval && onApprove && (
+                    {payload.pendingApproval && onApprove && payload.candidateStatus !== "audit-failed" && (
                       <button
                         onClick={() => { void onApprove(payload.runId); }}
                         disabled={approving}
@@ -324,6 +327,32 @@ export function ChapterDiffDialog({
                       </button>
                     )}
                   </div>
+                </div>
+              )}
+
+              {/* P5 audit-failed warning: show when the blueprint-targeted-revise candidate did not pass audit */}
+              {payload.actionType === "blueprint-targeted-revise" && payload.candidateStatus === "audit-failed" && (
+                <div className="rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-sm text-destructive space-y-2">
+                  <div className="font-semibold">⚠️ 蓝图定点修订未通过审计，建议手动核查后在修复过后再应用。</div>
+                  {payload.candidateAuditIssues && payload.candidateAuditIssues.length > 0 && (
+                    <ul className="list-disc list-inside space-y-0.5 text-xs">
+                      {payload.candidateAuditIssues.map((issue, idx) => (
+                        <li key={idx}>{issue}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {payload.pendingApproval && onApprove && (
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        onClick={() => { void onApprove(payload.runId, true); }}
+                        disabled={approving}
+                        className="px-3 py-1.5 text-xs font-bold rounded-lg border border-destructive/40 bg-destructive/15 text-destructive hover:bg-destructive/25 disabled:opacity-50"
+                      >
+                        {approving ? t("common.loading") : "强制应用（已知风险）"}
+                      </button>
+                      <span className="text-xs text-muted-foreground">仅当您确认风险后使用</span>
+                    </div>
+                  )}
                 </div>
               )}
 

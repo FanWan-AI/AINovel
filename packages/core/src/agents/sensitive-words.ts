@@ -1,8 +1,11 @@
 /**
  * Sensitive word detection — rule-based analysis (no LLM).
  *
- * Detects politically sensitive, sexually explicit, and extremely violent terms
- * in Chinese web novel content. Used in audit pipeline to flag or block content.
+ * Detects platform-risk terms in Chinese web novel content.
+ *
+ * Adult/erotic wording is intentionally not part of this built-in audit list:
+ * some books are adult-oriented by design, so erotic terms should be governed
+ * by book-level creative preference rather than global sensitive-word scoring.
  */
 
 import type { AuditIssue } from "./continuity.js";
@@ -34,15 +37,6 @@ const POLITICAL_WORDS: ReadonlyArray<string> = [
   "翻墙", "防火长城",
 ];
 
-// Sexual terms — severity "warn"
-const SEXUAL_WORDS: ReadonlyArray<string> = [
-  "性交", "做爱", "口交", "肛交", "自慰", "手淫",
-  "阴茎", "阴道", "阴蒂", "乳房", "乳头",
-  "射精", "高潮", "潮吹",
-  "淫荡", "淫乱", "荡妇", "婊子",
-  "强奸", "轮奸",
-];
-
 // Extreme violence — severity "warn"
 const VIOLENCE_EXTREME: ReadonlyArray<string> = [
   "肢解", "碎尸", "挖眼", "剥皮", "开膛破肚",
@@ -58,7 +52,6 @@ interface WordListEntry {
 
 const WORD_LISTS: ReadonlyArray<WordListEntry> = [
   { words: POLITICAL_WORDS, severity: "block", label: "政治敏感词", englishLabel: "political sensitive terms" },
-  { words: SEXUAL_WORDS, severity: "warn", label: "色情敏感词", englishLabel: "sexual sensitive terms" },
   { words: VIOLENCE_EXTREME, severity: "warn", label: "极端暴力词", englishLabel: "extreme violence terms" },
 ];
 
