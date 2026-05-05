@@ -5,10 +5,14 @@ import type { LLMConfig } from "../models/project.js";
 // === Streaming Monitor Types ===
 
 export interface StreamProgress {
+  readonly callId?: string;
+  readonly agentName?: string;
+  readonly purpose?: string;
   readonly elapsedMs: number;
   readonly totalChars: number;
   readonly chineseChars: number;
-  readonly status: "streaming" | "done";
+  readonly preview?: string;
+  readonly status: "start" | "streaming" | "done";
 }
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
@@ -19,6 +23,7 @@ export function createStreamMonitor(
 ): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
+  let preview = "";
   const startTime = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -28,6 +33,7 @@ export function createStreamMonitor(
         elapsedMs: Date.now() - startTime,
         totalChars,
         chineseChars,
+        preview,
         status: "streaming",
       });
     }, intervalMs);
@@ -37,6 +43,7 @@ export function createStreamMonitor(
     onChunk(text: string): void {
       totalChars += text.length;
       chineseChars += (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      preview = `${preview}${text}`.slice(-500);
     },
     stop(): void {
       if (timer !== undefined) {
@@ -47,6 +54,7 @@ export function createStreamMonitor(
         elapsedMs: Date.now() - startTime,
         totalChars,
         chineseChars,
+        preview,
         status: "done",
       });
     },

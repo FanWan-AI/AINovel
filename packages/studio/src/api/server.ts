@@ -22,6 +22,7 @@ import {
   type LogSink,
   type LogEntry,
   type LengthNormalizationSnapshot,
+  type ChapterReviewSnapshot,
   type BlueprintFulfillmentReport,
 } from "@actalk/inkos-core";
 import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
@@ -1100,6 +1101,9 @@ const ASSISTANT_CHAPTER_EN_PATTERN = /chapter\s*(\d+)/iu;
 const ASSISTANT_MODEL_IDENTITY_PATTERN = /(你是.*模型|什么模型|哪个模型|model|provider|llm|deep\s*seek|deepseek|mimo|openai|anthropic)/iu;
 const ASSISTANT_VAGUE_PROMPT_PATTERN = /^[\s?？!！,，.。]+$/u;
 const ASSISTANT_REVISE_INTENT_PATTERN = /改一下|改成|修改|调整|修一下|润色|重写|修订|深度改写|大幅改写|rewrite|revise|spot-fix|polish|rework|anti-detect|chapter-redesign/iu;
+// Matches opinion/evaluation/discussion questions — these must NOT trigger deterministic
+// tool dispatch even when the body happens to contain a revise-intent keyword.
+const ASSISTANT_OPINION_QUESTION_PATTERN = /你觉得|觉不觉得|这么.{0,15}好吗|这样.{0,15}好吗|好不好|怎么样|这么设计|这样设计|这个设计|评价一下|看法如何|你看这/iu;
 const ASSISTANT_REVISE_MODE_ANTI_DETECT_PATTERN = /反检测|anti[-\s]?detect/iu;
 const ASSISTANT_REVISE_MODE_POLISH_PATTERN = /润色|文风|措辞|polish/iu;
 const ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN = /深度改写|大幅改写|chapter[-\s]?redesign|换剧情|换场景|改剧情线|重构本章|发生关系|亲密关系|上床|做爱|性爱/iu;
@@ -1287,6 +1291,22 @@ function isChapterPlanNoiseLine(line: string): boolean {
   return false;
 }
 
+function isLowInformationRepeatedPlanLine(line: string): boolean {
+  const compact = line.replace(/\s+/gu, "");
+  if (compact.length < 80) return false;
+  const sentenceMatch = compact.match(/^(.{6,80}?[。！？.!?])(?:\1){2,}/u);
+  if (sentenceMatch) return true;
+  for (let length = 6; length <= 40; length += 1) {
+    const unit = compact.slice(0, length);
+    if (unit.length < length) break;
+    const repeated = unit.repeat(Math.floor(compact.length / unit.length));
+    if (compact.startsWith(repeated.slice(0, Math.min(compact.length, unit.length * 4)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function isChapterPlanSceneHeading(line: string): boolean {
   return /^(?:第[一二三四五六七八九十]+(?:段|章段|阶段|幕)|场景[一二三四五六七八九十\d]+|开篇|章末|结尾|高潮|反转|钩子|第一轮|第二轮|第三轮|第四轮|第五轮|第六轮)/u.test(line);
 }
@@ -1313,6 +1333,7 @@ function extractChapterPlanSceneBeats(text: string): string[] {
       const next = rawLines[j]!;
       if (isChapterPlanSceneHeading(next)) break;
       if (isChapterPlanNoiseLine(next)) continue;
+      if (isLowInformationRepeatedPlanLine(next)) continue;
       if (/^(?:🔥|⭐|✅|⚠️|🎯|📊|💡|核心|说明|男频爽点|视觉爽点)/u.test(next)) continue;
       detailLines.push(next);
     }
@@ -1325,6 +1346,7 @@ function extractChapterPlanSceneBeats(text: string): string[] {
 
   if (beats.length === 0) {
     for (const line of rawLines) {
+      if (isLowInformationRepeatedPlanLine(line)) continue;
       if (/(?:必须|规矩|轮流|同时|全裸|赴约|主角|女主|系统|钩子|冲突|反转|交锋|升级|兑现|危机|回收)/u.test(line)) {
         beats.push(trimChapterPlanBeat(line));
       }
@@ -2765,12 +2787,30 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       notifyChannels: currentConfig.notify,
       logger,
       onStreamProgress: (progress) => {
+        const payload = {
+          callId: progress.callId,
+          agentName: progress.agentName,
+          purpose: progress.purpose,
+          elapsedMs: progress.elapsedMs,
+          totalChars: progress.totalChars,
+          chineseChars: progress.chineseChars,
+          preview: progress.preview,
+        };
+        if (progress.status === "start") {
+          broadcast("llm:call:start", payload);
+          return;
+        }
         if (progress.status === "streaming") {
           broadcast("llm:progress", {
             elapsedMs: progress.elapsedMs,
             totalChars: progress.totalChars,
             chineseChars: progress.chineseChars,
           });
+          broadcast("llm:call:progress", payload);
+          return;
+        }
+        if (progress.status === "done") {
+          broadcast("llm:call:done", payload);
         }
       },
       externalContext: overrides?.externalContext,
@@ -4623,19 +4663,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     chapterNumber: number,
     snapshots: ReadonlyArray<LengthNormalizationSnapshot> | undefined,
   ): Promise<void> {
-    const appliedSnapshots = (snapshots ?? []).filter((snapshot) =>
-      snapshot.applied
-      && snapshot.beforeContent.trim().length > 0
+    const visibleSnapshots = (snapshots ?? []).filter((snapshot) =>
+      snapshot.beforeContent.trim().length > 0
       && snapshot.afterContent.trim().length > 0
       && snapshot.beforeContent.trim() !== snapshot.afterContent.trim()
     );
-    for (const snapshot of appliedSnapshots) {
+    for (const snapshot of visibleSnapshots) {
       try {
+        const applied = snapshot.applied;
+        const label = applied
+          ? `审计前字数归一化 ${snapshot.beforeCount} -> ${snapshot.afterCount}`
+          : `字数归一化候选（未应用） ${snapshot.beforeCount} -> ${snapshot.afterCount}`;
         const run = await chapterRunStore.createRun({
           bookId,
           chapter: chapterNumber,
           actionType: "length-normalize",
-          appliedBrief: `审计前字数归一化 ${snapshot.beforeCount} -> ${snapshot.afterCount}`,
+          appliedBrief: label,
         });
         await completeChapterRun({
           bookId,
@@ -4650,9 +4693,72 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               mode: snapshot.mode,
               beforeCount: snapshot.beforeCount,
               afterCount: snapshot.afterCount,
-              applied: snapshot.applied,
+              applied,
+              rejectedReason: snapshot.rejectedReason,
             },
           },
+        });
+        broadcast("chapter:version:created", {
+          bookId,
+          chapterNumber,
+          versionId: run.runId,
+          actionType: "length-normalize",
+          label,
+          applied,
+          beforeCount: snapshot.beforeCount,
+          afterCount: snapshot.afterCount,
+          rejectedReason: snapshot.rejectedReason,
+        });
+      } catch {
+        // Best-effort transparency record; never fail the write itself.
+      }
+    }
+  }
+
+  async function recordReviewSnapshotVersionRuns(
+    bookId: string,
+    chapterNumber: number,
+    snapshots: ReadonlyArray<ChapterReviewSnapshot> | undefined,
+  ): Promise<void> {
+    const visibleSnapshots = (snapshots ?? [])
+      .filter((snapshot) => snapshot.content.trim().length > 0)
+      .filter((snapshot, index, all) =>
+        index === all.findIndex((item) => item.stage === snapshot.stage && item.content.trim() === snapshot.content.trim())
+      );
+    for (const snapshot of visibleSnapshots) {
+      try {
+        const label = snapshot.stage === "writer-output"
+          ? `Writer 原始稿（${snapshot.wordCount}）`
+          : `审计前版本（${snapshot.wordCount}）`;
+        const run = await chapterRunStore.createRun({
+          bookId,
+          chapter: chapterNumber,
+          actionType: "pipeline-snapshot",
+          appliedBrief: label,
+        });
+        await completeChapterRun({
+          bookId,
+          runId: run.runId,
+          status: "succeeded",
+          decision: "applied",
+          data: {
+            beforeContent: snapshot.content,
+            afterContent: snapshot.content,
+            pipelineSnapshot: {
+              stage: snapshot.stage,
+              wordCount: snapshot.wordCount,
+            },
+          },
+        });
+        broadcast("chapter:version:created", {
+          bookId,
+          chapterNumber,
+          versionId: run.runId,
+          actionType: "pipeline-snapshot",
+          label,
+          applied: true,
+          beforeCount: snapshot.wordCount,
+          afterCount: snapshot.wordCount,
         });
       } catch {
         // Best-effort transparency record; never fail the write itself.
@@ -5138,6 +5244,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       title: string;
       wordCount: number;
       lengthNormalizationSnapshots?: ReadonlyArray<LengthNormalizationSnapshot>;
+      reviewSnapshots?: ReadonlyArray<ChapterReviewSnapshot>;
     };
     const onWriteComplete = async (result: WriteResult): Promise<void> => {
       const baseDetails = { status: result.status, title: result.title, wordCount: result.wordCount };
@@ -5157,6 +5264,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         },
       });
       const chapterSnippet = await readLatestChapterSnippet(id, result.chapterNumber);
+      await recordReviewSnapshotVersionRuns(id, result.chapterNumber, result.reviewSnapshots);
       await recordLengthNormalizationVersionRuns(id, result.chapterNumber, result.lengthNormalizationSnapshots);
       if (chapterSnippet) {
         await refreshBookMemory(id, result.chapterNumber, "write-next", baseDetails, chapterSnippet);
@@ -6718,6 +6826,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const targetChapter = parseAssistantChapterFromInput(userRequest);
     const shouldDirectRevise = ASSISTANT_REVISE_INTENT_PATTERN.test(userRequest)
       && !ASSISTANT_WRITE_NEXT_PATTERN.test(userRequest)
+      && !ASSISTANT_OPINION_QUESTION_PATTERN.test(userRequest)
       && targetChapter !== undefined;
     if (shouldDirectRevise) {
       const targetBookId = await resolveScopedBookId();

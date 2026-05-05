@@ -36,6 +36,11 @@ export interface ChapterReviewCycleResult {
     readonly applied: boolean;
     readonly rejectedReason?: string;
   }>;
+  readonly reviewSnapshots: ReadonlyArray<{
+    readonly stage: "writer-output" | "pre-audit";
+    readonly content: string;
+    readonly wordCount: number;
+  }>;
 }
 
 export async function runChapterReviewCycle(params: {
@@ -113,6 +118,11 @@ export async function runChapterReviewCycle(params: {
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
   const lengthNormalizationSnapshots: ChapterReviewCycleResult["lengthNormalizationSnapshots"] extends ReadonlyArray<infer T> ? T[] : never[] = [];
+  const reviewSnapshots: ChapterReviewCycleResult["reviewSnapshots"] extends ReadonlyArray<infer T> ? T[] : never[] = [{
+    stage: "writer-output",
+    content: finalContent,
+    wordCount: finalWordCount,
+  }];
 
   if (params.initialOutput.postWriteErrors.length > 0) {
     params.logWarn({
@@ -155,8 +165,16 @@ export async function runChapterReviewCycle(params: {
   finalWordCount = normalizedBeforeAudit.wordCount;
   normalizeApplied = normalizeApplied || normalizedBeforeAudit.applied;
   params.assertChapterContentNotEmpty(finalContent, "draft generation");
+  reviewSnapshots.push({
+    stage: "pre-audit",
+    content: finalContent,
+    wordCount: finalWordCount,
+  });
 
-  params.logStage({ zh: "审计草稿", en: "auditing draft" });
+  params.logStage({
+    zh: "审计草稿：检查连续性、人设、伏笔、爽点兑现、AI痕迹与平台硬风险；成人男频情欲内容本身不作为扣分项",
+    en: "auditing draft: checking continuity, character logic, hooks, payoff, AI tells and hard platform risk; adult genre content itself is not penalized",
+  });
   const rawLlmAudit = await params.auditor.auditChapter(
     params.bookDir,
     finalContent,
@@ -179,7 +197,10 @@ export async function runChapterReviewCycle(params: {
     const criticalIssues = auditResult.issues.filter((issue) => issue.severity === "critical");
     if (criticalIssues.length > 0) {
       const reviser = params.createReviser();
-      params.logStage({ zh: "自动修复关键问题", en: "auto-revising critical issues" });
+      params.logStage({
+        zh: `自动修复关键问题：仅针对 ${criticalIssues.length} 个 critical 做局部修补，避免改写成人男频核心卖点`,
+        en: `auto-revising ${criticalIssues.length} critical issue(s) with targeted patching only`,
+      });
       const reviseOutput = await reviser.reviseChapter(
         params.bookDir,
         finalContent,
@@ -245,5 +266,6 @@ export async function runChapterReviewCycle(params: {
     postReviseCount,
     normalizeApplied,
     lengthNormalizationSnapshots,
+    reviewSnapshots,
   };
 }

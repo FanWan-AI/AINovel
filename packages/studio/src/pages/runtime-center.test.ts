@@ -7,6 +7,7 @@ import {
   deriveRuntimeSessionViewModel,
   deriveRuntimeBookRunViewModels,
   filterEvents,
+  formatRuntimeEventMessage,
   deriveEmptyHint,
   parseBookIds,
   validateAdvancedForm,
@@ -139,6 +140,36 @@ describe("filterEvents", () => {
     const result = filterEvents(noisy, { level: "", source: "", bookId: "" });
     expect(result).toHaveLength(1);
     expect((result[0]?.data as { message?: string })?.message).toBe("real log");
+  });
+
+  it("hides legacy llm progress events in favor of readable call progress events", () => {
+    const noisy: ReadonlyArray<SSEMessage> = [
+      makeMsg("llm:progress", { elapsedMs: 30000, chineseChars: 1000 }, 1),
+      makeMsg("llm:call:progress", { purpose: "撰写章节正文", agentName: "writer", chineseChars: 1000 }, 2),
+    ];
+    const result = filterEvents(noisy, { level: "", source: "", bookId: "" });
+    expect(result).toHaveLength(1);
+    expect(result[0].event).toBe("llm:call:progress");
+  });
+});
+
+describe("formatRuntimeEventMessage", () => {
+  it("formats readable LLM call progress with purpose and preview", () => {
+    expect(formatRuntimeEventMessage(makeMsg("llm:call:progress", {
+      purpose: "撰写章节正文",
+      agentName: "writer",
+      elapsedMs: 60500,
+      chineseChars: 2450,
+      preview: "万凡推开门，四道目光同时落在他身上。",
+    }))).toBe("撰写章节正文 · writer 正在输出，已用 61s，约 2450 个中文字。最近输出：万凡推开门，四道目光同时落在他身上。");
+  });
+
+  it("formats version creation events including rejected candidate reasons", () => {
+    expect(formatRuntimeEventMessage(makeMsg("chapter:version:created", {
+      label: "字数归一化候选（未应用） 6547 -> 4397",
+      applied: false,
+      rejectedReason: "压缩幅度 33% 超过安全阈值",
+    }))).toBe("字数归一化候选（未应用） 6547 -> 4397，仅作候选。原因：压缩幅度 33% 超过安全阈值");
   });
 });
 

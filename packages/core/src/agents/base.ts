@@ -27,10 +27,55 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
+    const callId = `${this.name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const purpose = this.describeCallPurpose();
+    const startedAt = Date.now();
+    this.ctx.onStreamProgress?.({
+      callId,
+      agentName: this.name,
+      purpose,
+      elapsedMs: 0,
+      totalChars: 0,
+      chineseChars: 0,
+      preview: "",
+      status: "start",
+    });
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
-      onStreamProgress: this.ctx.onStreamProgress,
+      onStreamProgress: (progress) => {
+        this.ctx.onStreamProgress?.({
+          ...progress,
+          callId,
+          agentName: this.name,
+          purpose,
+          elapsedMs: Math.max(progress.elapsedMs, Date.now() - startedAt),
+        });
+      },
     });
+  }
+
+  private describeCallPurpose(): string {
+    switch (this.name) {
+      case "writer":
+        return "撰写章节正文或章节观察结果";
+      case "planner":
+        return "规划下一章意图与剧情结构";
+      case "composer":
+        return "组装章节运行时上下文";
+      case "continuity-auditor":
+      case "auditor":
+        return "审计连续性、人设、伏笔、爽点兑现与成人内容质量导向";
+      case "reviser":
+        return "局部修补章节问题";
+      case "length-normalizer":
+        return "生成字数归一化候选";
+      case "state-validator":
+        return "校验真相文件与章节状态";
+      case "chapter-analyzer":
+        return "分析章节结构与状态提取";
+      default:
+        return `${this.name} LLM 调用`;
+    }
   }
 
   /**

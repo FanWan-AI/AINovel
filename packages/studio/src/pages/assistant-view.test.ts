@@ -45,6 +45,7 @@ import {
   resolveAssistantAgentOutcomeFromRuntimeEvents,
   resolveBookFromPrompt,
   resolveAssistantTemplateSuggestedActions,
+  shouldShowAssistantTaskPlanCard,
   shouldKeepPendingOnChatDisconnect,
   transitionAssistantTaskPlan,
   submitAssistantInput,
@@ -461,6 +462,26 @@ describe("AssistantView", () => {
     expect(succeeded.status).toBe("succeeded");
     expect(failed.status).toBe("failed");
     expect(cancelled.status).toBe("cancelled");
+  });
+
+  it("shows task plan cards only while action is pending, running, or failed", () => {
+    const draft = buildAssistantConfirmationDraft("请写下一章", ["book-1"]);
+    expect(draft).not.toBeNull();
+    const planDraft = createAssistantTaskPlanDraft(draft!, 5100);
+
+    const awaitingConfirm = transitionAssistantTaskPlan(planDraft, "awaiting-confirm", 5101);
+    const running = transitionAssistantTaskPlan(awaitingConfirm, "running", 5102);
+    const succeeded = transitionAssistantTaskPlan(running, "succeeded", 5103);
+    const failed = transitionAssistantTaskPlan(running, "failed", 5104);
+    const cancelled = transitionAssistantTaskPlan(awaitingConfirm, "cancelled", 5105);
+
+    expect(shouldShowAssistantTaskPlanCard(planDraft)).toBe(false);
+    expect(shouldShowAssistantTaskPlanCard(awaitingConfirm)).toBe(true);
+    expect(shouldShowAssistantTaskPlanCard(running)).toBe(true);
+    expect(shouldShowAssistantTaskPlanCard(failed)).toBe(true);
+    expect(shouldShowAssistantTaskPlanCard(succeeded)).toBe(false);
+    expect(shouldShowAssistantTaskPlanCard(cancelled)).toBe(false);
+    expect(shouldShowAssistantTaskPlanCard(null)).toBe(false);
   });
 
   it("completes running task plans with succeeded/failed results", () => {

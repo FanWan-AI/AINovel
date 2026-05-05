@@ -101,6 +101,7 @@ export interface ChapterPipelineResult {
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
   readonly lengthNormalizationSnapshots?: ReadonlyArray<LengthNormalizationSnapshot>;
+  readonly reviewSnapshots?: ReadonlyArray<ChapterReviewSnapshot>;
   readonly tokenUsage?: TokenUsageSummary;
 }
 
@@ -125,6 +126,12 @@ export interface LengthNormalizationSnapshot {
   readonly afterCount: number;
   readonly applied: boolean;
   readonly rejectedReason?: string;
+}
+
+export interface ChapterReviewSnapshot {
+  readonly stage: "writer-output" | "pre-audit";
+  readonly content: string;
+  readonly wordCount: number;
 }
 
 export interface PlanChapterResult {
@@ -1937,6 +1944,7 @@ export class PipelineRunner {
       lengthWarnings,
       lengthTelemetry,
       lengthNormalizationSnapshots: reviewResult.lengthNormalizationSnapshots,
+      reviewSnapshots: reviewResult.reviewSnapshots,
       tokenUsage: totalUsage,
     };
   }
@@ -2009,6 +2017,7 @@ export class PipelineRunner {
         language: pipelineLang,
         logWarn: (message) => this.logWarn(pipelineLang, message),
         logger: this.config.logger,
+        fallbackOutput: repairedOutput,
       });
       if (recovery.kind !== "recovered") {
         throw new Error(
@@ -2148,6 +2157,7 @@ export class PipelineRunner {
         language: pipelineLang,
         logWarn: (message) => this.logWarn(pipelineLang, message),
         logger: this.config.logger,
+        fallbackOutput: syncedOutput,
       });
       if (recovery.kind !== "recovered") {
         throw new Error(
@@ -2826,19 +2836,20 @@ ${matrix}`,
     const cutRatio = writerCount > 0 ? 1 - normalized.finalCount / writerCount : 0;
     const expansionRatio = writerCount > 0 ? normalized.finalCount / writerCount - 1 : 0;
     const normalizedOutsideHardRange = isOutsideHardRange(normalized.finalCount, params.lengthSpec);
-    const destructiveCompression = normalized.mode === "compress" && cutRatio > 0.30;
+    const destructiveCompression = normalized.mode === "compress" && cutRatio > 0.20;
     const destructiveExpansion = normalized.mode === "expand" && expansionRatio > 3.0;
 
-    // Quality-first safety net: never accept a one-pass length rewrite that is
-    // still outside the configured hard range or that rewrites too much of the
-    // chapter. Keeping a slightly long/short but intact scene is better than
-    // saving a gutted chapter.
-    if (normalizedOutsideHardRange || destructiveCompression || destructiveExpansion) {
+    // Reject if: (1) result is still outside hard range — normalization didn't help, OR
+    // (2) expansion is wildly too large.
+    // NOTE: We deliberately do NOT reject heavy compression when the result fits within
+    // the hard range. A moderately compressed chapter that fits is far better than an
+    // oversized chapter that later causes state-validation failures and pipeline crashes.
+    // The original 20% "destructive compression" guard created a catch-22 where chapters
+    // too long to fit in one pass could never be normalized.
+    if (normalizedOutsideHardRange || destructiveExpansion) {
       const reason = normalizedOutsideHardRange
         ? `结果仍超出硬区间 ${params.lengthSpec.hardMin}-${params.lengthSpec.hardMax}`
-        : destructiveCompression
-          ? `压缩幅度 ${Math.round(cutRatio * 100)}% 超过安全阈值`
-          : `扩写幅度 ${Math.round(expansionRatio * 100)}% 超过安全阈值`;
+        : `扩写幅度 ${Math.round(expansionRatio * 100)}% 超过安全阈值`;
       this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
         zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（${reason}），已保留原稿。`,
         en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount}; original draft kept.`,
@@ -2860,6 +2871,14 @@ ${matrix}`,
             }
           : undefined,
       };
+    }
+
+    // Warn when compression is heavy but the result fits — accept rather than keep oversized
+    if (destructiveCompression) {
+      this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
+        zh: `字数归一化大幅压缩：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（压缩幅度 ${Math.round(cutRatio * 100)}%），结果在硬区间内，已接受。`,
+        en: `Length normalization applied heavy compression for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount} (${Math.round(cutRatio * 100)}% cut); result within hard range, accepted.`,
+      });
     }
 
     this.logInfo(this.languageFromLengthSpec(params.lengthSpec), {

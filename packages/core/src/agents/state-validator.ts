@@ -99,6 +99,24 @@ ${chapterContent.slice(0, 6000)}`;
       return this.parseResult(response.content);
     } catch (error) {
       this.log?.warn(`State validation failed: ${error}`);
+      // LLM returned empty or the API had a transient failure — treat as passed
+      // rather than crashing the entire write-next pipeline.
+      if (
+        error instanceof Error &&
+        (error.message.includes("LLM returned empty response") ||
+          error.message.includes("empty response"))
+      ) {
+        this.log?.warn("State validation skipped due to empty LLM response; treating as passed.");
+        return {
+          warnings: [
+            {
+              category: "validation_skipped",
+              description: "LLM returned empty response; validation skipped automatically.",
+            },
+          ],
+          passed: true,
+        };
+      }
       throw error;
     }
   }

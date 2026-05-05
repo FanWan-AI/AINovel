@@ -33,6 +33,8 @@ export function actionTypeLabel(actionType: ChapterRunActionType, t: TFunction):
   if (actionType === "rewrite") return t("book.rewrite");
   if (actionType === "anti-detect") return t("book.antiDetect");
   if (actionType === "blueprint-targeted-revise") return "蓝图定点修订";
+  if (actionType === "length-normalize") return "字数候选";
+  if (actionType === "pipeline-snapshot") return "流水线快照";
   return t("chapterTaskCenter.actionResync");
 }
 

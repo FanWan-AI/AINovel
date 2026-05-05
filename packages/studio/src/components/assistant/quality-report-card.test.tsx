@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { mapQualityDimensionRows, QualityReportCard } from "./QualityReportCard";
+import { buildQualitySnapshot, mapQualityDimensionRows, QualityReportCard } from "./QualityReportCard";
 
 describe("QualityReportCard", () => {
   it("maps chapter and book dimension scores into stable serializable integer values", () => {
@@ -36,7 +36,35 @@ describe("QualityReportCard", () => {
     expect(bookRows.map((row) => row.score)).toEqual([85, 79, 74, 68, 90, 62]);
   });
 
-  it("renders chapter/book toggles, cache badge and markdown evidence", () => {
+  it("builds a compact book health snapshot with actionable issues", () => {
+    const snapshot = buildQualitySnapshot({
+      scopeType: "book",
+      overallScore: 68,
+      dimensions: {
+        mainline: 82,
+        character: 81,
+        foreshadowing: 30,
+        repetition: 72,
+        style: 78,
+        pacing: 62,
+      },
+      blockingIssues: ["最新章节运行中有 1 条失败记录，需先处理阻断问题。"],
+      evidence: [],
+    });
+
+    expect(snapshot).toEqual({
+      label: "全书健康",
+      score: 68,
+      summaryParts: ["伏笔积压", "有失败运行", "节奏偏弱"],
+      actionItems: [
+        "伏笔积压：伏笔分 30，优先回收或关闭旧钩子。",
+        "最新章节运行中有 1 条失败记录，需先处理阻断问题。",
+        "节奏偏弱：节奏分 62，下一章需要明确推进或降调喘息。",
+      ],
+    });
+  });
+
+  it("renders a collapsed health strip by default without long evidence text", () => {
     const onRunNextAction = vi.fn();
     const html = renderToStaticMarkup(
       createElement(QualityReportCard, {
@@ -72,7 +100,7 @@ describe("QualityReportCard", () => {
             blockingIssues: [],
             evidence: [{
               source: "book-story:demo-book:story_bible.md",
-              excerpt: "主线围绕王城阴谋推进。",
+              excerpt: "主线围绕王城阴谋推进。这是一段很长的证据原文，不应该在默认健康条中直接铺开。",
               reason: "story_bible 与章节覆盖率一致。",
             }],
             cached: true,
@@ -83,13 +111,16 @@ describe("QualityReportCard", () => {
       }),
     );
     expect(html).toContain("assistant-quality-report-card");
-    expect(html).toContain("章节视图");
-    expect(html).toContain("全书视图");
+    expect(html).toContain("全书健康：82");
     expect(html).toContain("已复用 book memory 缓存");
-    expect(html).toContain("动机承接偏弱");
-    expect(html).toContain("chapter-run:run_01");
-    expect(html).toContain("<table"); // react-markdown may add extra attributes
-    expect(html).toContain("目标与结果不一致");
+    expect(html).toContain("查看全书健康");
+    expect(html).not.toContain("章节视图");
+    expect(html).not.toContain("全书视图");
+    expect(html).not.toContain("动机承接偏弱");
+    expect(html).not.toContain("chapter-run:run_01");
+    expect(html).not.toContain("<table");
+    expect(html).not.toContain("目标与结果不一致");
+    expect(html).not.toContain("不应该在默认健康条中直接铺开");
     expect(html).not.toContain("下一步：spot-fix");
   });
 });

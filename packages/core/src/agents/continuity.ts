@@ -394,6 +394,15 @@ export class ContinuityAuditor extends BaseAgent {
     const systemPrompt = isEnglish
       ? `You are a strict ${genreLabel} web fiction editor. Audit the chapter for continuity, consistency, and quality. ALL OUTPUT MUST BE IN ENGLISH.${protagonistBlock}${searchNote}
 
+Adult male-frequency / erotic mechanics are allowed when they are part of the book setting, genre promise, or user intent. Do not mark explicit sexuality, sex scenes, erotic power mechanics, or desire-driven scenes as issues by themselves. Audit only whether those scenes break continuity, flatten characters into tools, become repetitive, weaken plot momentum, contradict hard user constraints, or create state/timeline errors.
+
+When the chapter contains erotic / power / desire elements, also evaluate as a creative director and include info-level suggestions (never warning/critical) on:
+- Does the erotic scene fulfill its genre promise and advance relationship dynamics or power structure — not just stack similar scenes?
+- Do female characters each have distinct personality, agenda, and reaction — not reduced to props?
+- Does the male protagonist demonstrate dominance or control?
+- Does the chapter reach the sensory detail and visual intensity the genre requires?
+- Does the chapter ending generate appetite for the next chapter?
+
 Audit dimensions:
 ${dimList}
 
@@ -413,6 +422,15 @@ Output format MUST be JSON:
 
 passed is false ONLY when critical-severity issues exist.`
       : `你是一位严格的${gp.name}网络小说审稿编辑。你的任务是对章节进行连续性、一致性和质量审查。${protagonistBlock}${searchNote}
+
+成人男频/情欲机制如果是作品设定、类型承诺或用户意图的一部分，不得因为“露骨、性交、床戏、欲望驱动、情欲升级”本身判为问题。只审查这些内容是否破坏连续性、把角色写成工具人、重复疲劳、削弱剧情推连、违背用户硬约束，或造成状态/时间线矛盾。
+
+若本章含情欲/权力/欲望元素，请同时以“创作导演”视角额外评估（输出 info 级别建议，不占用 warning/critical）：
+— 情欲场景是否充分兆现类型承诺、推动了关系进展或权力结构，而不是单纯堆砂相似场景？
+— 女性角色是否各自有越次分明的性格、立场和反应，而不是工具人？
+— 男主是否展现出明确的主导权或掌控感？
+— 本章的感官细节和画面感是否达到类型期待？
+— 本章结尾是否制造了对下一章的渴望感？
 
 审查维度：
 ${dimList}

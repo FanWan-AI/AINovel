@@ -110,6 +110,10 @@ export const STUDIO_SSE_EVENTS = [
   "radar:error",
   "log",
   "llm:progress",
+  "llm:call:start",
+  "llm:call:progress",
+  "llm:call:done",
+  "chapter:version:created",
   "ping",
 ] as const;
 

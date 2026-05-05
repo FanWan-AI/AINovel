@@ -2231,6 +2231,12 @@ export function buildAssistantNextActionPrompt(action: string, taskPlan: Assista
   return `请执行下一步动作：${action}`;
 }
 
+export function shouldShowAssistantTaskPlanCard(taskPlan: AssistantTaskPlan | null): boolean {
+  return taskPlan?.status === "awaiting-confirm"
+    || taskPlan?.status === "running"
+    || taskPlan?.status === "failed";
+}
+
 export function buildAssistantWorldRepairPrompt(
   report: AssistantWorldConsistencyMarketReport | null,
   stepId: string,
@@ -3191,8 +3197,6 @@ export function AssistantView({
     if (!bookId) {
       return;
     }
-    const chapterNumber = state.taskPlan.chapterNumber;
-    const runIds = collectAssistantStepRunIds(state.taskExecution.stepRunIds);
     const taskId = state.taskExecution.taskId;
     const applySuggestedNextActions = (
       prev: AssistantComposerState,
@@ -3203,33 +3207,18 @@ export function AssistantView({
     });
     void (async () => {
       try {
-        const [chapterResult, bookResult] = await Promise.all([
-          chapterNumber !== undefined
-            ? postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-                taskId,
-                scope: {
-                  type: "chapter" as const,
-                  bookId,
-                  chapter: chapterNumber,
-                },
-                ...(runIds.length > 0 ? { runIds } : {}),
-              })
-            : Promise.resolve(null),
-          postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
-            taskId,
-            scope: {
-              type: "book" as const,
-              bookId,
-            },
-          }),
-        ]);
+        const bookResult = await postApi<AssistantEvaluateResponse>("/assistant/evaluate", {
+          taskId,
+          scope: {
+            type: "book" as const,
+            bookId,
+          },
+        });
         const bookReport = bookResult.report;
         const qualityReport: QualityReportBundle = {
-          ...(chapterResult?.report ? { chapter: chapterResult.report } : {}),
           book: bookReport,
         };
         const serverSuggestedActions = mergeAssistantSuggestedNextActions(
-          chapterResult?.suggestedNextActions ?? [],
           bookResult.suggestedNextActions,
         );
         const isWriteNextTask = state.taskPlan?.action === "write-next";
@@ -3954,7 +3943,7 @@ export function AssistantView({
               onBlueprintUpdate={handleUpdateBlueprintCard}
             />
           )}
-          {state.taskPlan && (
+          {state.taskPlan && shouldShowAssistantTaskPlanCard(state.taskPlan) && (
             <TaskPlanCard
               t={t}
               taskPlan={state.taskPlan}

@@ -1258,7 +1258,7 @@ describe("PipelineRunner", () => {
       expect(infos).toEqual(expect.arrayContaining([
         "阶段：准备章节输入",
         "阶段：撰写章节草稿",
-        "阶段：审计草稿",
+        "阶段：审计草稿：检查连续性、人设、伏笔、爽点兑现、AI痕迹与平台硬风险；成人男频情欲内容本身不作为扣分项",
         "阶段：落盘最终章节",
         "阶段：生成最终真相文件",
         "阶段：校验真相文件变更",
@@ -1313,7 +1313,7 @@ describe("PipelineRunner", () => {
       expect(infos).toEqual(expect.arrayContaining([
         "Stage: preparing chapter inputs",
         "Stage: writing chapter draft",
-        "Stage: auditing draft",
+        "Stage: auditing draft: checking continuity, character logic, hooks, payoff, AI tells and hard platform risk; adult genre content itself is not penalized",
         "Stage: persisting final chapter",
         "Stage: rebuilding final truth files",
         "Stage: validating truth file updates",
@@ -1531,8 +1531,10 @@ describe("PipelineRunner", () => {
   it("normalizes revised output once before re-audit when it leaves the target band", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const writerDraft = "中段正文。".repeat(40);
-    const overlongRevision = "修订后正文。".repeat(60);
-    const normalizedRevision = "归一正文。".repeat(52);
+    // overlongRevision: 6×57=342 chars. hardMax=280, so need finalCount≤280 AND cutRatio≤20%
+    // 1-280/342≈18.1% ≤ 20% ✓ and 280 ≤ hardMax(280) ✓ — both safety gates pass
+    const overlongRevision = "修订后正文。".repeat(57);
+    const normalizedRevision = "归一正文。".repeat(56);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -1768,7 +1770,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("rejects a destructive compression even when it lands inside the hard range", async () => {
+  it("accepts heavy compression when the result fits inside the hard range", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const overlongDraft = "冗余句子。".repeat(60);
     const guttedDraft = "压缩正文。".repeat(40);
@@ -1806,17 +1808,18 @@ describe("PipelineRunner", () => {
       const chapterIndex = await state.loadChapterIndex(bookId);
       const chapterMeta = chapterIndex.find((entry) => entry.number === 1);
 
-      expect(result.lengthTelemetry?.normalizeApplied).toBe(false);
-      expect(result.lengthTelemetry?.finalCount).toBe(overlongDraft.length);
+      // Heavy compression is now ACCEPTED when the result fits in hard range
+      expect(result.lengthTelemetry?.normalizeApplied).toBe(true);
+      expect(result.lengthTelemetry?.finalCount).toBe(guttedDraft.length);
       expect(result.lengthNormalizationSnapshots?.[0]).toMatchObject({
         stage: "pre-audit",
         mode: "compress",
         beforeCount: overlongDraft.length,
         afterCount: guttedDraft.length,
-        applied: false,
+        applied: true,
       });
-      expect(result.lengthNormalizationSnapshots?.[0]?.rejectedReason).toContain("压缩幅度");
-      expect(chapterMeta?.wordCount).toBe(overlongDraft.length);
+      expect(result.lengthNormalizationSnapshots?.[0]?.rejectedReason).toBeUndefined();
+      expect(chapterMeta?.wordCount).toBe(guttedDraft.length);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

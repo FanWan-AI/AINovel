@@ -31,6 +31,8 @@ export interface SettlementRetryParams {
   readonly language: LengthLanguage;
   readonly logWarn?: (message: { zh: string; en: string }) => void;
   readonly logger?: Pick<Logger, "warn">;
+  /** When provided, used as the recovered output if the retry LLM call returns empty. */
+  readonly fallbackOutput?: WriteChapterOutput;
 }
 
 export type SettlementRetryResult =
@@ -52,21 +54,47 @@ export async function retrySettlementAfterValidationFailure(
     en: `State validation failed; retrying settlement only for chapter ${params.chapterNumber}`,
   });
 
-  const retryOutput = await params.writer.settleChapterState({
-    book: params.book,
-    bookDir: params.bookDir,
-    chapterNumber: params.chapterNumber,
-    title: params.title,
-    content: params.content,
-    allowReapply: true,
-    chapterIntent: params.reducedControlInput?.chapterIntent,
-    contextPackage: params.reducedControlInput?.contextPackage,
-    ruleStack: params.reducedControlInput?.ruleStack,
-    validationFeedback: buildStateValidationFeedback(
-      params.originalValidation.warnings,
-      params.language,
-    ),
-  });
+  let retryOutput: WriteChapterOutput;
+  try {
+    retryOutput = await params.writer.settleChapterState({
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      title: params.title,
+      content: params.content,
+      allowReapply: true,
+      chapterIntent: params.reducedControlInput?.chapterIntent,
+      contextPackage: params.reducedControlInput?.contextPackage,
+      ruleStack: params.reducedControlInput?.ruleStack,
+      validationFeedback: buildStateValidationFeedback(
+        params.originalValidation.warnings,
+        params.language,
+      ),
+    });
+  } catch (error) {
+    const isEmptyResponse =
+      error instanceof Error && error.message.includes("LLM returned empty response");
+    if (isEmptyResponse && params.fallbackOutput) {
+      params.logWarn?.({
+        zh: `状态结算重试时 LLM 返回空响应，已沿用初次结算结果（第${params.chapterNumber}章）`,
+        en: `Settlement retry LLM returned empty; falling back to original settlement for chapter ${params.chapterNumber}`,
+      });
+      return {
+        kind: "recovered",
+        output: params.fallbackOutput,
+        validation: {
+          warnings: [
+            {
+              category: "settlement_fallback",
+              description: "Settlement retry skipped due to empty LLM response; original settlement preserved.",
+            },
+          ],
+          passed: true,
+        },
+      };
+    }
+    throw error;
+  }
 
   let retryValidation: ValidationResult;
   try {

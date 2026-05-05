@@ -86,6 +86,7 @@ export async function validateChapterTruthPersistence(params: {
       language: params.language,
       logWarn: params.logWarn,
       logger: params.logger,
+      fallbackOutput: persistenceOutput,
     });
 
     if (recovery.kind === "recovered") {
