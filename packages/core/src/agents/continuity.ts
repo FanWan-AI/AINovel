@@ -409,6 +409,9 @@ When the chapter contains erotic / power / desire elements, also evaluate as a c
 - Is the climax summarized in one sentence instead of a slow-motion multi-paragraph scene? (If yes: warning — climax underwritten)
 - Are intimate body parts referred to only with euphemisms throughout? (If yes: warning — euphemistic body part references)
 - Is female dialogue too literary, lacking realistic gasps, trembling voice, and explicit content? (If yes: warning — erotic dialogue insufficiently explicit)
+- Does this chapter lack an edging sequence (bringing her to the orgasm threshold at least once then stopping to make her ask)? If this is chapter 2+ and edging has not appeared yet: warning — edging technique absent
+- Is the body sensitivity progression flat compared to previous chapters (same intensity, no escalating loss-of-control curve)? (If yes: warning — physiological sensitivity escalation curve broken)
+- Does sentence rhythm stay uniform throughout (same sentence length/structure during buildup and during climax, no fragmenting)? (If yes: warning — sentence rhythm does not track physical rhythm)
 
 Audit dimensions:
 ${dimList}
@@ -445,6 +448,9 @@ passed is false ONLY when critical-severity issues exist.`
 — 高潮是否被一句话总结带过而非用慢镜头呈现？（若是，标记 warning：高潮场景未充分展开）
 — 私密部位是否全程使用隐晦词汇（"那里"/"花蕊"等）而非直白描写？（若是，标记 warning：私密词汇隐晦化）
 — 女性对白是否过于文学化，缺乏真实兴奋状态下的气声、颤音和直白内容？（若是，标记 warning：情欲对白不够直白）
+— 本章情欲场景是否缺乏边缘控制（把她带到高潮边缘至少一次再停下逼她开口）？如果本章是第2章之后且尚未出现过边缘控制，标记 warning：缺少边缘控制技法
+— 本章身体感度描写是否与前几章相比没有递进（感觉一样强、没有越来越失控的曲线）？（若是，标记 warning：生理敏感度递进曲线断裂）
+— 句子节奏是否全程相同（高潮时和铺垫时的句子长度、结构完全一致，没有碎裂感）？（若是，标记 warning：句子节奏未跟随肉体节奏变化）
 
 审查维度：
 ${dimList}
