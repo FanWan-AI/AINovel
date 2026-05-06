@@ -6,6 +6,7 @@ import {
   canRejectChapterStatus,
   getTopActionIds,
   parseChapterLifecycleEvent,
+  QUICK_WRITE_CHAPTER_OPTIONS,
   ReleaseCandidatePanel,
   resolveChapterTaskActionType,
   resolveReleaseCandidateBadge,
@@ -117,6 +118,12 @@ describe("getTopActionIds — dual-button contract", () => {
     const actions = getTopActionIds() as ReadonlyArray<string>;
     expect(actions).not.toContain("draftOnly");
     expect(actions).not.toContain("writeNext");
+  });
+});
+
+describe("quick write chapter count options", () => {
+  it("offers exactly 1 through 6 chapters", () => {
+    expect(QUICK_WRITE_CHAPTER_OPTIONS).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });
 

@@ -12,6 +12,8 @@ export interface WriteNextInput {
   /** Planning mode. Defaults to legacy steering-field behaviour when omitted. */
   readonly mode?: WriteNextMode;
   readonly wordCount?: number;
+  /** Number of consecutive chapters to write in quick mode. */
+  readonly chapterCount?: number;
   readonly brief?: string;
   readonly chapterGoal?: string;
   readonly mustInclude?: string[];
@@ -129,6 +131,18 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
     }
   }
 
+  // chapterCount: optional integer from 1 to 6
+  if (raw["chapterCount"] !== undefined && raw["chapterCount"] !== null) {
+    if (
+      typeof raw["chapterCount"] !== "number"
+      || !Number.isInteger(raw["chapterCount"])
+      || raw["chapterCount"] < 1
+      || raw["chapterCount"] > 6
+    ) {
+      errors.push({ field: "chapterCount", message: "chapterCount must be an integer from 1 to 6" });
+    }
+  }
+
   // mode: optional enum
   if (raw["mode"] !== undefined && raw["mode"] !== null) {
     if (typeof raw["mode"] !== "string" || !VALID_MODES.has(raw["mode"])) {
@@ -205,6 +219,7 @@ export function validateWriteNextInput(body: unknown): WriteNextValidation {
     value: {
       mode: raw["mode"] as WriteNextMode | undefined,
       wordCount: raw["wordCount"] as number | undefined,
+      chapterCount: raw["chapterCount"] as number | undefined,
       brief: raw["brief"] as string | undefined,
       chapterGoal: raw["chapterGoal"] as string | undefined,
       mustInclude: raw["mustInclude"] as string[] | undefined,

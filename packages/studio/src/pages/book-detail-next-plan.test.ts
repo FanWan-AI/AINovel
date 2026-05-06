@@ -333,17 +333,17 @@ describe("E2E acceptance: manual plan → write path", () => {
 });
 
 // Path 4: 快速写路径
-// User clicks "快速写" → postApi is called directly with no body and no
+// User clicks "快速写" → postApi is called directly with selected count and no
 // planning dialog is opened.
 describe("E2E acceptance: quick write path", () => {
-  it("quick write posts to write-next endpoint with no body", async () => {
+  it("quick write posts to write-next endpoint with selected chapter count", async () => {
     const mockPost = vi.fn().mockResolvedValue(undefined);
-    // Simulates handleQuickWrite: calls postApi with only the path
-    await mockPost("/books/book-demo/write-next");
+    // Simulates handleQuickWrite: calls postApi with quick mode and chapter count.
+    await mockPost("/books/book-demo/write-next", { mode: "quick", chapterCount: 2 });
     expect(mockPost).toHaveBeenCalledOnce();
     const [path, body] = mockPost.mock.calls[0] as [string, unknown];
     expect(path).toBe("/books/book-demo/write-next");
-    expect(body).toBeUndefined();
+    expect(body).toEqual({ mode: "quick", chapterCount: 2 });
   });
 
   it("quick write does not open the planning dialog", () => {

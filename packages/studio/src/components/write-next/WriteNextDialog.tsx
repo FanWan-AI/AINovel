@@ -22,6 +22,7 @@ export const INITIAL_WRITE_NEXT_FORM: WriteNextFormState = {
 
 export interface WriteNextPayload {
   readonly mode?: "ai-plan" | "manual-plan" | "quick";
+  readonly chapterCount?: number;
   readonly chapterGoal?: string;
   readonly mustInclude?: string[];
   readonly mustAvoid?: string[];

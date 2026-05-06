@@ -141,18 +141,18 @@ describe("writeNextDialog toggle logic", () => {
 });
 
 // ---------------------------------------------------------------------------
-// quick-write fallback path — posts without a body
+// quick-write fallback path — posts selected chapter count
 // ---------------------------------------------------------------------------
 
 describe("quick-write fallback path", () => {
-  it("calls postApi with only the path and no body for quick write", async () => {
+  it("calls postApi with quick mode and selected chapter count", async () => {
     const mockPost = vi.fn().mockResolvedValue(undefined);
     // Simulates handleQuickWrite body
-    await mockPost("/books/book-123/write-next");
+    await mockPost("/books/book-123/write-next", { mode: "quick", chapterCount: 3 });
     expect(mockPost).toHaveBeenCalledOnce();
-    const [path, body] = mockPost.mock.calls[0] as [string, unknown];
+    const [path, body] = mockPost.mock.calls[0] as [string, WriteNextPayload];
     expect(path).toBe("/books/book-123/write-next");
-    expect(body).toBeUndefined();
+    expect(body).toEqual({ mode: "quick", chapterCount: 3 });
   });
 
   it("calls postApi with the payload when dialog is submitted with data", async () => {
@@ -306,21 +306,21 @@ describe("planning panel tab switching", () => {
 // ---------------------------------------------------------------------------
 
 describe("quick-write path regression", () => {
-  it("quick write posts directly without payload and without touching dialog state", async () => {
+  it("quick write posts selected count directly without touching dialog state", async () => {
     const mockPost = vi.fn().mockResolvedValue(undefined);
     let dialogOpen = false;
 
     // Simulates handleQuickWrite — dialog is never touched
     const handleQuickWrite = async (bookId: string) => {
-      await mockPost(`/books/${bookId}/write-next`);
+      await mockPost(`/books/${bookId}/write-next`, { mode: "quick", chapterCount: 6 });
       // dialogOpen must NOT be set to true
     };
 
     await handleQuickWrite("book-999");
     expect(dialogOpen).toBe(false);
-    expect(mockPost).toHaveBeenCalledWith("/books/book-999/write-next");
+    expect(mockPost).toHaveBeenCalledWith("/books/book-999/write-next", { mode: "quick", chapterCount: 6 });
     const [, body] = mockPost.mock.calls[0] as [string, unknown];
-    expect(body).toBeUndefined();
+    expect(body).toEqual({ mode: "quick", chapterCount: 6 });
   });
 });
 
@@ -444,12 +444,13 @@ describe("mode field correctness", () => {
     expect(payload.mode).toBe("manual-plan");
   });
 
-  it("quick-write path does NOT send a mode field", async () => {
+  it("quick-write path sends quick mode and selected chapter count", async () => {
     const mockPost = vi.fn().mockResolvedValue(undefined);
-    // Simulates handleQuickWrite — no body at all
-    await mockPost("/books/book-1/write-next");
+    // Simulates handleQuickWrite — quick write bypasses the planning form.
+    await mockPost("/books/book-1/write-next", { mode: "quick", chapterCount: 1 });
     const [, body] = mockPost.mock.calls[0] as [string, WriteNextPayload | undefined];
-    expect(body).toBeUndefined();
+    expect(body?.mode).toBe("quick");
+    expect(body?.chapterCount).toBe(1);
   });
 
   it("buildWriteNextPayload itself does not include mode (mode is added by the submit handler)", () => {

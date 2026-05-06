@@ -5189,7 +5189,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ code: "WRITE_NEXT_VALIDATION_FAILED", errors: validation.errors }, 422);
     }
 
-    const { wordCount, mode, planInput, ...steeringInput } = validation.value;
+    const { wordCount, chapterCount, mode, planInput, ...steeringInput } = validation.value;
+    const quickChapterCount = chapterCount ?? 1;
     const confirmedChapterBlueprint = parseConfirmedChapterBlueprint(steeringInput.blueprint);
     const directBrief = normalizeBriefValue((steeringInput as { brief?: unknown }).brief);
     const planBrief = normalizeBriefValue(planInput);
@@ -5246,12 +5247,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     };
     const resolvePlanOrFallbackChapterNumber = (plan: { chapterNumber?: unknown }): number | undefined =>
       typeof plan.chapterNumber === "number" ? plan.chapterNumber : chapterNumber;
-    emitActionEvent("write-next", "start", {
-      bookId: id,
-      chapterNumber,
-      briefUsed,
-    });
-
     // Shared SSE callbacks used by all mode branches.
     type WriteResult = {
       chapterNumber: number;
@@ -5637,6 +5632,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // planInput (optional) is passed to planChapter as additional planning context.
       // Both steps are fire-and-forget; progress is pushed via SSE.
       const planPipeline = new PipelineRunner(await buildPipelineConfig());
+      emitActionEvent("write-next", "start", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+      });
       emitActionEvent("plan", "start", {
         bookId: id,
         chapterNumber,
@@ -5680,16 +5680,41 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } else if (mode === "quick" && !hasStructuredSteering) {
       // Quick mode: write directly without any context injection.
       const pipeline = new PipelineRunner(await buildPipelineConfig());
-      emitActionEvent("compose", "start", {
-        bookId: id,
-        chapterNumber,
-        briefUsed,
-      });
-      pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
+      void (async () => {
+        for (let i = 0; i < quickChapterCount; i++) {
+          const nextChapterNumber = await resolveNextChapterNumber(id);
+          emitActionEvent("write-next", "start", {
+            bookId: id,
+            chapterNumber: nextChapterNumber,
+            briefUsed,
+            details: { batchIndex: i + 1, batchTotal: quickChapterCount },
+          });
+          emitActionEvent("compose", "start", {
+            bookId: id,
+            chapterNumber: nextChapterNumber,
+            briefUsed,
+            details: { batchIndex: i + 1, batchTotal: quickChapterCount },
+          });
+          try {
+            const result = await pipeline.writeNextChapter(id, wordCount);
+            await onWriteComplete(result);
+          } catch (e) {
+            const error = e instanceof Error ? e.message : String(e);
+            emitActionEvent("compose", "fail", { bookId: id, chapterNumber: nextChapterNumber, briefUsed, error });
+            emitActionEvent("write-next", "fail", { bookId: id, chapterNumber: nextChapterNumber, briefUsed, error });
+            break;
+          }
+        }
+      })();
     } else {
       // manual-plan, legacy (no mode), or quick with steering: build externalContext from steering fields.
       const externalContext = buildWriteNextExternalContext(effectiveSteeringInput);
       const pipeline = new PipelineRunner(await buildPipelineConfig({ externalContext, confirmedChapterBlueprint }));
+      emitActionEvent("write-next", "start", {
+        bookId: id,
+        chapterNumber,
+        briefUsed,
+      });
       emitActionEvent("compose", "start", {
         bookId: id,
         chapterNumber,
@@ -5698,7 +5723,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       pipeline.writeNextChapter(id, wordCount).then(onWriteComplete, onWriteError);
     }
 
-    return c.json({ status: "writing", bookId: id });
+    return c.json({ status: "writing", bookId: id, chapterCount: mode === "quick" ? quickChapterCount : 1 });
   });
 
   app.post("/api/books/:id/draft", async (c) => {

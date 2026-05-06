@@ -184,6 +184,9 @@ export function getTopActionIds(): ReadonlyArray<"planNextAndWrite" | "quickWrit
   return ["planNextAndWrite", "quickWrite"];
 }
 
+export const QUICK_WRITE_CHAPTER_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
+export type QuickWriteChapterCount = typeof QUICK_WRITE_CHAPTER_OPTIONS[number];
+
 export function resolveReleaseCandidateBadge(
   isReleaseCandidate: boolean,
   eligible: boolean,
@@ -380,6 +383,7 @@ export function BookDetail({
   } = useApi<ReleaseCandidateEvaluationData>(`/books/${bookId}/release-candidate/evaluate?manualConfirmed=${releaseCandidateManualConfirmed ? "true" : "false"}`);
   const [writeRequestPending, setWriteRequestPending] = useState(false);
   const [draftRequestPending, setDraftRequestPending] = useState(false);
+  const [quickWriteChapterCount, setQuickWriteChapterCount] = useState<QuickWriteChapterCount>(1);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [writeNextDialogOpen, setWriteNextDialogOpen] = useState(false);
@@ -509,7 +513,7 @@ export function BookDetail({
   const handleQuickWrite = async () => {
     setWriteRequestPending(true);
     try {
-      await postApi(`/books/${bookId}/write-next`);
+      await postApi(`/books/${bookId}/write-next`, { mode: "quick", chapterCount: quickWriteChapterCount });
     } catch (e) {
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
@@ -860,14 +864,28 @@ export function BookDetail({
             {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Wand2 size={16} />}
             {writing ? t("dash.writing") : t("book.planNextAndWrite")}
           </button>
-          <button
-            onClick={handleQuickWrite}
-            disabled={writing || drafting}
-            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-foreground rounded-xl hover:bg-secondary/80 transition-all border border-border/50 disabled:opacity-50"
-          >
-            {writing ? <div className="w-3.5 h-3.5 border-2 border-foreground/20 border-t-foreground rounded-full animate-spin" /> : <Zap size={14} />}
-            {writing ? t("dash.writing") : t("writeNext.quickWrite")}
-          </button>
+          <div className="flex items-center gap-1.5 rounded-xl border border-border/50 bg-secondary text-foreground">
+            <select
+              value={quickWriteChapterCount}
+              onChange={(e) => setQuickWriteChapterCount(Number(e.target.value) as QuickWriteChapterCount)}
+              disabled={writing || drafting}
+              aria-label={t("writeNext.quickWriteChapterCount")}
+              title={t("writeNext.quickWriteChapterCount")}
+              className="h-10 rounded-l-xl bg-transparent pl-3 pr-7 text-sm font-medium outline-none disabled:opacity-50"
+            >
+              {QUICK_WRITE_CHAPTER_OPTIONS.map((count) => (
+                <option key={count} value={count}>{count} {t("dash.chapters")}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleQuickWrite}
+              disabled={writing || drafting}
+              className="flex h-10 items-center gap-2 rounded-r-xl border-l border-border/50 px-4 text-sm font-medium hover:bg-secondary/80 transition-all disabled:opacity-50"
+            >
+              {writing ? <div className="w-3.5 h-3.5 border-2 border-foreground/20 border-t-foreground rounded-full animate-spin" /> : <Zap size={14} />}
+              {writing ? t("dash.writing") : t("writeNext.quickWrite")}
+            </button>
+          </div>
           <button
             onClick={() => (nav as { toTruth?: (id: string) => void }).toTruth?.(bookId)}
             className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-muted-foreground rounded-xl hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50"

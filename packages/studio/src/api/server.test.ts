@@ -5135,6 +5135,57 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", 2000);
   });
 
+  it("quick write can run a selected batch of up to six chapters sequentially", async () => {
+    writeNextChapterMock
+      .mockResolvedValueOnce({
+        chapterNumber: 3,
+        title: "Batch Chapter 3",
+        wordCount: 1800,
+        revised: false,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "ok" },
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 4,
+        title: "Batch Chapter 4",
+        wordCount: 1750,
+        revised: false,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "ok" },
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 5,
+        title: "Batch Chapter 5",
+        wordCount: 1900,
+        revised: false,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "ok" },
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "quick", chapterCount: 3, wordCount: 2200 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "writing",
+      bookId: "demo-book",
+      chapterCount: 3,
+    });
+
+    await vi.waitFor(() => {
+      expect(writeNextChapterMock).toHaveBeenCalledTimes(3);
+    });
+    expect(writeNextChapterMock).toHaveBeenNthCalledWith(1, "demo-book", 2200);
+    expect(writeNextChapterMock).toHaveBeenNthCalledWith(2, "demo-book", 2200);
+    expect(writeNextChapterMock).toHaveBeenNthCalledWith(3, "demo-book", 2200);
+  });
+
   it("updates book memory after write-next and revise complete", async () => {
     const chapterDir = join(root, "books", "demo-book", "chapters");
     await mkdir(chapterDir, { recursive: true });

@@ -503,6 +503,7 @@ export const strings = {
   "writeNext.quickWriteTip": { zh: "速度快，但可控性低，适合快速推进剧情。", en: "Fast, but with reduced control — best for quickly advancing the plot." },
 
   // Dual-button planning panel
+  "writeNext.quickWriteChapterCount": { zh: "快速写章节数", en: "Quick write chapter count" },
   "book.planNextAndWrite": { zh: "规划下章并写作", en: "Plan Next Chapter" },
   "writeNext.tabAI": { zh: "AI 生成建议", en: "AI Suggestions" },
   "writeNext.tabManual": { zh: "手动规划", en: "Manual Plan" },
