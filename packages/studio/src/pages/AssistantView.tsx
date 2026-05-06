@@ -517,7 +517,7 @@ async function streamAssistantChat(
     callbacks.onDone({ ok: false, error: normalizeAssistantStreamError(e) });
   }
 }
-const BOOK_STATUS_ACTIVE = "active";
+const BOOK_STATUSES_ACCESSIBLE = new Set(["incubating", "outlining", "active", "paused"]);
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|下一章节?写(?!什么|啥|哪)|下一章写|创作下一章|写第\s*\d+\s*章|继续写|续写|落实下一章|按.{0,15}(?:设计|方案|规划).{0,10}(?:写|生成|落实|执行)|write[-\s]?next|next\s*chapter|continue\s*writing/iu;
 // When the user wants to rewrite/rework an existing chapter, do NOT route to write-next even if
 // the prompt also matches write-next patterns (e.g. "按照你的方案 彻底重写第一章").
@@ -2774,7 +2774,7 @@ export function AssistantView({
   const sseCursorRef = useRef(0);
   const evaluatedTaskIdRef = useRef<string | null>(null);
   const activeBooks = useMemo(
-    () => (booksData?.books ?? []).filter((book) => book.status === BOOK_STATUS_ACTIVE),
+    () => (booksData?.books ?? []).filter((book) => BOOK_STATUSES_ACCESSIBLE.has(book.status)),
     [booksData?.books],
   );
   const [chatBookContext, setChatBookContext] = useState<ChatBookContext | null>(

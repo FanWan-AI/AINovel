@@ -696,7 +696,7 @@ export function RuntimeCenter({
     [daemonSession, sse.messages, bookTitleById],
   );
   const activeBooks = useMemo(
-    () => (booksData?.books ?? []).filter((book) => book.status === "active"),
+    () => (booksData?.books ?? []).filter((book) => ["incubating", "outlining", "active", "paused"].includes(book.status)),
     [booksData?.books],
   );
   const selectedBookIds = useMemo(

@@ -6,10 +6,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const studioRoot = resolve(__dirname, "..");
 const repoRoot = resolve(studioRoot, "..", "..");
-const tsxBin = join(studioRoot, "node_modules", ".bin", "tsx");
-const viteBin = join(studioRoot, "node_modules", ".bin", "vite");
-const apiPort = "4569";
-const webPort = "4567";
+const binSuffix = process.platform === "win32" ? ".CMD" : "";
+const tsxBin = join(studioRoot, "node_modules", ".bin", `tsx${binSuffix}`);
+const viteBin = join(studioRoot, "node_modules", ".bin", `vite${binSuffix}`);
+const apiPort = "5174";
+const webPort = "5173";
 
 // Resolve project root: explicit env var takes priority with no silent fallback.
 // Without it, check cwd first, then fall back to repo root (useful for contributors).
@@ -46,6 +47,7 @@ function launch(command, args, env = process.env) {
     cwd: studioRoot,
     stdio: "inherit",
     env,
+    shell: process.platform === "win32",
   });
   child.on("error", (error) => {
     console.error(`[studio:dev] failed to launch ${command}: ${error.message}`);
@@ -60,7 +62,7 @@ const api = launch(tsxBin, ["src/api/index.ts", projectRoot], {
   INKOS_PROJECT_ROOT: projectRoot,
 });
 
-const web = launch(viteBin, ["--host", "--port", webPort], {
+const web = launch(viteBin, ["--host", "127.0.0.1", "--port", webPort], {
   ...process.env,
   INKOS_STUDIO_PORT: apiPort,
 });

@@ -10330,7 +10330,7 @@ export async function startStudioServer(
   port = 4567,
   options?: { readonly staticDir?: string },
 ): Promise<void> {
-  const config = await loadProjectConfig(root);
+  const config = await loadProjectConfig(root, { requireApiKey: false });
 
   const app = createStudioServer(config, root);
 
@@ -10378,7 +10378,7 @@ export async function startStudioServer(
     const tryPort = port + attempt;
     try {
       await new Promise<void>((resolve, reject) => {
-        const server = serve({ fetch: app.fetch, port: tryPort }, () => {
+        const server = serve({ fetch: app.fetch, port: tryPort, hostname: "127.0.0.1" }, () => {
           console.log(`NovaScribe Studio running on http://localhost:${tryPort}`);
           resolve();
         });
