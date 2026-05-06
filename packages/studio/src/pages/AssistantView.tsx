@@ -27,6 +27,9 @@ import { BlueprintPreviewCard, type BlueprintPreviewPayload } from "../component
 import { ContractVerificationCard, type VerificationReportPayload } from "../components/assistant/ContractVerificationCard";
 import { PlotCritiqueCard, type PlotCritiqueCardPayload } from "../components/assistant/PlotCritiqueCard";
 import { EditorReportCard, type EditorReportPayload } from "../components/assistant/EditorReportCard";
+import { BookCreationDraftCard } from "../components/assistant/BookCreationDraftCard";
+import type { BookCreationDraftPayload } from "../api/services/assistant-artifact-service";
+import { isCreateNewBookIntent } from "../api/services/intent-router-service";
 import { cn } from "../lib/utils";
 import { useSSE, type SSEMessage } from "../hooks/use-sse";
 import {
@@ -42,10 +45,11 @@ import {
 
 interface Nav {
   toDashboard: () => void;
+  toBook?: (bookId: string) => void;
 }
 
 export interface AssistantMessageCard {
-  readonly type: "plot_critique" | "contract" | "blueprint" | "verification" | "editor_report";
+  readonly type: "plot_critique" | "contract" | "blueprint" | "verification" | "editor_report" | "book_creation_draft" | "book_created";
   readonly payload: Record<string, unknown>;
 }
 
@@ -515,6 +519,9 @@ async function streamAssistantChat(
 }
 const BOOK_STATUS_ACTIVE = "active";
 const WRITE_NEXT_ACTION_PATTERN = /写下一章|下一章节?写(?!什么|啥|哪)|下一章写|创作下一章|写第\s*\d+\s*章|继续写|续写|落实下一章|按.{0,15}(?:设计|方案|规划).{0,10}(?:写|生成|落实|执行)|write[-\s]?next|next\s*chapter|continue\s*writing/iu;
+// When the user wants to rewrite/rework an existing chapter, do NOT route to write-next even if
+// the prompt also matches write-next patterns (e.g. "按照你的方案 彻底重写第一章").
+const REWRITE_INTENT_GUARD = /重写|改写|彻底改|大幅改|重构|rewrite/iu;
 const AUDIT_ACTION_PATTERN = /审计|审核|审一下|审下|审一审|检查|audit|review/iu;
 // Prompts that contain these patterns are questions/opinion requests, not action commands.
 // e.g. "你觉得下一章节写...如何" or "你来设计一下" must go to chat, not trigger write-next.
@@ -1879,6 +1886,8 @@ export function detectAssistantBookAction(prompt: string): AssistantBookActionTy
   if (!normalized) return null;
   // Question/opinion prompts are not action commands — route to chat instead.
   if (QUESTION_INTENT_GUARD.test(prompt.trim())) return null;
+  // Rewrite/rework requests target an existing chapter — do not treat as write-next.
+  if (REWRITE_INTENT_GUARD.test(normalized)) return null;
   if (WRITE_NEXT_ACTION_PATTERN.test(normalized)) return "write-next";
   if (AUDIT_ACTION_PATTERN.test(normalized)) return "audit";
   return null;
@@ -2149,9 +2158,10 @@ export function resolveAssistantGoalToBookProgress(
 
 export function requestAssistantConfirmation(
   state: AssistantComposerState,
-  draft: AssistantConfirmationDraft,
+  draft: AssistantConfirmationDraft | null,
   now = Date.now(),
 ): AssistantComposerState {
+  if (!draft) return state;
   const normalizedPrompt = draft.prompt.trim();
   if (!normalizedPrompt || state.loading || state.taskPlan?.status === "awaiting-confirm" || state.taskPlan?.status === "running") {
     return state;
@@ -2329,11 +2339,17 @@ function MessageList({
   sessionId,
   bookId,
   onBlueprintUpdate,
+  onPrefill,
+  onSendMessage,
+  onNavigateToBook,
 }: {
   readonly messages: ReadonlyArray<AssistantMessage>;
   readonly sessionId?: string;
   readonly bookId?: string;
   readonly onBlueprintUpdate?: (messageId: string, cardIndex: number, newPayload: Record<string, unknown>) => void;
+  readonly onPrefill?: (text: string) => void;
+  readonly onSendMessage?: (text: string) => void;
+  readonly onNavigateToBook?: (bookId: string) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -2358,6 +2374,9 @@ function MessageList({
                   sessionId={sessionId}
                   bookId={bookId}
                   onBlueprintUpdate={onBlueprintUpdate ? (cardIndex, newPayload) => onBlueprintUpdate(message.id, cardIndex, newPayload) : undefined}
+                  onPrefill={onPrefill}
+                  onSendMessage={onSendMessage}
+                  onNavigateToBook={onNavigateToBook}
                 />
               )}
             </>
@@ -2533,11 +2552,17 @@ export function NovelosMessageCards({
   sessionId,
   bookId,
   onBlueprintUpdate,
+  onPrefill,
+  onSendMessage,
+  onNavigateToBook,
 }: {
   readonly cards: ReadonlyArray<AssistantMessageCard>;
   readonly sessionId?: string;
   readonly bookId?: string;
   readonly onBlueprintUpdate?: (cardIndex: number, newPayload: Record<string, unknown>) => void;
+  readonly onPrefill?: (text: string) => void;
+  readonly onSendMessage?: (text: string) => void;
+  readonly onNavigateToBook?: (bookId: string) => void;
 }) {
   return (
     <>
@@ -2562,6 +2587,32 @@ export function NovelosMessageCards({
             return <ContractVerificationCard key={i} report={card.payload as unknown as VerificationReportPayload} />;
           case "editor_report":
             return <EditorReportCard key={i} report={card.payload as unknown as EditorReportPayload} />;
+          case "book_creation_draft":
+            return (
+              <BookCreationDraftCard
+                key={i}
+                payload={card.payload as unknown as BookCreationDraftPayload}
+                onConfirm={() => onSendMessage?.("确认创建")}
+                onRefine={(hint) => onPrefill?.(hint)}
+              />
+            );
+          case "book_created": {
+            const p = card.payload as { bookId?: string; title?: string };
+            return (
+              <div key={i} className="mt-3 flex items-center gap-2 rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-400">
+                <span className="flex-1">📖 《{p.title ?? "新书"}》已创建成功！</span>
+                {p.bookId && onNavigateToBook && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateToBook(p.bookId!)}
+                    className="font-medium underline hover:no-underline text-green-400"
+                  >
+                    进入书籍 →
+                  </button>
+                )}
+              </div>
+            );
+          }
           default:
             return null;
         }
@@ -3015,7 +3066,7 @@ export function AssistantView({
           const hintedBook = (chatBookContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : undefined)) ?? undefined;
           invalidateAssistantBookViews(hintedBook);
           clearChatPendingState();
-          setState((prev) => completeAssistantResponse(prev, detachedOutcome.response!));
+          setState((prev) => prev.loading ? completeAssistantResponse(prev, detachedOutcome.response!) : prev);
           return;
         }
 
@@ -3030,7 +3081,7 @@ export function AssistantView({
         });
         setScopeBlockHint(`聊天请求失败：${errorMsg}`);
         clearChatPendingState();
-        setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+        setState((prev) => prev.loading ? completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`) : prev);
       })();
     };
     // Run immediately on mount to recover missed logs without waiting 2s
@@ -3319,12 +3370,15 @@ export function AssistantView({
       }
     }
 
-    const contextTitles = resolvedContext ? [resolvedContext.title] : activeBooks.map((b) => b.title);
-    const contextBookIds = resolvedContext
+    // When the user intends to create a brand-new book, suppress any existing book
+    // scope so the wizard instruction is clean (no 【当前锁定书籍】 header).
+    const isNewBookRequest = isCreateNewBookIntent(normalizedPrompt);
+    const contextTitles = isNewBookRequest ? [] : (resolvedContext ? [resolvedContext.title] : activeBooks.map((b) => b.title));
+    const contextBookIds = isNewBookRequest ? [] : (resolvedContext
       ? [resolvedContext.id]
       : activeBooks.length === 1
         ? [activeBooks[0].id]
-        : [];
+        : []);
 
     if (resolvedContext && isBookSelectionOnlyPrompt(normalizedPrompt, resolvedContext)) {
       setScopeBlockHint("");
@@ -3409,7 +3463,7 @@ export function AssistantView({
             const reply = result.response.trim() || "没有收到回复，请重试。";
             saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, response: reply, completedAt: Date.now(), progressLogs });
             invalidateAssistantBookViews(resolvedContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null));
-            setState((prev) => completeAssistantResponse(prev, reply));
+            setState((prev) => prev.loading ? completeAssistantResponse(prev, reply) : prev);
           } else {
             const errorMsg = result.error ?? "未知错误";
             if (shouldKeepPendingOnChatDisconnect(errorMsg)) {
@@ -3437,7 +3491,7 @@ export function AssistantView({
             }
             saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, error: errorMsg, completedAt: Date.now(), progressLogs });
             setScopeBlockHint(`聊天请求失败：${errorMsg}`);
-            setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+            setState((prev) => prev.loading ? completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`) : prev);
           }
         },
       });
@@ -3626,7 +3680,7 @@ export function AssistantView({
           const reply = result.response.trim() || "没有收到回复，请重试。";
           saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, response: reply, completedAt: Date.now(), progressLogs });
           invalidateAssistantBookViews(resolvedContext?.id ?? (activeBooks.length === 1 ? activeBooks[0]?.id : null));
-          setState((prev) => completeAssistantResponse(prev, reply, undefined, result.cards));
+          setState((prev) => prev.loading ? completeAssistantResponse(prev, reply, undefined, result.cards) : prev);
         } else {
           const errorMsg = result.error ?? "未知错误";
           if (shouldKeepPendingOnChatDisconnect(errorMsg)) {
@@ -3654,7 +3708,7 @@ export function AssistantView({
           }
           saveChatPendingState({ loading: false, prompt: normalizedPrompt, startedAt, error: errorMsg, completedAt: Date.now(), progressLogs });
           setScopeBlockHint(`聊天失败：${errorMsg}`);
-          setState((prev) => completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`));
+          setState((prev) => prev.loading ? completeAssistantResponse(prev, `聊天请求失败：${errorMsg}`) : prev);
         }
       },
     });
@@ -3941,6 +3995,15 @@ export function AssistantView({
               sessionId={state.taskExecution?.sessionId}
               bookId={chatBookContext?.id}
               onBlueprintUpdate={handleUpdateBlueprintCard}
+              onPrefill={(text) => {
+                setState((prev) => applyAssistantInput(prev, text));
+                setTimeout(() => {
+                  assistantInputRef.current?.focus();
+                  assistantInputRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                }, 50);
+              }}
+              onSendMessage={sendPrompt}
+              onNavigateToBook={nav.toBook}
             />
           )}
           {state.taskPlan && shouldShowAssistantTaskPlanCard(state.taskPlan) && (
@@ -3990,7 +4053,7 @@ export function AssistantView({
                 />
               )
           )}
-          {state.qualityReport && (
+          {state.qualityReport && chatBookContext && (
             <QualityReportCard
               report={state.qualityReport}
               suggestedNextActions={state.suggestedNextActions}

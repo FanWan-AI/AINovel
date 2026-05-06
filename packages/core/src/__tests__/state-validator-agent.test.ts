@@ -55,7 +55,7 @@ describe("StateValidatorAgent", () => {
     });
   });
 
-  it("throws when the validator model returns an empty response", async () => {
+  it("skips validation with a warning when the validator model returns an empty response", async () => {
     const agent = new StateValidatorAgent({
       client: {
         provider: "openai",
@@ -79,7 +79,6 @@ describe("StateValidatorAgent", () => {
         usage: ZERO_USAGE,
       });
 
-    // Empty response throws (fail-closed)
     await expect(agent.validate(
       "Chapter body.",
       3,
@@ -88,6 +87,14 @@ describe("StateValidatorAgent", () => {
       "old hooks",
       "new hooks",
       "en",
-    )).rejects.toThrow("empty response");
+    )).resolves.toEqual({
+      passed: true,
+      warnings: [
+        {
+          category: "validation_skipped",
+          description: "LLM returned empty response; validation skipped automatically.",
+        },
+      ],
+    });
   });
 });

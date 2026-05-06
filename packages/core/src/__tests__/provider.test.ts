@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type OpenAI from "openai";
-import { chatCompletion, chatWithTools, type AgentMessage, type LLMClient } from "../llm/provider.js";
+import {
+  chatCompletion,
+  chatWithTools,
+  sanitizeLLMContentForProvider,
+  type AgentMessage,
+  type LLMClient,
+} from "../llm/provider.js";
 
 const ZERO_USAGE = {
   prompt_tokens: 11,
@@ -18,6 +24,40 @@ async function captureError(task: Promise<unknown>): Promise<Error> {
 }
 
 describe("chatCompletion stream fallback", () => {
+  it("sanitizes unsafe backslash escapes before sending chat messages", async () => {
+    const create = vi.fn().mockResolvedValue({
+      choices: [{ message: { content: "ok" } }],
+      usage: ZERO_USAGE,
+    });
+
+    const client: LLMClient = {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: false,
+      _openai: {
+        chat: {
+          completions: {
+            create,
+          },
+        },
+      } as unknown as OpenAI,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 512,
+        thinkingBudget: 0,
+        maxTokensCap: null,
+        extra: {},
+      },
+    };
+
+    await chatCompletion(client, "test-model", [
+      { role: "user", content: String.raw`执行路径 C:\Users\demo\x 以及残缺 \u12；保留 \n` },
+    ]);
+
+    expect(create.mock.calls[0]?.[0].messages[0].content)
+      .toBe(String.raw`执行路径 C:\\Users\\demo\\x 以及残缺 \\u12；保留 \\n`);
+  });
+
   it("falls back to sync chat completion when streamed chat returns no chunks", async () => {
     const create = vi.fn()
       .mockResolvedValueOnce({
@@ -206,6 +246,37 @@ describe("chatCompletion stream fallback", () => {
 });
 
 describe("chatWithTools DeepSeek thinking compatibility", () => {
+  it("sanitizes unsafe backslash escapes before sending tool-calling messages", async () => {
+    const create = vi.fn().mockResolvedValue({
+      async *[Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
+        yield { choices: [{ delta: { content: "ok" } }] };
+      },
+    });
+    const client = makeOpenAIClient(create);
+
+    await chatWithTools(client, "deepseek-v4-flash", [
+      { role: "system", content: String.raw`系统路径 \x` },
+      { role: "user", content: String.raw`按路径A执行，原文 C:\tmp\bad` },
+      {
+        role: "assistant",
+        content: String.raw`上一轮方案含 \u1`,
+        reasoningContent: String.raw`reason \q`,
+      },
+      { role: "tool", toolCallId: "call_1", content: String.raw`tool \x` },
+    ], [{
+      name: "get_book_status",
+      description: "读取书籍状态",
+      parameters: { type: "object", properties: {} },
+    }]);
+
+    const sent = create.mock.calls[0]?.[0].messages;
+    expect(sent[0].content).toBe(String.raw`系统路径 \\x`);
+    expect(sent[1].content).toBe(String.raw`按路径A执行，原文 C:\\tmp\\bad`);
+    expect(sent[2].content).toBe(String.raw`上一轮方案含 \\u1`);
+    expect(sent[2].reasoning_content).toBe(String.raw`reason \\q`);
+    expect(sent[3].content).toBe(String.raw`tool \\x`);
+  });
+
   it("preserves streamed reasoning content so tool results can be sent back to DeepSeek V4", async () => {
     const create = vi.fn().mockResolvedValue({
       async *[Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
@@ -287,6 +358,13 @@ describe("chatWithTools DeepSeek thinking compatibility", () => {
       content: null,
       reasoning_content: "需要先读状态。",
     });
+  });
+});
+
+describe("sanitizeLLMContentForProvider", () => {
+  it("escapes provider-hostile sequences without changing normal text", () => {
+    expect(sanitizeLLMContentForProvider(String.raw`abc \x \u12 \q \\ \" \/ \n`))
+      .toBe(String.raw`abc \\x \\u12 \\q \\ \\" \\/ \\n`);
   });
 });
 

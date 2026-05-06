@@ -868,6 +868,13 @@ export function BookDetail({
             {writing ? <div className="w-3.5 h-3.5 border-2 border-foreground/20 border-t-foreground rounded-full animate-spin" /> : <Zap size={14} />}
             {writing ? t("dash.writing") : t("writeNext.quickWrite")}
           </button>
+          <button
+            onClick={() => (nav as { toTruth?: (id: string) => void }).toTruth?.(bookId)}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary text-muted-foreground rounded-xl hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50"
+          >
+            <Database size={14} />
+            {t("book.truthFiles")}
+          </button>
         </div>
       </div>
 

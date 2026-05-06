@@ -20,6 +20,7 @@ export type AssistantIntentType =
   | "audit_chapter"
   | "revise_chapter"
   | "read_story_facts"
+  | "create_new_book"
   | "clarify";
 
 export interface IntentRouterInput {
@@ -43,6 +44,14 @@ export interface IntentRouterOutput {
 }
 
 // ── Keyword patterns ───────────────────────────────────────────────────
+
+const CREATE_BOOK_PATTERNS = [
+  /(?:想|要|帮我|来)(?:写|创作|策划|出|做).{0,8}(?:一本|本|部).{0,6}(?:书|小说|网文|故事)/,
+  /(?:新书|新小说|新作品).{0,10}(?:策划|设计|创建|开始|写)/,
+  /(?:策划|设计|创作|写).{0,6}(?:男频|女频|玄幻|都市|修仙|系统|爽文).{0,10}(?:书|小说|故事)/,
+  /开.{0,4}(?:一本|本|部).{0,6}(?:新书|新坑)/,
+  /create.{0,5}(?:book|novel|story)/i,
+];
 
 const PLOT_QUALITY_PATTERNS = [
   /剧情写?得.{0,6}(怎么样|如何|好不好)/,
@@ -86,6 +95,12 @@ const REVISE_PATTERNS = [
   /(?:revise|rewrite).{0,5}(?:this|current)/i,
 ];
 
+const REVISION_PLANNING_PATTERNS = [
+  /(?:重写|改写|修订|修改).{0,8}(?:方案|设计|思路|计划|规划)/,
+  /(?:想想|设计|规划|评估|分析).{0,20}(?:如何|怎么|怎样).{0,20}(?:挽回|修|改|重写|改写)/,
+  /如何.{0,20}(?:挽回|修复|重写|改写).{0,20}(?:颓势|问题|质量)/,
+];
+
 // ── Detection ──────────────────────────────────────────────────────────
 
 function hasRecentPlotCritique(artifacts: ReadonlyArray<AssistantArtifactSummary>): boolean {
@@ -102,10 +117,26 @@ function testAny(text: string, patterns: RegExp[]): boolean {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+export function isCreateNewBookIntent(text: string): boolean {
+  return testAny(text.trim(), CREATE_BOOK_PATTERNS);
+}
+
 export function routeAssistantIntent(input: IntentRouterInput): IntentRouterOutput {
   const text = input.userText.trim();
   const bookIds = input.selectedBookIds;
   const recentCritique = hasRecentPlotCritique(input.recentArtifacts);
+
+  // 0. Create new book wizard — fires regardless of whether a book is currently selected
+  if (testAny(text, CREATE_BOOK_PATTERNS)) {
+    return {
+      intentType: "create_new_book",
+      confidence: 0.92,
+      referencedArtifactIds: [],
+      targetBookIds: [],
+      riskLevel: "medium",
+      rationale: "用户请求创建新书",
+    };
+  }
 
   // 1. Plan next from previous analysis (指代)
   if (testAny(text, PLAN_NEXT_FROM_PREV_PATTERNS) && recentCritique) {
@@ -179,8 +210,9 @@ export function routeAssistantIntent(input: IntentRouterInput): IntentRouterOutp
     };
   }
 
-  // 6. Revise
-  if (testAny(text, REVISE_PATTERNS)) {
+  // 6. Revise. Requests for a rewrite/revise "方案/设计/如何挽回"
+  // are planning/discussion, not permission to mutate a chapter.
+  if (testAny(text, REVISE_PATTERNS) && !testAny(text, REVISION_PLANNING_PATTERNS)) {
     return {
       intentType: "revise_chapter",
       confidence: 0.8,

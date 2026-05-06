@@ -22,7 +22,26 @@ export type AssistantArtifactType =
   | "quality_report"
   | "contract_verification"
   | "blueprint_fulfillment_report"
-  | "editor_report";
+  | "editor_report"
+  | "book_creation_draft";
+
+// ── Book Creation Draft ────────────────────────────────────────────────
+
+export type BookCreationDraftStage = "gathering" | "draft_ready" | "confirmed";
+
+export interface BookCreationDraftPayload {
+  readonly stage: BookCreationDraftStage;
+  readonly title: string;
+  readonly genre: string;
+  readonly audience: string;
+  readonly protagonist: string;
+  readonly coreConflict: string;
+  readonly femaleLeads?: string;
+  readonly firstVolumePlan?: string;
+  readonly styleRules?: ReadonlyArray<string>;
+  readonly chapterWordCount?: number;
+  readonly userRefinements: ReadonlyArray<string>;
+}
 
 export interface AssistantArtifact {
   readonly artifactId: string;

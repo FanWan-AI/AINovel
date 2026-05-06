@@ -206,6 +206,19 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
   return result;
 }
 
+/**
+ * Some OpenAI-compatible gateways re-serialize message content internally and
+ * choke on user-visible backslash sequences such as "\x" or incomplete "\u12".
+ * The official SDK would JSON.stringify those safely, but the gateway may parse
+ * the decoded content again. Keep the visible text intact while making unsafe
+ * escape-looking sequences survive an extra parse/serialize hop.
+ */
+export function sanitizeLLMContentForProvider(content: string): string {
+  return content
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/gu, " ")
+    .replace(/(?<!\\)\\(?!\\)/gu, "\\\\");
+}
+
 // === Error Wrapping ===
 
 function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; readonly model?: string }): Error {
@@ -215,6 +228,13 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
     ? `\n  (baseUrl: ${context.baseUrl}, model: ${context.model})`
     : "";
   const providerLine = providerMessage ? `\n  提供方原始信息：${providerMessage}` : "";
+
+  if (/failed to parse .*request body as json|unexpected end of hex escape|invalid escape/iu.test(providerMessage || msg)) {
+    return new Error(
+      `API 请求体被提供方拒绝，原因是上下文里存在它无法解析的转义片段（常见如 \\x、残缺 \\u、孤立反斜杠）。` +
+      `\n  InkOS 会在发送前净化这类文本；如果仍然出现，请清理最近对话里含反斜杠的原文或更换兼容 OpenAI JSON 的提供方。${ctxLine}${providerLine}`,
+    );
+  }
 
   if (msg.includes("400")) {
     return new Error(
@@ -466,7 +486,7 @@ async function chatCompletionOpenAIChat(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const createParams: any = {
     model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.map((m) => ({ role: m.role, content: sanitizeLLMContentForProvider(m.content) })),
     temperature: options.temperature,
     max_tokens: options.maxTokens,
     stream: true,
@@ -527,7 +547,7 @@ async function chatCompletionOpenAIChatSync(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const syncParams: any = {
     model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.map((m) => ({ role: m.role, content: sanitizeLLMContentForProvider(m.content) })),
     temperature: options.temperature,
     max_tokens: options.maxTokens,
     stream: false,
@@ -610,20 +630,20 @@ function agentMessagesToOpenAIChat(
 
   for (const msg of messages) {
     if (msg.role === "system") {
-      result.push({ role: "system", content: msg.content });
+      result.push({ role: "system", content: sanitizeLLMContentForProvider(msg.content) });
       continue;
     }
     if (msg.role === "user") {
-      result.push({ role: "user", content: msg.content });
+      result.push({ role: "user", content: sanitizeLLMContentForProvider(msg.content) });
       continue;
     }
     if (msg.role === "assistant") {
       const assistantMsg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {
         role: "assistant",
-        content: msg.content ?? null,
+        content: msg.content === null ? null : sanitizeLLMContentForProvider(msg.content),
       };
       if (msg.reasoningContent) {
-        assistantMsg.reasoning_content = msg.reasoningContent;
+        assistantMsg.reasoning_content = sanitizeLLMContentForProvider(msg.reasoningContent);
       }
       if (msg.toolCalls && msg.toolCalls.length > 0) {
         assistantMsg.tool_calls = msg.toolCalls.map((tc) => ({
@@ -639,7 +659,7 @@ function agentMessagesToOpenAIChat(
       result.push({
         role: "tool",
         tool_call_id: msg.toolCallId,
-        content: msg.content,
+        content: sanitizeLLMContentForProvider(msg.content),
       });
     }
   }
@@ -659,7 +679,7 @@ async function chatCompletionOpenAIResponses(
 ): Promise<LLMResponse> {
   const input: OpenAI.Responses.ResponseInputItem[] = messages.map((m) => ({
     role: m.role as "system" | "user" | "assistant",
-    content: m.content,
+    content: sanitizeLLMContentForProvider(m.content),
   }));
 
   const tools: OpenAI.Responses.Tool[] | undefined = webSearch
@@ -724,7 +744,7 @@ async function chatCompletionOpenAIResponsesSync(
 ): Promise<LLMResponse> {
   const input: OpenAI.Responses.ResponseInputItem[] = messages.map((m) => ({
     role: m.role as "system" | "user" | "assistant",
-    content: m.content,
+    content: sanitizeLLMContentForProvider(m.content),
   }));
 
   const response = await client.responses.create({
@@ -806,16 +826,16 @@ function agentMessagesToResponsesInput(
 
   for (const msg of messages) {
     if (msg.role === "system") {
-      result.push({ role: "system", content: msg.content });
+      result.push({ role: "system", content: sanitizeLLMContentForProvider(msg.content) });
       continue;
     }
     if (msg.role === "user") {
-      result.push({ role: "user", content: msg.content });
+      result.push({ role: "user", content: sanitizeLLMContentForProvider(msg.content) });
       continue;
     }
     if (msg.role === "assistant") {
       if (msg.content) {
-        result.push({ role: "assistant", content: msg.content });
+        result.push({ role: "assistant", content: sanitizeLLMContentForProvider(msg.content) });
       }
       if (msg.toolCalls) {
         for (const tc of msg.toolCalls) {
@@ -833,7 +853,7 @@ function agentMessagesToResponsesInput(
       result.push({
         type: "function_call_output" as const,
         call_id: msg.toolCallId,
-        output: msg.content,
+        output: sanitizeLLMContentForProvider(msg.content),
       });
     }
   }
@@ -853,7 +873,7 @@ async function chatCompletionAnthropic(
 ): Promise<LLMResponse> {
   const systemText = messages
     .filter((m) => m.role === "system")
-    .map((m) => m.content)
+    .map((m) => sanitizeLLMContentForProvider(m.content))
     .join("\n\n");
   const nonSystem = messages.filter((m) => m.role !== "system");
 
@@ -862,7 +882,7 @@ async function chatCompletionAnthropic(
     ...(systemText ? { system: systemText } : {}),
     messages: nonSystem.map((m) => ({
       role: m.role as "user" | "assistant",
-      content: m.content,
+      content: sanitizeLLMContentForProvider(m.content),
     })),
     ...(thinkingBudget > 0
       ? { thinking: { type: "enabled" as const, budget_tokens: thinkingBudget } }
@@ -922,7 +942,7 @@ async function chatCompletionAnthropicSync(
 ): Promise<LLMResponse> {
   const systemText = messages
     .filter((m) => m.role === "system")
-    .map((m) => m.content)
+    .map((m) => sanitizeLLMContentForProvider(m.content))
     .join("\n\n");
   const nonSystem = messages.filter((m) => m.role !== "system");
 
@@ -931,7 +951,7 @@ async function chatCompletionAnthropicSync(
     ...(systemText ? { system: systemText } : {}),
     messages: nonSystem.map((m) => ({
       role: m.role as "user" | "assistant",
-      content: m.content,
+      content: sanitizeLLMContentForProvider(m.content),
     })),
     ...(thinkingBudget > 0
       ? { thinking: { type: "enabled" as const, budget_tokens: thinkingBudget } }
@@ -966,7 +986,7 @@ async function chatWithToolsAnthropic(
 ): Promise<ChatWithToolsResult> {
   const systemText = messages
     .filter((m) => m.role === "system")
-    .map((m) => (m as { content: string }).content)
+    .map((m) => sanitizeLLMContentForProvider((m as { content: string }).content))
     .join("\n\n");
   const nonSystem = messages.filter((m) => m.role !== "system");
 
@@ -1031,14 +1051,14 @@ function agentMessagesToAnthropic(
     if (msg.role === "system") continue;
 
     if (msg.role === "user") {
-      result.push({ role: "user", content: msg.content });
+      result.push({ role: "user", content: sanitizeLLMContentForProvider(msg.content) });
       continue;
     }
 
     if (msg.role === "assistant") {
       const blocks: Anthropic.Messages.ContentBlockParam[] = [];
       if (msg.content) {
-        blocks.push({ type: "text", text: msg.content });
+        blocks.push({ type: "text", text: sanitizeLLMContentForProvider(msg.content) });
       }
       if (msg.toolCalls) {
         for (const tc of msg.toolCalls) {
@@ -1061,7 +1081,7 @@ function agentMessagesToAnthropic(
       const toolResult: Anthropic.Messages.ToolResultBlockParam = {
         type: "tool_result",
         tool_use_id: msg.toolCallId,
-        content: msg.content,
+        content: sanitizeLLMContentForProvider(msg.content),
       };
       // Merge consecutive tool results into one user message (Anthropic requires alternating roles)
       const prev = result[result.length - 1];

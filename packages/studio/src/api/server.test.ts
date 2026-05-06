@@ -1863,6 +1863,35 @@ describe("createStudioServer daemon lifecycle", () => {
     }
   });
 
+  it("keeps rewrite-plan requests in design mode instead of directly revising a chapter", async () => {
+    runAgentLoopMock.mockResolvedValueOnce("第4章重写方案：先修状态卡，再强化角色转折，确认后再执行。");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "你想想第4章的重写方案 如何才能挽回颓势",
+        scopeBookTitles: ["测试书"],
+        scopeBookIds: ["demo-book"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) { /* drain */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(reviseDraftMock).not.toHaveBeenCalled();
+    expect(runAgentLoopMock).toHaveBeenCalledTimes(1);
+    const promptArg = String(runAgentLoopMock.mock.calls[0]?.[1] ?? "");
+    expect(promptArg).toContain("[系统约束：evaluation-mode]");
+    expect(promptArg).toContain("绝对禁止调用 write_draft");
+  });
+
   it("answers model identity prompts with real runtime llm config", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -4437,6 +4466,18 @@ describe("createStudioServer daemon lifecycle", () => {
       revised: true,
       status: "ready-for-review",
       auditResult: { passed: true, issues: [], summary: "ok" },
+      reviewSnapshots: [
+        {
+          stage: "writer-output",
+          content: "Writer 原始完整稿。".repeat(10),
+          wordCount: 6000,
+        },
+        {
+          stage: "pre-audit",
+          content: "审计前候选稿。".repeat(8),
+          wordCount: 3600,
+        },
+      ],
       lengthNormalizationSnapshots: [{
         stage: "pre-audit",
         mode: "compress",
@@ -4445,6 +4486,15 @@ describe("createStudioServer daemon lifecycle", () => {
         beforeCount: 5800,
         afterCount: 3600,
         applied: true,
+      }, {
+        stage: "pre-audit",
+        mode: "compress",
+        beforeContent: "过度压缩前草稿。".repeat(20),
+        afterContent: "过度压缩后草稿。".repeat(6),
+        beforeCount: 6500,
+        afterCount: 2600,
+        applied: false,
+        rejectedReason: "压缩幅度 60% 超过安全阈值",
       }],
     });
 
@@ -4461,17 +4511,36 @@ describe("createStudioServer daemon lifecycle", () => {
     await vi.waitFor(async () => {
       const versionsResponse = await app.request("http://localhost/api/books/demo-book/chapters/3/versions");
       const versionsData = await versionsResponse.json() as { versions: Array<{ versionId: string; actionType: string; label: string; hasContent: boolean }> };
-      const normalizationVersion = versionsData.versions.find((version) => version.actionType === "length-normalize");
+      const normalizationVersion = versionsData.versions.find((version) => version.label === "审计前字数归一化 5800 -> 3600");
       expect(normalizationVersion).toMatchObject({
         actionType: "length-normalize",
         label: "审计前字数归一化 5800 -> 3600",
         hasContent: true,
       });
+      expect(versionsData.versions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            actionType: "pipeline-snapshot",
+            label: "Writer 原始稿（6000）",
+            hasContent: true,
+          }),
+          expect.objectContaining({
+            actionType: "pipeline-snapshot",
+            label: "审计前版本（3600）",
+            hasContent: true,
+          }),
+          expect.objectContaining({
+            actionType: "length-normalize",
+            label: "字数归一化候选（未应用） 6500 -> 2600",
+            hasContent: true,
+          }),
+        ]),
+      );
     });
 
     const versionsResponse = await app.request("http://localhost/api/books/demo-book/chapters/3/versions");
-    const versionsData = await versionsResponse.json() as { versions: Array<{ versionId: string; actionType: string }> };
-    const versionId = versionsData.versions.find((version) => version.actionType === "length-normalize")?.versionId;
+    const versionsData = await versionsResponse.json() as { versions: Array<{ versionId: string; actionType: string; label: string }> };
+    const versionId = versionsData.versions.find((version) => version.actionType === "length-normalize" && version.label === "审计前字数归一化 5800 -> 3600")?.versionId;
     expect(versionId).toBeTruthy();
 
     const detailResponse = await app.request(`http://localhost/api/books/demo-book/chapters/3/versions/${versionId}`);

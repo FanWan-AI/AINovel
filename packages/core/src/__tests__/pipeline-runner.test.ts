@@ -1654,6 +1654,18 @@ describe("PipelineRunner", () => {
       });
       expect(result.lengthNormalizationSnapshots?.[0]?.beforeContent).toBe(overlongDraft);
       expect(result.lengthNormalizationSnapshots?.[0]?.afterContent).toBe(normalizedDraft);
+      expect(result.reviewSnapshots).toEqual([
+        {
+          stage: "writer-output",
+          content: overlongDraft,
+          wordCount: overlongDraft.length,
+        },
+        {
+          stage: "pre-audit",
+          content: normalizedDraft,
+          wordCount: normalizedDraft.length,
+        },
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

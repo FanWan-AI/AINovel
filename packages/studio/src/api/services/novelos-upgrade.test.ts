@@ -227,6 +227,14 @@ describe("Intent Router Service", () => {
     });
     expect(result.intentType).toBe("write_next_with_user_plot");
   });
+
+  it("does not treat rewrite-plan discussion as an immediate revise action", () => {
+    const result = routeAssistantIntent({
+      ...baseInput,
+      userText: "你想想第4章的重写方案 如何才能挽回颓势",
+    });
+    expect(result.intentType).not.toBe("revise_chapter");
+  });
 });
 
 describe("Context Resolver Service", () => {
