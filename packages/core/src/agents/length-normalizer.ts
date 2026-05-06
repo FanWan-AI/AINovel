@@ -7,6 +7,7 @@ export interface NormalizeLengthInput {
   readonly lengthSpec: LengthSpec;
   readonly chapterIntent?: string;
   readonly reducedControlBlock?: string;
+  readonly platform?: string;
 }
 
 export interface NormalizeLengthOutput {
@@ -42,7 +43,7 @@ export class LengthNormalizerAgent extends BaseAgent {
       };
     }
 
-    const systemPrompt = this.buildSystemPrompt(mode);
+    const systemPrompt = this.buildSystemPrompt(mode, input.platform === "adult");
     const userPrompt = this.buildUserPrompt(input, originalCount, mode);
     const response = await this.chat(
       [
@@ -69,10 +70,14 @@ export class LengthNormalizerAgent extends BaseAgent {
     };
   }
 
-  private buildSystemPrompt(mode: LengthNormalizeMode): string {
+  private buildSystemPrompt(mode: LengthNormalizeMode, isAdult = false): string {
     const action = mode === "compress"
       ? "compress"
       : "expand";
+
+    const adultRule = isAdult && mode === "compress"
+      ? `\n- ⚠️ 成人向平台专属规则：情欲场景（私密部位接触描写、高潮慢镜头、娇吟对白、心理崩塌过程）是本书的核心卖点，压缩时绝对禁止删减情欲场景内容。优先压缩：过渡性描写、背景环境铺垫、重复的心理独白、非情欲类对话。绝对不能因为"字数超标"而缩短或删除任何情欲场景段落。`
+      : "";
 
     return `你是一位章节长度修正器。你的任务是对章节正文做一次单次修正，只能执行一次，不得递归重写。
 
@@ -80,7 +85,7 @@ export class LengthNormalizerAgent extends BaseAgent {
 - ${action} 章节长度到给定目标区间
 - 保留章节原有事实、关键钩子、角色名和必须保留的标记
 - 不要引入新的支线、未来揭示或额外总结
-- 不要在正文外输出任何解释`;
+- 不要在正文外输出任何解释${adultRule}`;
   }
 
   private buildUserPrompt(

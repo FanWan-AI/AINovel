@@ -128,6 +128,8 @@ export class PlannerAgent extends BaseAgent {
       hookAgendaSummary: hookAgenda.mustAdvance.length > 0
         ? hookAgenda.mustAdvance.join(", ")
         : undefined,
+      platform: input.book.platform,
+      chapterNumber: input.chapterNumber,
     });
 
     const intent = ChapterIntentSchema.parse({
@@ -415,10 +417,51 @@ export class PlannerAgent extends BaseAgent {
     readonly steeringContract?: ChapterSteeringContract;
     readonly sceneDirective?: string;
     readonly hookAgendaSummary?: string;
+    readonly platform?: string;
+    readonly chapterNumber?: number;
   }): ChapterBlueprint {
     const isEn = input.language === "en";
+    const isAdult = input.platform === "adult";
     const contract = input.steeringContract;
     const mustIncludeItems = contract?.mustInclude ?? [];
+
+    // For adult platform (Chinese), always use adult-specific erotic scene beats
+    if (isAdult && !isEn) {
+      const adultSceneSeeds = [
+        `开场：立即触发情欲张力——${input.goal}，建立权力差/禁忌关系/身体诱惑，前150字内必须让读者感受到明确的情欲暗示`,
+        `拉扯博弈（★最核心，≥400字）：女性角色多次试图抵抗，主角用知识/技巧/掌控力逐步破防；每次抵抗后有具体的身体层面进展；骚话从暗示升温为直接点破对方身体反应`,
+        `第一道突破：私密部位初次接触——写出阴蒂/乳头第一次被触碰后的完整反应：她不可控的身体反应+强烈的心理羞耻+被迫承认湿润事实`,
+        `深入展开（五感全开，≥700字）：插入或完整口交场景，同时呈现视觉/听觉/触觉/嗅觉；写出私密部位被充满的具体感受；对白升级为直白露骨的骚话+呻吟；心理弧线推进到主动索取阶段`,
+        `高潮慢镜头（★必须写满≥400字）：逐格呈现高潮全过程——哪个动作引爆、哪个部位的痉挛收缩、什么声音、体液状态、意识断片的几秒、身体最后的脱力；禁止用"她到达顶点"一句带过`,
+        `余韵+章尾钩子：高潮后私密处的持续颤抖和液体感+羞耻与满足并存+对下次更深禁忌的隐秘期待；引出新的、更高阶的征服目标`,
+      ];
+      const adultPayoff = contract?.payoffRequired
+        ?? `女性角色防线出现可见崩塌，读者感受到明确的身体层面进展（不能只停留在"暧昧"层级），至少包含一段完整的高潮描写`;
+      const adultEndingHook = contract?.endingHook
+        ?? `章尾让读者感觉本章欲望已部分释放，同时对下一章更深的禁忌产生期待`;
+      return ChapterBlueprintSchema.parse({
+        openingHook: contract?.goal ?? input.goal,
+        scenes: adultSceneSeeds.map((beat, index) => ({
+          beat,
+          conflict: index < mustIncludeItems.length
+            ? `围绕"${mustIncludeItems[index]}"直接推进情欲场景，不能模糊带过`
+            : `本节拍必须有可见的情欲进展，不能只是心理描写或氛围铺垫`,
+          informationGap: input.hookAgendaSummary
+            ? `利用伏笔压力：${input.hookAgendaSummary}`
+            : (input.outlineNode ?? input.goal),
+          turn: `本节拍结束时，女性角色的防线状态必须比开始时更松动——用具体的身体反应或对白来体现`,
+          payoff: adultPayoff,
+          cost: `征服必须付出对等代价：时间/情感/暴露/风险——不能无代价地无限推进`,
+        })),
+        payoffRequired: adultPayoff,
+        endingHook: adultEndingHook,
+        contractSatisfaction: [
+          ...(contract?.goal ? [`目标：${contract.goal}`] : []),
+          ...((contract?.mustInclude ?? []).map((item) => `必须包含：${item}`)),
+          ...((contract?.mustAvoid ?? []).map((item) => `必须避免：${item}`)),
+        ],
+      });
+    }
 
     const defaultSceneSeeds = isEn
       ? [

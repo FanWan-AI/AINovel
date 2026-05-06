@@ -26,7 +26,9 @@ export class FoundationReviewerAgent extends BaseAgent {
     readonly sourceCanon?: string;
     readonly styleGuide?: string;
     readonly language: "zh" | "en";
+    readonly platform?: string;
   }): Promise<FoundationReviewResult> {
+    const isAdult = params.platform === "adult";
     const canonBlock = params.sourceCanon
       ? `\n## 原作正典参照\n${params.sourceCanon.slice(0, 8000)}\n`
       : "";
@@ -34,13 +36,19 @@ export class FoundationReviewerAgent extends BaseAgent {
       ? `\n## 原作风格参照\n${params.styleGuide.slice(0, 2000)}\n`
       : "";
 
-    const dimensions = params.mode === "original"
-      ? this.originalDimensions(params.language)
-      : this.derivativeDimensions(params.language, params.mode);
+    const dimensions = isAdult
+      ? this.adultDimensions(params.language)
+      : params.mode === "original"
+        ? this.originalDimensions(params.language)
+        : this.derivativeDimensions(params.language, params.mode);
 
-    const systemPrompt = params.language === "en"
-      ? this.buildEnglishReviewPrompt(dimensions, canonBlock, styleBlock)
-      : this.buildChineseReviewPrompt(dimensions, canonBlock, styleBlock);
+    const systemPrompt = isAdult
+      ? (params.language === "en"
+        ? this.buildAdultEnglishReviewPrompt(dimensions)
+        : this.buildAdultChineseReviewPrompt(dimensions))
+      : params.language === "en"
+        ? this.buildEnglishReviewPrompt(dimensions, canonBlock, styleBlock)
+        : this.buildChineseReviewPrompt(dimensions, canonBlock, styleBlock);
 
     const userPrompt = this.buildFoundationExcerpt(params.foundation, params.language);
 
@@ -50,6 +58,95 @@ export class FoundationReviewerAgent extends BaseAgent {
     ], { maxTokens: 4096, temperature: 0.3 });
 
     return this.parseReviewResult(response.content, dimensions);
+  }
+
+  private adultDimensions(language: "zh" | "en"): ReadonlyArray<string> {
+    return language === "en"
+      ? [
+          "Core Arousal Hook (Does the protagonist's ability/setting give a logical, escalating reason for erotic encounters throughout 40+ chapters?)",
+          "Opening Hook (Can the first 3 chapters establish the protagonist's unique power AND create immediate tension with the first female lead?)",
+          "World Coherence (Does the worldbuilding internally support the erotic premise — power systems, social hierarchy, taboo dynamics?)",
+          "Female Lead Distinctiveness (Do the female leads have distinct body types, personalities, identity taboos, and psychological resistance arcs — not interchangeable?)",
+          "Taboo Escalation Route (Does each volume introduce a qualitatively MORE forbidden taboo type than the last — identity rank, power level, scene setting?)",
+        ]
+      : [
+          "核心爽点驱动（主角能力/世界观是否给了40章以上的情欲场景一个自洽且持续升级的存在理由？）",
+          "开篇钩子（前3章能否快速建立主角的独特能力、生死危机，并和第一个女主制造张力？）",
+          "世界一致性（世界观是否真正支撑情欲前提——权力体系、社会等级、禁忌逻辑是否自洽？）",
+          "女主差异化（各女主的身份禁忌、外貌特征、性格底色、心理防线类型是否各不相同，不可互换？）",
+          "禁忌升级路线（从第一卷到最后一卷，每卷的核心禁忌类型是否比上一卷更高阶、更禁忌、更有冲击力？）",
+        ];
+  }
+
+  private buildAdultChineseReviewPrompt(dimensions: ReadonlyArray<string>): string {
+    return `你是一位专业的成人向男频小说（H小说）策划编辑，正在审核一本成人向新书的基础设定。
+
+【重要背景】这是一本成人向/H小说，以情欲征服为核心卖点，多女主后宫结构是标准配置，连续多章攻略同一女主是正常节奏，不是缺陷。你的评审标准必须基于成人向读者的实际期待，而非主流文学标准。
+
+你需要从以下维度逐项打分（0-100），并给出具体意见：
+
+${dimensions.map((dim, i) => `${i + 1}. ${dim}`).join("\n")}
+
+## 评分标准
+- 80+ 通过，可以开始写作
+- 60-79 有明显问题，需要修改
+- <60 方向性错误，需要重新设计
+
+## 成人向评审原则（必须遵守）
+- 不要以"连续N章同类节拍"为由扣分——H小说读者期待持续的情欲张力，这是类型特点不是缺陷
+- 不要要求加入"非情欲类主线节拍"——情欲场景本身就是主线，权力斗争是调味品而非主菜
+- 重点检查：每个女主的身份禁忌是否够独特，攻略路径的心理层次是否丰富，禁忌是否卷卷升级
+- 不要以主流文学的道德标准或人物成长弧线标准评判H小说
+
+## 输出格式（严格遵守）
+=== DIMENSION: 1 ===
+分数：{0-100}
+意见：{具体反馈}
+
+=== DIMENSION: 2 ===
+分数：{0-100}
+意见：{具体反馈}
+
+...（每个维度一个 block）
+
+=== OVERALL ===
+总分：{加权平均}
+通过：{是/否}
+总评：{1-2段总结，指出最大的问题和最值得保留的优点}
+
+审核时要准确。80分意味着"成人向读者会持续追更，不会觉得女主重复、禁忌无聊"。`;
+  }
+
+  private buildAdultEnglishReviewPrompt(dimensions: ReadonlyArray<string>): string {
+    return `You are a professional adult fiction (eroge/harem) editor reviewing a new book's foundation.
+
+[IMPORTANT] This is an adult/harem novel where erotic conquest is the PRIMARY value proposition. Multi-chapter pursuit of a single female lead is NORMAL pacing, not a flaw. Evaluate by adult reader expectations, NOT mainstream literary standards.
+
+Score each dimension (0-100):
+
+${dimensions.map((dim, i) => `${i + 1}. ${dim}`).join("\n")}
+
+## Scoring
+- 80+ Pass — ready to write
+- 60-79 Needs revision
+- <60 Fundamental problem
+
+## Adult Review Principles
+- Do NOT penalize "same beat for N chapters" — sustained erotic tension is the genre's core feature
+- Do NOT demand non-erotic main plot beats — erotic scenes ARE the main plot
+- Focus on: distinctiveness of taboo types, depth of psychological resistance arcs, whether each volume escalates the forbidden threshold
+
+## Output format (strict)
+=== DIMENSION: 1 ===
+Score: {0-100}
+Feedback: {specific feedback}
+
+...
+
+=== OVERALL ===
+Total: {weighted average}
+Passed: {yes/no}
+Summary: {1-2 paragraphs}`;
   }
 
   private originalDimensions(language: "zh" | "en"): ReadonlyArray<string> {

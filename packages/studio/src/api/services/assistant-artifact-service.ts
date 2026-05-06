@@ -34,12 +34,14 @@ export interface BookCreationDraftPayload {
   readonly title: string;
   readonly genre: string;
   readonly audience: string;
+  readonly platform?: string;
   readonly protagonist: string;
   readonly coreConflict: string;
   readonly femaleLeads?: string;
   readonly firstVolumePlan?: string;
   readonly styleRules?: ReadonlyArray<string>;
   readonly chapterWordCount?: number;
+  readonly targetChapters?: number;
   readonly userRefinements: ReadonlyArray<string>;
 }
 

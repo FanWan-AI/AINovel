@@ -403,6 +403,13 @@ When the chapter contains erotic / power / desire elements, also evaluate as a c
 - Does the chapter reach the sensory detail and visual intensity the genre requires?
 - Does the chapter ending generate appetite for the next chapter?
 
+**⚠️ Adult content quality audit (output warning level if any of these apply)**:
+- Does the erotic scene stop at "suggestive atmosphere" without progressing to explicit intimate contact? (If yes: warning — erotic scene not fully delivered)
+- Does the chapter end during buildup without any physical breakthrough? (If yes: warning — erotic tension not released in this chapter)
+- Is the climax summarized in one sentence instead of a slow-motion multi-paragraph scene? (If yes: warning — climax underwritten)
+- Are intimate body parts referred to only with euphemisms throughout? (If yes: warning — euphemistic body part references)
+- Is female dialogue too literary, lacking realistic gasps, trembling voice, and explicit content? (If yes: warning — erotic dialogue insufficiently explicit)
+
 Audit dimensions:
 ${dimList}
 
@@ -431,6 +438,13 @@ passed is false ONLY when critical-severity issues exist.`
 — 男主是否展现出明确的主导权或掌控感？
 — 本章的感官细节和画面感是否达到类型期待？
 — 本章结尾是否制造了对下一章的渴望感？
+
+**⚠️ 成人向内容质量专项检查（以下问题若发现，输出 warning 级别）**：
+— 情欲场景是否止步于"暧昧"而未推进到私密部位接触？（若是，标记 warning：情欲场景未完整兑现）
+— 章节是否在"铺垫"中结束而没有完整的肢体突破？（若是，标记 warning：情欲张力未在本章释放）
+— 高潮是否被一句话总结带过而非用慢镜头呈现？（若是，标记 warning：高潮场景未充分展开）
+— 私密部位是否全程使用隐晦词汇（"那里"/"花蕊"等）而非直白描写？（若是，标记 warning：私密词汇隐晦化）
+— 女性对白是否过于文学化，缺乏真实兴奋状态下的气声、颤音和直白内容？（若是，标记 warning：情欲对白不够直白）
 
 审查维度：
 ${dimList}

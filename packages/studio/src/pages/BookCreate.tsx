@@ -25,6 +25,7 @@ const PLATFORMS_ZH: ReadonlyArray<PlatformOption> = [
   { value: "tomato", label: "番茄小说" },
   { value: "qidian", label: "起点中文网" },
   { value: "feilu", label: "飞卢" },
+  { value: "adult", label: "成人向（H小说）" },
   { value: "other", label: "其他" },
 ];
 

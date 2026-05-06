@@ -30,33 +30,48 @@ export function detectConfirmation(text: string): "confirm" | "cancel" | "refine
 
 // ── System prompts ─────────────────────────────────────────────────────
 
-function buildGatheringPrompt(userText: string): string {
-  return `你是一个网文策划专家，擅长中文网络小说（男频爽文、都市、修仙、玄幻、系统流等）。
-用户想创建一本新书，但只给出了简单的方向。
+function buildGatheringPrompt(
+  userText: string,
+  recentMessages?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
+): string {
+  const contextBlock = recentMessages && recentMessages.length > 0
+    ? `\n\n【近期对话记录（重要参考，请从中提取真实的书籍意图）】\n${recentMessages.map((m) => `${m.role === "assistant" ? "助手" : "用户"}：${m.content.slice(0, 1200)}`).join("\n\n")}\n`
+    : "";
+
+  return `你是一个网文策划专家，擅长中文网络小说（男频爽文、都市、修仙、玄幻、系统流、成人向/H小说等各类型）。
+用户想创建一本新书。${contextBlock}
 
 你的任务：
-1. 根据用户的只言片语，主动推断并填充完整的书籍设定
-2. 最多只问一个追加问题（如果确实无法判断某个关键信息）
-3. 直接输出一个完整的书籍设定 JSON 对象，格式如下：
+1. 【最重要】综合以上"近期对话记录"和用户当前指令，准确还原用户的真实意图（书名、题材、风格、是否成人向等）
+2. 如果对话历史中已有详细策划方案，直接从中提取关键信息填充 JSON，不要重新发明、不要凭空编造与用户意图无关的内容
+3. 最多只问一个追加问题（如果确实无法判断某个关键信息）
+4. 直接输出一个完整的书籍设定 JSON 对象，格式如下：
 
 \`\`\`json
 {
-  "title": "书名（吸引人、符合类型）",
+  "title": "书名（吸引人、符合类型，若对话中已提及则直接使用）",
   "genre": "都市爽文",
-  "audience": "男频老色批",
+  "audience": "男频",
+  "platform": "qidian",
   "protagonist": "一句话描述主角身份和初始状态",
   "coreConflict": "核心爽点/主要矛盾（打脸/系统/逆袭等）",
-  "femaleLeads": "女主搭配（3-5个，各一句话描述）",
+  "femaleLeads": "女主搭配（各一句话描述）",
   "firstVolumePlan": "第一卷主线（100字以内）",
   "styleRules": ["节奏快", "爽点密集", "对话口语化"],
-  "chapterWordCount": 3000
+  "chapterWordCount": 3000,
+  "targetChapters": 100
 }
 \`\`\`
 
-4. JSON 之后，用2-3句自然语言向用户展示这个方案，问他有没有要改的。
-5. 语气轻松、专业，像一个经验丰富的编辑在帮作者策划。
+【平台判断规则（必须严格遵守）】
+- 若用户或对话中提及：H题材 / 成人向 / 18+ / 老色批 / 情欲 / 后宫 / 涩文 / 开车 / 露骨 → genre 填"成人向"，audience 填"成人男频"，platform 填"adult"，styleRules 中加入"情欲描写露骨直白"
+- 若用户或对话中提到具体章节数（如"50章""100章左右""打算写200章"），将其提取为 targetChapters；若未提及则填 100
+- 否则 platform 填"qidian"（起点）
 
-用户说：${userText}`;
+5. JSON 之后，用2-3句自然语言向用户展示这个方案，问他有没有要改的。
+6. 语气轻松、专业，像一个经验丰富的编辑在帮作者策划。
+
+用户当前指令：${userText}`;
 }
 
 function buildRefinePrompt(
@@ -125,6 +140,11 @@ function parseDraftFromJson(
     title: (typeof raw.title === "string" ? raw.title : previousDraft?.title) ?? "（待定）",
     genre: (typeof raw.genre === "string" ? raw.genre : previousDraft?.genre) ?? "都市爽文",
     audience: (typeof raw.audience === "string" ? raw.audience : previousDraft?.audience) ?? "男频",
+    ...(typeof raw.platform === "string"
+      ? { platform: raw.platform }
+      : previousDraft?.platform !== undefined
+        ? { platform: previousDraft.platform }
+        : {}),
     protagonist: (typeof raw.protagonist === "string" ? raw.protagonist : previousDraft?.protagonist) ?? "",
     coreConflict: (typeof raw.coreConflict === "string" ? raw.coreConflict : previousDraft?.coreConflict) ?? "",
     ...(typeof raw.femaleLeads === "string"
@@ -147,6 +167,11 @@ function parseDraftFromJson(
       : previousDraft?.chapterWordCount !== undefined
         ? { chapterWordCount: previousDraft.chapterWordCount }
         : {}),
+    ...(typeof raw.targetChapters === "number"
+      ? { targetChapters: raw.targetChapters }
+      : previousDraft?.targetChapters !== undefined
+        ? { targetChapters: previousDraft.targetChapters }
+        : {}),
     userRefinements: previousDraft
       ? [...prevRefinements, userText]
       : [],
@@ -159,6 +184,8 @@ export interface WizardTurnInput {
   readonly sessionId: string;
   readonly userText: string;
   readonly previousDraft?: BookCreationDraftPayload | null;
+  /** Recent conversation turns (up to 4) for context when generating the first draft. */
+  readonly recentMessages?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>;
   /** Injected dependency — call the project's LLM. */
   readonly llmCall: (systemPrompt: string) => Promise<string>;
 }
@@ -178,11 +205,11 @@ export interface WizardTurnOutput {
 export async function processWizardTurn(
   input: WizardTurnInput,
 ): Promise<WizardTurnOutput> {
-  const { userText, previousDraft, llmCall } = input;
+  const { userText, previousDraft, recentMessages, llmCall } = input;
 
   const systemPrompt = previousDraft
     ? buildRefinePrompt(userText, previousDraft)
-    : buildGatheringPrompt(userText);
+    : buildGatheringPrompt(userText, recentMessages);
 
   let llmResponse = "";
   try {
@@ -250,6 +277,7 @@ export function draftToConfirmRequest(draft: BookCreationDraftPayload): {
     platform: string;
     language: "zh";
     chapterWordCount: number;
+    targetChapters?: number;
   };
   brief: {
     title: string;
@@ -262,13 +290,17 @@ export function draftToConfirmRequest(draft: BookCreationDraftPayload): {
     styleRules?: string[];
   };
 } {
+  const isAdult = draft.platform === "adult"
+    || draft.genre === "成人向"
+    || /成人|adult|H题材|老色批/iu.test(draft.audience ?? "");
   return {
     bookConfig: {
       title: draft.title,
       genre: draft.genre,
-      platform: "qidian",
+      platform: isAdult ? "adult" : (draft.platform ?? "qidian"),
       language: "zh",
       chapterWordCount: draft.chapterWordCount ?? 3000,
+      ...(draft.targetChapters !== undefined ? { targetChapters: draft.targetChapters } : {}),
     },
     brief: {
       title: draft.title,

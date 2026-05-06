@@ -42,6 +42,7 @@ export function normalizeStudioPlatform(platform?: string): Platform {
     case "tomato":
     case "feilu":
     case "qidian":
+    case "adult":
       return platform;
     default:
       return "other";
@@ -65,7 +66,7 @@ export function buildStudioBookConfig(body: StudioCreateBookBody, now: string): 
     platform: normalizeStudioPlatform(body.platform),
     genre: body.genre,
     status: "outlining",
-    targetChapters: body.targetChapters ?? 200,
+    targetChapters: body.targetChapters ?? 100,
     chapterWordCount: body.chapterWordCount ?? 3000,
     chapterLengthTolerancePercent: body.chapterLengthTolerancePercent ?? 30,
     ...(body.language === "en"

@@ -1114,12 +1114,16 @@ const ASSISTANT_OPINION_QUESTION_PATTERN = /你觉得|觉不觉得|这么.{0,15}
 const ASSISTANT_REVISION_PLANNING_PATTERN = /(?:重写|改写|修订|修改|rework|rewrite|revise).{0,8}(?:方案|设计|思路|计划|规划)|(?:想想|设计|规划|评估|分析).{0,20}(?:如何|怎么|怎样).{0,20}(?:挽回|修|改|重写|改写)|如何.{0,20}(?:挽回|修复|重写|改写).{0,20}(?:颓势|问题|质量)/iu;
 // Chat-to-Book: matches "我想写一本书"/"帮我策划一本小说"/"开一个新坑" etc.
 const ASSISTANT_CHAT_TO_BOOK_PATTERN =
-  /(?:想|要|帮我|来)(?:写|创作|策划|出|做).{0,8}(?:一本|本|部).{0,6}(?:书|小说|网文|故事)|(?:新书|新小说|新作品).{0,10}(?:策划|设计|创建|开始|写)|(?:策划|设计|创作|写).{0,6}(?:男频|女频|玄幻|都市|修仙|系统|爽文|悬疑).{0,10}(?:书|小说|故事)|开.{0,4}(?:一本|本|部).{0,6}(?:新书|新坑)|create.{0,5}(?:book|novel|story)/iu;
+  /(?:想|要|帮我|来)(?:写|创作|策划|出|做).{0,8}(?:一本|本|部).{0,6}(?:书|小说|网文|故事)|(?:新书|新小说|新作品).{0,10}(?:策划|设计|创建|开始|写)|(?:策划|设计|创作|写).{0,6}(?:男频|女频|玄幻|都市|修仙|系统|爽文|悬疑).{0,10}(?:书|小说|故事)|开.{0,4}(?:一本|本|部).{0,6}(?:新书|新坑)/iu;
 const ASSISTANT_REVISE_MODE_ANTI_DETECT_PATTERN = /反检测|anti[-\s]?detect/iu;
 const ASSISTANT_REVISE_MODE_POLISH_PATTERN = /润色|文风|措辞|polish/iu;
 const ASSISTANT_REVISE_MODE_CHAPTER_REDESIGN_PATTERN = /深度改写|大幅改写|chapter[-\s]?redesign|换剧情|换场景|改剧情线|重构本章|发生关系|亲密关系|上床|做爱|性爱/iu;
 const ASSISTANT_REVISE_MODE_REWRITE_PATTERN = /rewrite|改写/iu;
 const ASSISTANT_REVISE_MODE_REWORK_PATTERN = /重写|重作|改成|剧情|情节|整体改|彻底改|必须改/iu;
+// Matches requests that target truth files or book metadata — these must NOT trigger the
+// deterministic revise_chapter lane even when "重写"/"修改" appears in the request.
+const ASSISTANT_TRUTH_FILE_EDIT_PATTERN =
+  /story_bible|volume_outline|book_rules|chapter_summaries|current_state|pending_hooks|particle_ledger|subplot_board|emotional_arcs|character_matrix|style_guide|author_intent|current_focus|书名|改书名|书的名(?:字|称)|真相文件|设定文件|卷纲|卷章大纲|总章数|目标章数|章节总数|全书章节|调整.{0,8}章数|压缩到.{0,6}章/iu;
 const ASSISTANT_METRICS_DAY_RANGE_VALUES = [7, 30] as const;
 const ASSISTANT_METRICS_DEFAULT_DAY_RANGE = 7;
 const ASSISTANT_METRICS_TASK_SNAPSHOT_LIMIT = 400;
@@ -1272,7 +1276,7 @@ function buildBlueprintFromContract(
   };
 }
 
-const ASSISTANT_CHAPTER_PLAN_RESPONSE_RE = /(?:下一章|第\s*\d+\s*章).{0,20}(?:设计方案|方案|怎么写|规划|章段|核心爽点|设计|全新设计)/u;
+const ASSISTANT_CHAPTER_PLAN_RESPONSE_RE = /(?:下一章节?|第\s*(?:\d+|[一二三四五六七八九十百千]+)\s*章节?).{0,20}(?:设计方案|方案|怎么写|规划|章段|核心爽点|设计|全新设计)/u;
 const ASSISTANT_PLAN_REFERENCE_RE = /(?:按|按照|照|就按|采用|执行).{0,10}(?:你|刚才|上面|这个|那个|路径\s*[A-DＡ-Ｄ])?.{0,10}(?:设计方案|方案|规划|思路|设计|路径\s*[A-DＡ-Ｄ]).{0,12}(?:写|执行|生成|下一章|章节|落实)?/u;
 const ASSISTANT_PLAN_ACCEPTANCE_RE = /(?:喜欢|认可|确认|同意|可以|就这样|没问题|按这个|按你的|按你这个|按照这个|按照你的).{0,30}(?:设计|方案|规划|思路|下一章|章节).{0,30}(?:写|去写|开始|执行|生成|下一章|章节)/u;
 
@@ -1364,11 +1368,11 @@ function extractChapterPlanSceneBeats(text: string): string[] {
     }
   }
 
-  return uniqueStrings(beats).slice(0, 8);
+  return uniqueStrings(beats).slice(0, 12);
 }
 
 function extractChapterPlanGoal(text: string): string | undefined {
-  const titleMatch = text.match(/第\s*\d+\s*章.{0,20}(?:《([^》]{2,40})》|方案[:：]\s*([^\n]{2,80}))/u);
+  const titleMatch = text.match(/第\s*(?:\d+|[一二三四五六七八九十百千]+)\s*章节?.{0,20}(?:《([^》]{2,40})》|方案[:：]\s*([^\n]{2,80}))/u);
   const title = titleMatch?.[1] ?? titleMatch?.[2];
   if (title) return title.trim();
   const firstBeat = extractChapterPlanSceneBeats(text)[0];
@@ -1573,11 +1577,11 @@ async function loadLatestSteeringArtifacts(
           : extractChapterPlanGoal(planText);
         result.contract = {
           priority: "hard",
-          mustInclude: sceneBeats.slice(0, 6),
+          mustInclude: sceneBeats.slice(0, 10),
           mustAvoid: [] as string[],
           sceneBeats,
           ...(goal ? { goal } : {}),
-          rawRequest: planText.slice(0, 8000),
+          rawRequest: planText,
           sourceArtifactIds: [art.artifactId],
           userContractPriority: "hard",
         };
@@ -5642,7 +5646,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // prepend it to planInput so the plan stage also follows the design, not just the terse
       // user confirmation message like "非常棒 按照你的设计来写".
       const rawDesignForPlan = typeof (effectiveSteeringInput.steeringContract as Record<string, unknown> | undefined)?.rawRequest === "string"
-        ? ((effectiveSteeringInput.steeringContract as Record<string, unknown>).rawRequest as string).trim().slice(0, 2000)
+        ? ((effectiveSteeringInput.steeringContract as Record<string, unknown>).rawRequest as string).trim()
         : undefined;
       const enrichedPlanInput = rawDesignForPlan
         ? `【参考设计方案 - 严格按此规划本章意图】\n${rawDesignForPlan}\n\n${planInput ?? directBrief ?? ""}`.trim()
@@ -6730,11 +6734,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const chatToBookUserRequest = extractAssistantUserRequest(prompt);
     const isChatToBookInitial = ASSISTANT_CHAT_TO_BOOK_PATTERN.test(chatToBookUserRequest);
 
-    // Also detect continuation of an in-progress wizard (prior draft artifact exists in session)
+    // Also detect continuation of an in-progress wizard (prior draft artifact exists in session).
+    // Always load previous drafts — even on "initial" trigger — so context from prior turns is preserved.
     const sessIdForWizard = sessionId || `s_${Date.now().toString(36)}`;
-    const existingWizardDraftArtifacts = isChatToBookInitial
-      ? []
-      : await artifactService.listByType(sessIdForWizard, "book_creation_draft", 1);
+    const existingWizardDraftArtifacts = await artifactService.listByType(sessIdForWizard, "book_creation_draft", 1);
     const isChatToBookContinuation = !isChatToBookInitial && existingWizardDraftArtifacts.length > 0;
 
     if (isChatToBookInitial || isChatToBookContinuation) {
@@ -6743,7 +6746,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         try {
           // Load previous draft if any
           let previousDraft: BookCreationDraftPayload | null = null;
-          if (isChatToBookContinuation && existingWizardDraftArtifacts[0]) {
+          if (existingWizardDraftArtifacts[0]) {
             const fullArtifact = await artifactService.getById(
               existingWizardDraftArtifacts[0].artifactId,
               sessIdForWizard,
@@ -6831,6 +6834,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             sessionId: sessIdForWizard,
             userText: chatToBookUserRequest,
             previousDraft,
+            recentMessages,
             llmCall: async (systemPrompt: string) => {
               const resp = await chatCompletion(llmClient, currentConfig.llm.model, [
                 { role: "user", content: systemPrompt },
@@ -7001,6 +7005,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const isRevisionPlanningOnly = ASSISTANT_REVISION_PLANNING_PATTERN.test(userRequest)
       && !/(?:执行|开始|直接|马上|立刻|现在|按.{0,12}(?:方案|设计|规划).{0,8}(?:改|重写|修订|执行)|去(?:改|重写|修订)|帮我(?:改|重写|修订))/iu.test(userRequest);
     const shouldDirectRevise = ASSISTANT_REVISE_INTENT_PATTERN.test(userRequest)
+      && !ASSISTANT_TRUTH_FILE_EDIT_PATTERN.test(userRequest)
       && !isRevisionPlanningOnly
       && (isExplicitRewrite || !ASSISTANT_WRITE_NEXT_PATTERN.test(userRequest))
       && !ASSISTANT_OPINION_QUESTION_PATTERN.test(userRequest)
@@ -7822,7 +7827,7 @@ ${recentMessages.map((m, index) => compactAssistantRecentMessageForAgentContext(
           mustAvoid: [] as string[],
           sceneBeats: beats,
           ...(goal ? { goal } : {}),
-          rawRequest: inlinePlanMsg.content.slice(0, 8000),
+          rawRequest: inlinePlanMsg.content,
           sourceArtifactIds: [] as string[],
           userContractPriority: "hard",
         };
@@ -7962,7 +7967,7 @@ ${recentMessages.map((m, index) => compactAssistantRecentMessageForAgentContext(
             priority: (ASSISTANT_PLAN_ACCEPTANCE_RE.test(input) || hasReferencedPlan) ? "hard" : compiledFromInput.priority,
             sourceArtifactIds,
             rawRequest: referencedPlanText
-              ? `${input}\n\n[引用章节方案]\n${referencedPlanText.slice(0, 5000)}`
+              ? `${input}\n\n[引用章节方案]\n${referencedPlanText}`
               : compiledFromInput.rawRequest,
           };
           await artifactService.create({

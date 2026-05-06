@@ -169,7 +169,7 @@ function formatSteeringContract(contract: NonNullable<WriteNextInput["steeringCo
     ? ((contract as Record<string, unknown>).rawRequest as string).trim()
     : undefined;
   if (rawReq && rawReq.length > 0) {
-    lines.push(`### 参考设计方案（严格按此创作）\n${rawReq.slice(0, 5000)}`);
+    lines.push(`### 参考设计方案（严格按此创作）\n${rawReq}`);
   }
   return lines.join("\n\n");
 }

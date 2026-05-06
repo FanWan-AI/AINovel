@@ -63,8 +63,10 @@ export function validatePostWrite(
   genreProfile: GenreProfile,
   bookRules: BookRules | null,
   languageOverride?: "zh" | "en",
+  platform?: string,
 ): ReadonlyArray<PostWriteViolation> {
   const violations: PostWriteViolation[] = [];
+  const isAdult = platform === "adult";
 
   // Skip Chinese-specific rules for English content
   const isEnglish = (languageOverride ?? genreProfile.language) === "en";
@@ -83,8 +85,8 @@ export function validatePostWrite(
     });
   }
 
-  // 2. 硬性禁令: 破折号
-  if (content.includes("——")) {
+  // 2. 硬性禁令: 破折号 — 成人向平台跳过（H小说对白中广泛使用破折号表达气声/颤音/中断）
+  if (!isAdult && content.includes("——")) {
     violations.push({
       rule: "禁止破折号",
       severity: "error",
@@ -237,18 +239,21 @@ export function validatePostWrite(
     });
   }
 
-  // 10. 段落长度检查（手机阅读适配：50-250字/段为宜）
+  // 10. 段落长度检查（手机阅读适配）
+  // 成人向平台：情欲描写段落天然更长（高潮慢镜头、五感展开需要600字以上），阈值大幅放宽
   const paragraphs = content
     .split(/\n\s*\n/)
     .map(p => p.trim())
     .filter(p => p.length > 0);
 
-  const longParagraphs = paragraphs.filter(p => p.length > 300);
-  if (longParagraphs.length >= 2) {
+  const paragraphLengthThreshold = isAdult ? 800 : 300;
+  const longParagraphMinCount = isAdult ? 4 : 2;
+  const longParagraphs = paragraphs.filter(p => p.length > paragraphLengthThreshold);
+  if (longParagraphs.length >= longParagraphMinCount) {
     violations.push({
       rule: "段落过长",
       severity: "warning",
-      description: `${longParagraphs.length}个段落超过300字，不适合手机阅读`,
+      description: `${longParagraphs.length}个段落超过${paragraphLengthThreshold}字，不适合手机阅读`,
       suggestion: "长段落拆分为3-5行的短段落，在动作切换或情绪节点处断开",
     });
   }
@@ -258,7 +263,8 @@ export function validatePostWrite(
   // 11. Book-level prohibitions
   // Short prohibitions (2-30 chars): exact substring match
   // Long prohibitions (>30 chars): skip — these are conceptual rules for prompt-level enforcement only
-  if (bookRules?.prohibitions) {
+  // Adult platform: skip prohibitions that contradict explicit content mandate (they're stale architect outputs)
+  if (bookRules?.prohibitions && !isAdult) {
     for (const prohibition of bookRules.prohibitions) {
       if (prohibition.length >= 2 && prohibition.length <= 30 && content.includes(prohibition)) {
         violations.push({

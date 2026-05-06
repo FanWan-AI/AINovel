@@ -76,14 +76,16 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
   },
   {
     name: "create_book",
-    description: "创建一本新书。生成世界观、卷纲、文风指南等基础设定。",
+    description: "创建一本新书。生成世界观、卷纲、文风指南等基础设定。写H小说/成人向/男频情欲小说时 platform 必须填 adult。",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "书名" },
-        genre: { type: "string", enum: ["xuanhuan", "xianxia", "urban", "horror", "other"], description: "题材" },
-        platform: { type: "string", enum: ["tomato", "feilu", "qidian", "other"], description: "目标平台" },
+        genre: { type: "string", enum: ["xuanhuan", "xianxia", "urban", "adult", "horror", "other"], description: "题材。H小说/成人向选 adult" },
+        platform: { type: "string", enum: ["tomato", "feilu", "qidian", "adult", "other"], description: "目标平台。成人向/H小说必须选 adult，否则生成设定会被主流平台口味约束" },
         brief: { type: "string", description: "创作简述/需求（自然语言）" },
+        targetChapters: { type: "number", description: "目标总章数（默认100）。若用户明确说了多少章则填入" },
+        chapterWordCount: { type: "number", description: "每章目标字数（默认3000）" },
       },
       required: ["title", "genre", "platform"],
     },
@@ -216,6 +218,21 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
     },
   },
   {
+    name: "update_book_metadata",
+    description: "更新书籍元数据（book.json）。可修改：书名(title)、状态(status)、目标章数(targetChapters)、每章字数(chapterWordCount)。用于「改书名」「把书名改成X」「改成活跃状态」等请求。不影响真相文件。",
+    parameters: {
+      type: "object",
+      properties: {
+        bookId: { type: "string", description: "书籍ID" },
+        title: { type: "string", description: "新书名（可选）" },
+        status: { type: "string", enum: ["incubating", "outlining", "active", "paused", "completed", "dropped"], description: "新状态（可选）" },
+        targetChapters: { type: "number", description: "目标总章数（可选）" },
+        chapterWordCount: { type: "number", description: "每章目标字数（可选，≥1000）" },
+      },
+      required: ["bookId"],
+    },
+  },
+  {
     name: "write_truth_file",
     description: "【整文件覆盖】直接替换书的真相文件内容。用于扩展大纲、修改世界观、调整规则。注意：这是整文件覆盖写入，不是追加；不要用来改 current_state.md 的章节进度指针或 hack 章节号；不要用来补空章节。",
     parameters: {
@@ -263,6 +280,7 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 | import_canon | 从正传导入正典参照，启用番外模式 |
 | import_chapters | 【整书重导】导入全部已有章节并重建真相文件 |
 | read_chapter | 读取指定章节正文内容，不填章节号则读最新章 |
+| update_book_metadata | 更新书名、状态、目标章数等书籍元数据（book.json） |
 | write_truth_file | 【整文件覆盖】替换真相文件内容，不能用来改章节进度 |
 
 ## 长期记忆
@@ -290,6 +308,8 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 
 - 用户提供了题材/创意但没说要扫描市场 → 跳过 scan_market，直接 create_book
 - 用户说了书名/bookId → 直接操作，不需要先 list_books
+- 用户说「H小说」「成人向」「男频情欲」「情色」「成人男频」→ create_book 时 platform 填 **adult**，genre 填 **adult**（或用户指定的题材）；adult 平台没有内容审查限制，架构师会生成包含情欲设定的完整基础设定
+- **用户若提到明确章节数（如"50章""100章左右""200章"）→ create_book 时 targetChapters 填对应数字**；否则不传 targetChapters（默认100）
 - 用户要分析章节质量、比较修订效果、核对情节细节 → 优先 read_chapter 读取正文，然后基于实际内容给出具体意见，不要基于猜测作判断
 - 每完成一步，简要汇报进展
 - 当用户要求“先把注意力拉回某条线”时，优先 update_current_focus，然后 plan_chapter / compose_chapter，再决定是否 write_draft 或 write_full_pipeline
@@ -297,12 +317,27 @@ const DEFAULT_AGENT_SYSTEM_PROMPT = `你是 InkOS 小说写作 Agent。用户是
 - 番外流程：先 create_book 建番外书 → import_canon 导入正传正典 → 然后正常 write_draft
 - 续写流程：用户提供已有章节 → import_chapters → 然后 write_draft 续写
 
+## 改书名 / 改元数据规则（重要）
+
+- 用户说「改书名」「把书名改成X」「书名改回X」→ 调用 **update_book_metadata**，传 title 字段，**不是 revise_chapter**
+- 用户说「改成活跃」「把状态改为 active」→ 调用 **update_book_metadata**，传 status 字段
+- update_book_metadata 只更新 book.json，不影响任何真相文件
+
+## 重写真相文件规则（重要）
+
+当用户说「重写 story_bible.md」「重写 volume_outline.md」「重写 book_rules.md」等真相文件时：
+1. 先调用 **read_truth_files** 读取当前内容（了解现有内容后再生成新内容）
+2. 根据用户要求生成新的完整文件内容
+3. 调用 **write_truth_file**，传 fileName 和新 content
+4. **绝对不调用 revise_chapter**——revise_chapter 只修改已写章节正文，不能修改设定文件
+
 ## 禁止事项（严格遵守）
 
 - 不要用 write_draft 补历史中间章节。write_draft 只能写【当前最新章之后的下一章】
 - 不要用 import_chapters 修补某一个空章。import_chapters 是整书级重导工具
 - 不要用 write_truth_file 修改 current_state.md 的章节进度来"骗"系统跳到某一章
 - 不要用 revise_chapter 补缺失章节或改章节号。revise 只做文字质量修订
+- **不要用 revise_chapter 重写设定文件**（story_bible / volume_outline / book_rules 等）——那是 write_truth_file 的工作
 - 用户说"补第 N 章"或"第 N 章是空的"时，先用 get_book_status 和 read_truth_files 判断真实状态，再决定用哪个工具
 - 不要在没有确认书籍状态的情况下直接调用写作工具
 - **不要因字数原因重复调用 revise_chapter**：revise 结果中如果 lengthWarnings 为空或只提到字数超出软上限，说明内容已按质量优先原则保留，无需再次修订；只有 auditIssues 中有新的 critical/blocking 问题时才需要再次 revise
@@ -477,8 +512,8 @@ export async function executeAgentTool(
         platform: ((args.platform as string) ?? "tomato") as Platform,
         genre: ((args.genre as string) ?? "xuanhuan") as Genre,
         status: "outlining" as const,
-        targetChapters: 200,
-        chapterWordCount: 3000,
+        targetChapters: typeof args.targetChapters === "number" && args.targetChapters > 0 ? args.targetChapters : 100,
+        chapterWordCount: typeof args.chapterWordCount === "number" && args.chapterWordCount > 0 ? args.chapterWordCount : 3000,
         createdAt: now,
         updatedAt: now,
       };
@@ -640,6 +675,31 @@ export async function executeAgentTool(
         wordCount: chapter.wordCount,
         content: raw,
       });
+    }
+
+    case "update_book_metadata": {
+      const bookId = args.bookId as string;
+      const current = await state.loadBookConfig(bookId);
+      const updates: Record<string, unknown> = {};
+      if (typeof args.title === "string" && args.title.trim()) {
+        updates.title = args.title.trim();
+      }
+      const validStatuses = ["incubating", "outlining", "active", "paused", "completed", "dropped"];
+      if (typeof args.status === "string" && validStatuses.includes(args.status)) {
+        updates.status = args.status;
+      }
+      if (typeof args.targetChapters === "number" && Number.isInteger(args.targetChapters) && args.targetChapters > 0) {
+        updates.targetChapters = args.targetChapters;
+      }
+      if (typeof args.chapterWordCount === "number" && args.chapterWordCount >= 1000) {
+        updates.chapterWordCount = args.chapterWordCount;
+      }
+      if (Object.keys(updates).length === 0) {
+        return JSON.stringify({ error: "没有提供任何更新字段（title / status / targetChapters / chapterWordCount）。" });
+      }
+      const updated = { ...current, ...updates, updatedAt: new Date().toISOString() };
+      await state.saveBookConfig(bookId, updated as typeof current);
+      return JSON.stringify({ bookId, updated, file: "book.json" });
     }
 
     case "write_truth_file": {

@@ -338,7 +338,7 @@ export class WriterAgent extends BaseAgent {
 
     // ── Post-write validation (regex + rule-based, zero LLM cost) ──
     const ruleViolations = [
-      ...validatePostWrite(creative.content, genreProfile, bookRules, resolvedLanguage),
+      ...validatePostWrite(creative.content, genreProfile, bookRules, resolvedLanguage, book.platform),
       ...detectCrossChapterRepetition(creative.content, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(creative.content, fingerprintChapters, resolvedLanguage),
     ];

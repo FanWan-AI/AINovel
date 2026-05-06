@@ -358,7 +358,10 @@ export class StateManager {
             const content = await readFile(join(snapshotDir, f), "utf-8");
             await writeFile(join(storyDir, f), content, "utf-8");
           } catch {
-            // Optional file missing — skip
+            // Optional file missing from snapshot — delete current so stale data
+            // (e.g. chapter_summaries.md written after snapshot 0 was taken)
+            // does not survive the rollback and corrupt the next write attempt.
+            await unlink(join(storyDir, f)).catch(() => {});
           }
         }),
       );

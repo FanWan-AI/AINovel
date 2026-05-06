@@ -387,6 +387,7 @@ export class PipelineRunner {
     readonly sourceCanon?: string;
     readonly styleGuide?: string;
     readonly language: "zh" | "en";
+    readonly platform?: string;
     readonly stageLanguage: LengthLanguage;
     readonly maxRetries?: number;
   }): Promise<ArchitectOutput> {
@@ -405,6 +406,7 @@ export class PipelineRunner {
         sourceCanon: params.sourceCanon,
         styleGuide: params.styleGuide,
         language: params.language,
+        platform: params.platform,
       });
 
       this.config.logger?.info(
@@ -433,6 +435,7 @@ export class PipelineRunner {
       sourceCanon: params.sourceCanon,
       styleGuide: params.styleGuide,
       language: params.language,
+      platform: params.platform,
     });
     this.config.logger?.info(
       `Foundation final review: ${finalReview.totalScore}/100 ${finalReview.passed ? "PASSED" : "ACCEPTED (max retries)"}`,
@@ -801,6 +804,7 @@ export class PipelineRunner {
       ),
       reviewer,
       mode: "original",
+      platform: book.platform,
       language: resolvedLanguage,
       stageLanguage,
     });
@@ -894,6 +898,7 @@ export class PipelineRunner {
       reviewer,
       mode: "fanfic",
       sourceCanon: fanficCanon,
+      platform: book.platform,
       language: resolvedLanguage,
       stageLanguage,
     });
@@ -966,6 +971,7 @@ export class PipelineRunner {
         chapterContent: output.content,
         lengthSpec,
         chapterIntent: writeInput.chapterIntent,
+        platform: book.platform,
       });
       totalUsage = PipelineRunner.addUsage(totalUsage, normalizedDraft.tokenUsage);
       const draftOutput: WriteChapterOutput = {
@@ -1700,6 +1706,7 @@ export class PipelineRunner {
         chapterContent,
         lengthSpec,
         chapterIntent: writeInput.chapterIntent,
+        platform: book.platform,
       }),
       assertChapterContentNotEmpty: (content, stage) =>
         this.assertChapterContentNotEmpty(content, chapterNumber, stage),
@@ -2805,6 +2812,7 @@ ${matrix}`,
     chapterContent: string;
     lengthSpec: LengthSpec;
     chapterIntent?: string;
+    platform?: string;
   }): Promise<{
     content: string;
     wordCount: number;
@@ -2831,6 +2839,7 @@ ${matrix}`,
       chapterContent: params.chapterContent,
       lengthSpec: params.lengthSpec,
       chapterIntent: params.chapterIntent,
+      platform: params.platform,
     });
 
     const cutRatio = writerCount > 0 ? 1 - normalized.finalCount / writerCount : 0;

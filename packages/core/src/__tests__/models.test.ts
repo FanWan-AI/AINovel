@@ -66,7 +66,7 @@ describe("BookConfigSchema", () => {
       updatedAt: "2026-01-01T00:00:00Z",
     };
     const result = BookConfigSchema.parse(minimal);
-    expect(result.targetChapters).toBe(200);
+    expect(result.targetChapters).toBe(100);
     expect(result.chapterWordCount).toBe(3000);
   });
 
