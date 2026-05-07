@@ -362,6 +362,35 @@ ${eraBlock}
 4. 伏笔前后呼应，不留悬空线
 5. 配角有独立动机，不是工具人`;
 
+    const sectionRequirements = book.platform === "adult"
+      ? `=== SECTION: book_rules ===
+${bookRulesPrompt}
+
+=== SECTION: current_state ===
+${currentStatePrompt}
+
+=== SECTION: pending_hooks ===
+${pendingHooksPrompt}
+
+=== SECTION: story_bible ===
+${storyBiblePrompt}
+
+注意：成人向书籍的 volume_outline 会在下一次专门调用中单独生成；本轮不要输出 volume_outline，不要在 story_bible 里展开卷纲正文。`
+      : `=== SECTION: book_rules ===
+${bookRulesPrompt}
+
+=== SECTION: current_state ===
+${currentStatePrompt}
+
+=== SECTION: pending_hooks ===
+${pendingHooksPrompt}
+
+=== SECTION: story_bible ===
+${storyBiblePrompt}
+
+=== SECTION: volume_outline ===
+${volumeOutlinePrompt}`;
+
     const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}${adultBlock}${adultConcisenessBlock}
 
 要求：
@@ -378,20 +407,7 @@ ${genreBody}
 
 你需要生成以下内容，每个部分用 === SECTION: <name> === 分隔：
 
-=== SECTION: book_rules ===
-${bookRulesPrompt}
-
-=== SECTION: current_state ===
-${currentStatePrompt}
-
-=== SECTION: pending_hooks ===
-${pendingHooksPrompt}
-
-=== SECTION: story_bible ===
-${storyBiblePrompt}
-
-=== SECTION: volume_outline ===
-${volumeOutlinePrompt}
+${sectionRequirements}
 
 ${finalRequirementsPrompt}`;
 
@@ -407,7 +423,9 @@ ${finalRequirementsPrompt}`;
       { role: "user", content: userMessage },
     ], { maxTokens: 16384, temperature: 0.8 });
 
-    const foundation = this.parseSections(response.content);
+    const foundation = this.parseSections(response.content, {
+      allowMissingVolumeOutline: book.platform === "adult",
+    });
     if (book.platform === "adult") {
       return this.withDedicatedAdultVolumeOutline(book, gp, foundation, resolvedLanguage);
     }
@@ -421,12 +439,6 @@ ${finalRequirementsPrompt}`;
     language: "zh" | "en",
   ): Promise<ArchitectOutput> {
     const dedicatedOutline = await this.generateDedicatedAdultVolumeOutline(book, gp, foundation, language);
-    if (!this.isVolumeOutlineComplete(dedicatedOutline.raw, book.targetChapters)) {
-      this.log?.warn(
-        `[architect] Dedicated volume outline did not clearly cover chapter ${book.targetChapters}; keeping original outline.`,
-      );
-      return foundation;
-    }
     return { ...foundation, volumeOutline: dedicatedOutline.cleaned };
   }
 
@@ -437,51 +449,156 @@ ${finalRequirementsPrompt}`;
     language: "zh" | "en",
   ): Promise<{ readonly raw: string; readonly cleaned: string }> {
     const targetChapters = book.targetChapters;
-    const compactStoryBible = this.compactForPrompt(foundation.storyBible, 9000);
-    const compactHooks = this.compactForPrompt(foundation.pendingHooks, 2500);
-    const prompt = language === "en"
-      ? `Generate ONLY volume_outline.md for the adult novel "${book.title}".
-Target: ${targetChapters} chapters, ${book.chapterWordCount} words/chapter.
-Use the existing story bible and hooks below.
+    const compactStoryBible = this.compactForPrompt(foundation.storyBible, 5000);
+    const compactHooks = this.compactForPrompt(foundation.pendingHooks, 1800);
+    const prompts = [
+      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, language, 3200),
+      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, language, 1800),
+    ];
 
-Hard requirements:
-- Do not output story_bible, book_rules, current_state, or pending_hooks.
-- Cover the full range from Chapter 1 to Chapter ${targetChapters}.
-- Use 5-8 volumes. Every volume must include: chapter range, core conflict, key turn, taboo escalation, scene-node list, edge-control/payoff list, and closing hook.
-- Keep it complete and concise. Do not write prose scenes.
-- End with the exact marker: END_VOLUME_OUTLINE
+    for (let attempt = 0; attempt < prompts.length; attempt++) {
+      const response = await this.chat([
+        { role: "system", content: "你是卷纲压缩器。你的首要目标是完整覆盖目标章数并输出结束标记；任何细节都必须让位于完整性。" },
+        { role: "user", content: prompts[attempt]! },
+      ], { maxTokens: attempt === 0 ? 6000 : 4000, temperature: attempt === 0 ? 0.35 : 0.2 });
+
+      if (this.isVolumeOutlineComplete(response.content, targetChapters)) {
+        return {
+          raw: response.content,
+          cleaned: this.cleanDedicatedVolumeOutline(response.content),
+        };
+      }
+
+      const tail = response.content.slice(Math.max(0, response.content.length - 300)).replace(/\s+/g, " ").trim();
+      this.log?.warn(`[architect] adult volume outline attempt ${attempt + 1} incomplete; retrying/falling back. Tail: ${tail}`);
+    }
+
+    const fallback = this.buildFallbackAdultVolumeOutline(book, foundation, language);
+    return {
+      raw: `${fallback}\nEND_VOLUME_OUTLINE`,
+      cleaned: fallback,
+    };
+  }
+
+  private buildCompactAdultVolumeOutlinePrompt(
+    book: BookConfig,
+    gp: GenreProfile,
+    compactStoryBible: string,
+    compactHooks: string,
+    language: "zh" | "en",
+    maxWords: number,
+  ): string {
+    if (language === "en") {
+      return `Generate ONLY volume_outline.md for "${book.title}".
+Target: Chapter 1 to Chapter ${book.targetChapters}. Maximum ${maxWords} words.
+Format exactly:
+## Volume N: title (Chapters A-B)
+- Core:
+- Turns: ChA ..., ChB ...
+- Adult nodes: ChX character / play-difference / consequence; ChY ...
+- Edge/payoff:
+- Hook:
+
+Rules:
+- 5-8 volumes total.
+- Each volume has at most 6 bullets.
+- No scene prose. No paragraph longer than 35 words.
+- Must explicitly mention Chapter ${book.targetChapters}.
+- Last line exactly: END_VOLUME_OUTLINE
 
 Story bible:
 ${compactStoryBible}
 
-Pending hooks:
-${compactHooks}`
-      : `只生成《${book.title}》的 volume_outline.md，不要生成其他文件。
-目标：${targetChapters}章，每章${book.chapterWordCount}字，题材：${gp.name}。
+Hooks:
+${compactHooks}`;
+    }
 
-硬性要求：
-- 只输出卷纲正文，不要输出 story_bible / book_rules / current_state / pending_hooks。
-- 必须覆盖第1章到第${targetChapters}章，不得停在中途。
-- 用5-8个卷或阶段组织；每卷必须包含：章节范围、核心冲突、关键转折、禁忌升级、代表性情欲节点列表、边缘控制/兑现节点、卷尾钩子。
-- 这是建书大纲，不是正文；情欲节点只写结构功能，不展开长篇场景。
-- 每个节点要保留“角色差异、玩法差异、关系后果”，避免只列姿势。
-- 最后一行必须输出精确标记：END_VOLUME_OUTLINE
+    return `只生成《${book.title}》volume_outline.md。目标第1章到第${book.targetChapters}章。全文最多${maxWords}字。
+严格格式：
+## 第N卷：卷名（第A-B章）
+- 核心：
+- 转折：第A章...；第B章...
+- 成人节点：第X章 角色/玩法差异/后果；第Y章...
+- 边缘/兑现：
+- 卷尾钩子：
 
-已有 story_bible：
+硬规则：
+- 总共5-8卷。
+- 每卷最多6个项目符号。
+- 禁止写场景正文，禁止长段描写，禁止单个项目超过45字。
+- 必须明确写到第${book.targetChapters}章。
+- 最后一行必须精确输出：END_VOLUME_OUTLINE
+
+已有story_bible摘要：
 ${compactStoryBible}
 
-已有 pending_hooks：
+已有伏笔：
 ${compactHooks}`;
+  }
 
-    const response = await this.chat([
-      { role: "system", content: "你是网络小说卷纲架构师，擅长把长篇设定压缩成完整、可执行、不中途截断的章节规划。" },
-      { role: "user", content: prompt },
-    ], { maxTokens: 12000, temperature: 0.45 });
+  private buildFallbackAdultVolumeOutline(
+    book: BookConfig,
+    foundation: ArchitectOutput,
+    language: "zh" | "en",
+  ): string {
+    const names = this.extractCharacterNames(foundation.storyBible);
+    const cast = names.length > 0 ? names : [book.title, "核心女主", "权力女主", "敌对女主", "终局女主"];
+    const volumeCount = Math.min(6, Math.max(5, Math.ceil(book.targetChapters / 10)));
+    const ranges = this.buildChapterRanges(book.targetChapters, volumeCount);
+    const lines: string[] = [];
 
-    return {
-      raw: response.content,
-      cleaned: this.cleanDedicatedVolumeOutline(response.content),
-    };
+    for (let i = 0; i < ranges.length; i++) {
+      const [start, end] = ranges[i]!;
+      const lead = cast[i % cast.length]!;
+      const next = cast[(i + 1) % cast.length]!;
+      if (language === "en") {
+        lines.push(`## Volume ${i + 1}: ${lead} Arc (Chapters ${start}-${end})`);
+        lines.push(`- Core: advance ${lead}'s resistance arc and connect it to the main power conflict.`);
+        lines.push(`- Turns: Chapter ${start} opens the arc; Chapter ${Math.min(end, start + Math.floor((end - start) / 2))} reverses leverage; Chapter ${end} pays off the volume hook.`);
+        lines.push(`- Adult nodes: Chapter ${start} ${lead}/signature trigger/consequence; Chapter ${Math.min(end, start + 2)} ${lead}/different play pressure/new debt; Chapter ${end} ${next}/handoff hook.`);
+        lines.push(`- Edge/payoff: use ${lead}'s identity language and distinct climax fingerprint; do not reuse the prior lead's pattern.`);
+        lines.push(`- Hook: carry one secret, witness risk, body-memory trigger, or faction debt into the next volume.`);
+        lines.push("");
+      } else {
+        lines.push(`## 第${i + 1}卷：${lead}线（第${start}-${end}章）`);
+        lines.push(`- 核心：推进${lead}的防线崩塌，并接入主线权力冲突。`);
+        lines.push(`- 转折：第${start}章开线；第${Math.min(end, start + Math.floor((end - start) / 2))}章反转筹码；第${end}章兑现卷钩子。`);
+        lines.push(`- 成人节点：第${start}章 ${lead}/专属触发/关系后果；第${Math.min(end, start + 2)}章 ${lead}/玩法差异/新债务；第${end}章 ${next}/交接钩子。`);
+        lines.push(`- 边缘/兑现：使用${lead}的身份语言和专属高潮指纹，禁止复用上一卷女主模板。`);
+        lines.push(`- 卷尾钩子：留下秘密、目击风险、身体记忆或阵营债务进入下一卷。`);
+        lines.push("");
+      }
+    }
+
+    return lines.join("\n").trim();
+  }
+
+  private buildChapterRanges(targetChapters: number, volumeCount: number): Array<[number, number]> {
+    const ranges: Array<[number, number]> = [];
+    let start = 1;
+    for (let i = 0; i < volumeCount; i++) {
+      const remainingVolumes = volumeCount - i;
+      const remainingChapters = targetChapters - start + 1;
+      const size = Math.ceil(remainingChapters / remainingVolumes);
+      const end = i === volumeCount - 1 ? targetChapters : Math.min(targetChapters, start + size - 1);
+      ranges.push([start, end]);
+      start = end + 1;
+    }
+    return ranges;
+  }
+
+  private extractCharacterNames(storyBible: string): string[] {
+    const names = new Set<string>();
+    for (const match of storyBible.matchAll(/^#{2,4}\s*([^\s—\-|]{2,8})\s*[—\-]/gmu)) {
+      names.add(match[1]!.trim());
+    }
+    for (const match of storyBible.matchAll(/^\|\s*([^\s|]{2,8})\s*\|/gmu)) {
+      const name = match[1]!.trim();
+      if (!/姓名|角色|---/.test(name)) {
+        names.add(name);
+      }
+    }
+    return [...names].slice(0, 12);
   }
 
   private compactForPrompt(content: string, maxChars: number): string {
@@ -1018,7 +1135,10 @@ ${trimmed}\n`;
 ${trimmed}\n`;
   }
 
-  private parseSections(content: string): ArchitectOutput {
+  private parseSections(
+    content: string,
+    options?: { readonly allowMissingVolumeOutline?: boolean },
+  ): ArchitectOutput {
     const parsedSections = new Map<string, string>();
     const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
     const matches = [...content.matchAll(sectionPattern)];
@@ -1035,6 +1155,9 @@ ${trimmed}\n`;
     const extract = (name: string): string => {
       const section = parsedSections.get(this.normalizeSectionName(name));
       if (!section) {
+        if (name === "volume_outline" && options?.allowMissingVolumeOutline) {
+          return "";
+        }
         const seen = [...parsedSections.keys()].join(", ") || "(none)";
         const tail = content.slice(Math.max(0, content.length - 500)).replace(/\s+/g, " ").trim();
         throw new Error(`Architect output missing required section: ${name}. Seen sections: ${seen}. Output tail: ${tail}`);
