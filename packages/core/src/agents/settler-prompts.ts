@@ -30,6 +30,9 @@ export function buildSettlerSystemPrompt(
   const fullCastBlock = bookRules?.enableFullCastTracking
     ? `\n## 全员追踪\nPOST_SETTLEMENT 必须额外包含：本章出场角色清单、角色间关系变动、未出场但被提及的角色。`
     : "";
+  const adultTrackingBlock = book.platform === "adult"
+    ? `\n## 成人向角色指纹追踪（严格执行）\n如果正文包含情欲/性爱/成人场景，必须把以下变化写入 characterMatrixOps 或 notes，供后续章节复用，避免女主同质化：\n- 女主本章新增或强化的性癖/玩法偏好\n- 使用过的主姿势、副姿势、姿势禁区或姿势偏好\n- 男主有效骚话策略，以及女主专属回应词库/称呼/语癖变化\n- 女主高潮指纹变化：身体失控签名、声音曲线、心理断线方式、事后遮掩方式\n- 身体记忆/新开关：下次可被更快触发的部位、称呼、动作、场景物件\n- 成人向剧情钩子：新把柄、误会、关系债务、目击风险、占有标记、下一次升级方向`
+    : "";
 
   const langPrefix = isEnglish
     ? `【LANGUAGE OVERRIDE】ALL output (state card, hooks, summaries, subplots, emotional arcs, character matrix) MUST be in English. The === TAG === markers remain unchanged.\n\n`
@@ -61,7 +64,7 @@ export function buildSettlerSystemPrompt(
 - 题材：${genreProfile.name}（${book.genre}）
 - 平台：${book.platform}
 ${numericalBlock}
-${hookRules}${fullCastBlock}
+${hookRules}${fullCastBlock}${adultTrackingBlock}
 
 ## 输出格式（必须严格遵循）
 
@@ -143,7 +146,18 @@ function buildSettlerOutputFormat(gp: GenreProfile): string {
   },
   "subplotOps": [],
   "emotionalArcOps": [],
-  "characterMatrixOps": [],
+  "characterMatrixOps": [
+    {
+      "op": "upsert-adult-fingerprint",
+      "character": "角色名",
+      "kinksOrPlay": "正文实际出现的性癖/玩法偏好；无则省略本对象",
+      "positionDynamics": "使用过的姿势、触发的心理变化、暂不可重复的姿势模板",
+      "dirtyTalkLexicon": "男主有效骚话策略 + 女主专属回应词库/称呼/语癖变化",
+      "climaxFingerprintDelta": "本章新增或强化的高潮行为、声音曲线、心理断线、事后遮掩",
+      "bodyMemoryTrigger": "下次可复用/升级的身体记忆或性癖开关",
+      "nextUpgrade": "下一次可以升级的方向"
+    }
+  ],
   "notes": []
 }
 \`\`\`

@@ -58,17 +58,23 @@ export class ArchitectAgent extends BaseAgent {
   - 每位女性角色的完整外貌（身材、脸型、气质，必须有能让读者脑补清晰画面的具体细节）
   - 每位女性角色的身体感度图谱：最敏感的两到三个部位，以及被触碰后具体的反应方式
   - 每位女性角色的心理防线类型和最致命的弱点（主角如何精准击破）
+  - 每位女性角色的**专属高潮指纹**：身份语言过滤器、心理断线方式、身体失控签名、声音曲线、高潮触发点、事后遮掩方式；禁止多名女主共用"弓背+收缩+失神+叫"模板
+  - 每位女性角色的**成人向玩法档案**：性癖/玩法偏好、姿势偏好与禁区、专属骚话/回应词库、可被升级的身体记忆开关
   - 至少3个禁忌关系设定（身份禁忌/场景禁忌/关系禁忌任选）
 - **volume_outline 必须包含**：
-  - 每卷至少5个H场景节点（第X章：[场景类型+女主角名+禁忌程度★]）
-  - 每卷至少2个边缘控制场景（★★★以上高潮延迟场景，把她带到边缘再停，逼她开口）
+  - 每卷至少5个H场景节点（第X章：[女主角名+场景类型+主姿势/玩法+性癖压力+禁忌程度★+本场钩子]）
+  - 每卷至少2个边缘控制场景（★★★以上高潮延迟场景；必须写明该女主会用什么性格化方式失控、索取或反制，不能只写"逼她开口"）
+  - 每卷至少3种不同姿势/玩法组合，至少3类不同骚话策略，避免连续场景只靠同一种插入/同一种求饶升级
   - 禁忌升级路线图：每卷的情欲尺度和禁忌程度要比上一卷有明显提升
   - 至少2个核心禁忌（如身份禁忌/强迫征服/NTR等）贯穿全书
 - **book_rules 必须包含**：
   - prohibitions 列表中**不得出现**任何限制情欲描写的条目
   - 明确要求：情欲对白必须直白露骨，不得隐晦；生理细节必须具体；边缘控制必须每卷至少2次
-  - additionalAuditDimensions 加入"情欲场景质量""禁忌升级节奏""边缘控制使用频率"三个维度
-- **女性角色设定原则**：外貌出色、有鲜明吸引力，每人有独特的身体感度特征，在主角面前有明显心理防线、身体防线和突破弧线`
+  - additionalAuditDimensions 加入"情欲场景质量""禁忌升级节奏""边缘控制使用频率""女主高潮差异化""身份语言一致性""姿势玩法多样性""成人向钩子高级性"七个维度
+- **女性角色设定原则**：外貌出色、有鲜明吸引力，每人有独特的身体感度特征、高潮行为特征、失控语言路径、性癖偏好和姿势/玩法禁区，在主角面前有明显心理防线、身体防线和突破弧线`
+      : "";
+    const adultConcisenessBlock = book.platform === "adult"
+      ? `\n\n## 成人向输出长度护栏（防止截断，绝对遵守）\n- 必须先完整输出 book_rules、current_state、pending_hooks 三个短 section，再输出 story_bible 和 volume_outline。\n- 女主数量可以超过15位，但单个女主档案必须控制在 180-260 字；禁止为每位女主写长篇小传。\n- 前5位女主写完整玩法档案；第6位及以后使用压缩格式：身份禁忌 / 心理弱点 / 敏感点 / 玩法偏好 / 高潮指纹 / 后续钩子，各1句。\n- volume_outline 的 H 场景节点每章一行，不要在卷纲里重复女主完整档案。\n- 无论内容多长，五个 === SECTION === 块必须全部出现，尤其不能漏 book_rules、current_state、pending_hooks。`
       : "";
 
     const storyBiblePrompt = resolvedLanguage === "en"
@@ -114,6 +120,18 @@ Core blurb principle:
 - 心理防线类型与最致命弱点：她用什么武装自己（道德感/自尊/责任/理性），主角如何精准命中她的致命弱点让防线崩塌
 - 身体感度图谱：她最敏感的两到三个部位，以及被触碰后具体的反应方式（如"左乳头比右侧敏感两倍，耳后轻吹就起反应，阴蒂被舌头碰一下就无法抑制"）
 - 被边缘控制时的特有反应：被带到高潮边缘然后停下时，她的具体行为模式（哭？哀求？愤怒？沉默？主动扭动腰部？）
+- 成人向玩法档案：
+  - 性癖/玩法偏好：控制、羞耻、角色扮演、制服身份、镜前观看、言语羞辱、轻度束缚、道具、公共风险、占有标记、声音控制等，选择2-4项并说明为什么符合她性格
+  - 姿势偏好与禁区：哪些姿势会击穿她的身份姿态，哪些姿势会触发羞耻/胜负心/依恋感，哪些暂时不能过早使用
+  - 专属骚话/回应词库：3-5个只有她会使用的称呼、短句、反问、命令、遮羞话术或职业化表达
+  - 身体记忆开关：本卷可反复唤醒她的触发点、称呼、姿势或场景物件
+- 专属高潮指纹：
+  1. 身份语言过滤器：她的身份/职业/阶层如何影响性爱时的称呼、语气、句长、命令感或求取方式
+  2. 心理断线方式：高潮时被击穿的是理性、骄傲、责任感、控制欲、羞耻心、依恋需求还是胜负心
+  3. 身体失控签名：2-3个只属于她的动作或姿态（禁止所有女主都弓背、抽搐、失神、哭叫）
+  4. 声音曲线：从压抑到高峰的专属声音变化（可以更安静、更命令、更碎词、更黏连、更冷静崩坏）
+  5. 高潮触发点：最终引爆来自哪个敏感点、身份禁忌、心理弱点或关系变化
+  6. 事后遮掩方式：高潮后第一反应如何暴露她的性格（整理衣服、骂人、沉默贴近、讲条件、职业化解释等）
 - 攻略路径摘要：从初遇到完全臣服的关键节点（3-5步），每一步的具体触发事件
 
 ## 04_禁忌体系
@@ -170,11 +188,11 @@ Core blurb principle:
 
 ### H场景节点格式（每卷必须列出，至少5个）
 示例：
-- 第X章：[场景类型：职场强迫/睡前偷袭/道具辅助/多P等] — [女性角色名] — [禁忌程度：★★★☆☆]
+- 第X章：[女性角色名] — [场景类型：职场强迫/睡前偷袭/道具辅助/多P等] — [主姿势/玩法] — [核心性癖压力] — [专属骚话策略] — [禁忌程度：★★★☆☆] — [本场留下的新把柄/误会/身体记忆/关系债务]
 
 ### 边缘控制场景格式（每卷必须列出，至少2个）
 示例：
-- 第X章：[目标角色] — 被带到边缘[N]次 — 最终用[具体方式]逼她开口 — 兑现形式
+- 第X章：[目标角色] — 被带到边缘[N]次 — 测试她的[尊严/理性/身份/胜负心/安全感] — 她用[命令/反问/沉默/交易/破碎求取/主动动作]暴露欲望 — 兑现形式 — 本场专属高潮指纹
 
 ### 禁忌升级路线（全书必须体现）
 - 第一卷：单人攻略，基础禁忌（身份差/强迫/初次）
@@ -239,6 +257,10 @@ additionalAuditDimensions:
   - 情欲场景质量（本章是否有完整情欲戏；评分0-100）
   - 禁忌升级节奏（本章的禁忌是否比上章更进一步；评分0-100）
   - 私密部位描写直白度（是否使用直白解剖学词汇；评分0-100）
+  - 女主高潮差异化（高潮行为、声音、心理断线是否与其他女主不可互换；评分0-100）
+  - 身份语言一致性（女主在情欲和高潮阶段的语言是否仍受身份/职业/阶层/性格影响；评分0-100）
+  - 姿势玩法多样性（本章姿势/性癖/骚话策略是否与近期章节明显不同；评分0-100）
+  - 成人向钩子高级性（情欲戏结束后是否留下新把柄、误会、身体记忆、关系债务或下一章压力；评分0-100）
 enableFullCastTracking: false
 ---
 
@@ -340,7 +362,7 @@ ${eraBlock}
 4. 伏笔前后呼应，不留悬空线
 5. 配角有独立动机，不是工具人`;
 
-    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}${adultBlock}
+    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}${adultBlock}${adultConcisenessBlock}
 
 要求：
 - 平台：${book.platform}
@@ -356,12 +378,6 @@ ${genreBody}
 
 你需要生成以下内容，每个部分用 === SECTION: <name> === 分隔：
 
-=== SECTION: story_bible ===
-${storyBiblePrompt}
-
-=== SECTION: volume_outline ===
-${volumeOutlinePrompt}
-
 === SECTION: book_rules ===
 ${bookRulesPrompt}
 
@@ -370,6 +386,12 @@ ${currentStatePrompt}
 
 === SECTION: pending_hooks ===
 ${pendingHooksPrompt}
+
+=== SECTION: story_bible ===
+${storyBiblePrompt}
+
+=== SECTION: volume_outline ===
+${volumeOutlinePrompt}
 
 ${finalRequirementsPrompt}`;
 
@@ -396,6 +418,7 @@ ${finalRequirementsPrompt}`;
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
+    const isAdultOutput = /成人|adult|H小说|情欲|sex|erotic/iu.test(`${output.bookRules}\n${output.storyBible}\n${output.volumeOutline}`);
 
     const writes: Array<Promise<void>> = [
       writeFile(join(storyDir, "story_bible.md"), output.storyBible, "utf-8"),
@@ -436,8 +459,8 @@ ${finalRequirementsPrompt}`;
       writeFile(
         join(storyDir, "character_matrix.md"),
         language === "en"
-          ? "# Character Matrix\n\n### Character Profiles\n| Character | Core Tags | Contrast Detail | Speech Style | Personality Core | Relationship to Protagonist | Core Motivation | Current Goal |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n\n### Encounter Log\n| Character A | Character B | First Meeting Chapter | Latest Interaction Chapter | Relationship Type | Relationship Change |\n| --- | --- | --- | --- | --- | --- |\n\n### Information Boundaries\n| Character | Known Information | Unknown Information | Source Chapter |\n| --- | --- | --- | --- |\n"
-          : "# 角色交互矩阵\n\n### 角色档案\n| 角色 | 核心标签 | 反差细节 | 说话风格 | 性格底色 | 与主角关系 | 核心动机 | 当前目标 |\n|------|----------|----------|----------|----------|------------|----------|----------|\n\n### 相遇记录\n| 角色A | 角色B | 首次相遇章 | 最近交互章 | 关系性质 | 关系变化 |\n|-------|-------|------------|------------|----------|----------|\n\n### 信息边界\n| 角色 | 已知信息 | 未知信息 | 信息来源章 |\n|------|----------|----------|------------|\n",
+          ? `# Character Matrix\n\n### Character Profiles\n| Character | Core Tags | Contrast Detail | Speech Style | Personality Core | Relationship to Protagonist | Core Motivation | Current Goal |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n\n### Encounter Log\n| Character A | Character B | First Meeting Chapter | Latest Interaction Chapter | Relationship Type | Relationship Change |\n| --- | --- | --- | --- | --- | --- |\n\n### Information Boundaries\n| Character | Known Information | Unknown Information | Source Chapter |\n| --- | --- | --- | --- |\n${isAdultOutput ? "\n### Adult Character Fingerprints\n| Character | Kinks / Play Preferences | Position Dynamics | Dirty-Talk Lexicon | Climax Fingerprint Changes | Body-Memory Triggers | Next Upgrade |\n| --- | --- | --- | --- | --- | --- | --- |\n" : ""}`
+          : `# 角色交互矩阵\n\n### 角色档案\n| 角色 | 核心标签 | 反差细节 | 说话风格 | 性格底色 | 与主角关系 | 核心动机 | 当前目标 |\n|------|----------|----------|----------|----------|------------|----------|----------|\n\n### 相遇记录\n| 角色A | 角色B | 首次相遇章 | 最近交互章 | 关系性质 | 关系变化 |\n|-------|-------|------------|------------|----------|----------|\n\n### 信息边界\n| 角色 | 已知信息 | 未知信息 | 信息来源章 |\n|------|----------|----------|------------|\n${isAdultOutput ? "\n### 成人向角色指纹\n| 角色 | 性癖/玩法偏好 | 姿势偏好与禁区 | 专属骚话/回应词库 | 高潮指纹变化 | 身体记忆/新开关 | 下一次可升级方向 |\n|------|----------------|----------------|--------------------|--------------|----------------|------------------|\n" : ""}`,
         "utf-8",
       ),
     );

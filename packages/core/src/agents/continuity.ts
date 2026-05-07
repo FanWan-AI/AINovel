@@ -402,6 +402,9 @@ When the chapter contains erotic / power / desire elements, also evaluate as a c
 - Does the male protagonist demonstrate dominance or control?
 - Does the chapter reach the sensory detail and visual intensity the genre requires?
 - Does the chapter ending generate appetite for the next chapter?
+- Does each female character's climax behavior, language, psychological break point, and after-reaction remain specific to her identity/personality rather than interchangeable with prior heroines?
+- Does the erotic scene vary positions, kink pressure, dirty-talk strategy, and role composition instead of repeating the same sex mechanics?
+- Does the erotic payoff create a new narrative hook: leverage, blackmail material, misunderstanding, body-memory trigger, relationship debt, witness pressure, or a stronger next taboo?
 
 **⚠️ Adult content quality audit (output warning level if any of these apply)**:
 - Does the erotic scene stop at "suggestive atmosphere" without progressing to explicit intimate contact? (If yes: warning — erotic scene not fully delivered)
@@ -409,9 +412,14 @@ When the chapter contains erotic / power / desire elements, also evaluate as a c
 - Is the climax summarized in one sentence instead of a slow-motion multi-paragraph scene? (If yes: warning — climax underwritten)
 - Are intimate body parts referred to only with euphemisms throughout? (If yes: warning — euphemistic body part references)
 - Is female dialogue too literary, lacking realistic gasps, trembling voice, and explicit content? (If yes: warning — erotic dialogue insufficiently explicit)
-- Does this chapter lack an edging sequence (bringing her to the orgasm threshold at least once then stopping to make her ask)? If this is chapter 2+ and edging has not appeared yet: warning — edging technique absent
+- Does this chapter lack an edging sequence (bringing her to the orgasm threshold at least once, then stopping so her specific personality must surface through asking, commanding, bargaining, silence, or active movement)? If this is chapter 2+ and edging has not appeared yet: warning — edging technique absent
 - Is the body sensitivity progression flat compared to previous chapters (same intensity, no escalating loss-of-control curve)? (If yes: warning — physiological sensitivity escalation curve broken)
 - Does sentence rhythm stay uniform throughout (same sentence length/structure during buildup and during climax, no fragmenting)? (If yes: warning — sentence rhythm does not track physical rhythm)
+- Does the heroine's climax reuse a generic four-piece template (arched back + contraction + blank eyes + crying/moaning), or the same "deny -> body betrays her -> says she wants it -> payoff" sequence without personality variation? (If yes: warning — heroine climax fingerprint missing)
+- Does her erotic dialogue lose all traces of identity, profession, class, power position, or established speech habits at climax? (If yes: warning — identity-language filter collapsed)
+- Does the scene rely on only one repeated position/action pattern, with no meaningful position/play switch that changes the psychological situation? (If yes: warning — position/kink variety absent)
+- Do male dirty talk and female responses repeat generic lines instead of character-specific vocabulary, titles, commands, bargaining, corrections, or verbal tells? (If yes: warning — dirty-talk palette generic)
+- Does the sex scene end with only release/afterglow and no new leverage, body memory, relationship debt, witness risk, or next hook? (If yes: warning — erotic payoff lacks narrative hook)
 
 Audit dimensions:
 ${dimList}
@@ -441,6 +449,9 @@ passed is false ONLY when critical-severity issues exist.`
 — 男主是否展现出明确的主导权或掌控感？
 — 本章的感官细节和画面感是否达到类型期待？
 — 本章结尾是否制造了对下一章的渴望感？
+— 女主高潮阶段的行为、语言、心理断线和事后反应是否仍然具体属于她本人，而不是与前几位女主可互换？
+— 情欲戏是否在姿势、性癖压力、骚话策略、角色组合上有足够变化，而不是复用同一种性交机械结构？
+— 情欲兑现后是否产生新的叙事钩子：把柄、误会、身体记忆开关、关系债务、目击压力或更高阶禁忌？
 
 **⚠️ 成人向内容质量专项检查（以下问题若发现，输出 warning 级别）**：
 — 情欲场景是否止步于"暧昧"而未推进到私密部位接触？（若是，标记 warning：情欲场景未完整兑现）
@@ -448,9 +459,14 @@ passed is false ONLY when critical-severity issues exist.`
 — 高潮是否被一句话总结带过而非用慢镜头呈现？（若是，标记 warning：高潮场景未充分展开）
 — 私密部位是否全程使用隐晦词汇（"那里"/"花蕊"等）而非直白描写？（若是，标记 warning：私密词汇隐晦化）
 — 女性对白是否过于文学化，缺乏真实兴奋状态下的气声、颤音和直白内容？（若是，标记 warning：情欲对白不够直白）
-— 本章情欲场景是否缺乏边缘控制（把她带到高潮边缘至少一次再停下逼她开口）？如果本章是第2章之后且尚未出现过边缘控制，标记 warning：缺少边缘控制技法
+— 本章情欲场景是否缺乏边缘控制（把她带到高潮边缘至少一次再停下，让她用符合性格的方式索取、命令、交易、沉默追逐或主动反制）？如果本章是第2章之后且尚未出现过边缘控制，标记 warning：缺少边缘控制技法
 — 本章身体感度描写是否与前几章相比没有递进（感觉一样强、没有越来越失控的曲线）？（若是，标记 warning：生理敏感度递进曲线断裂）
 — 句子节奏是否全程相同（高潮时和铺垫时的句子长度、结构完全一致，没有碎裂感）？（若是，标记 warning：句子节奏未跟随肉体节奏变化）
+— 女主高潮是否复用通用四件套（弓背+收缩+失神+哭叫），或机械复用"否认→身体诚实→开口索取→兑现"顺序而没有性格变奏？（若是，标记 warning：女主高潮指纹缺失）
+— 高潮阶段的女主语言是否失去身份、职业、阶层、权力位置和既有语癖影响，变成所有人都一样的呻吟/求饶？（若是，标记 warning：身份语言过滤器坍塌）
+— 本章是否只有单一重复姿势/动作，没有通过姿势或玩法切换改变心理局势？（若是，标记 warning：姿势/玩法多样性不足）
+— 男主骚话和女主回应是否都是通用句，缺少专属称呼、命令、交易、纠错、反讽、职业话术或语言破防？（若是，标记 warning：骚话词库通用化）
+— 情欲戏是否只停在释放和余韵，没有留下新把柄、误会、身体记忆、关系债务、目击风险或下一章钩子？（若是，标记 warning：成人向钩子不足）
 
 审查维度：
 ${dimList}

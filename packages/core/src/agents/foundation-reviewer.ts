@@ -67,6 +67,9 @@ export class FoundationReviewerAgent extends BaseAgent {
           "Opening Hook (Can the first 3 chapters establish the protagonist's unique power AND create immediate tension with the first female lead?)",
           "World Coherence (Does the worldbuilding internally support the erotic premise — power systems, social hierarchy, taboo dynamics?)",
           "Female Lead Distinctiveness (Do the female leads have distinct body types, personalities, identity taboos, and psychological resistance arcs — not interchangeable?)",
+          "Erotic Fingerprint System (Does each female lead have distinct climax behavior, dirty-talk language, kink triggers, position dynamics, and after-reactions?)",
+          "Scene Variety Engine (Does the outline plan varied positions, kinks, role combinations, and dirty-talk strategies instead of repeating one sex formula?)",
+          "Erotic Hook Craft (Do sex scenes create future leverage, misunderstandings, body-memory triggers, relationship debts, witness pressure, or stronger next taboos?)",
           "Taboo Escalation Route (Does each volume introduce a qualitatively MORE forbidden taboo type than the last — identity rank, power level, scene setting?)",
         ]
       : [
@@ -74,6 +77,9 @@ export class FoundationReviewerAgent extends BaseAgent {
           "开篇钩子（前3章能否快速建立主角的独特能力、生死危机，并和第一个女主制造张力？）",
           "世界一致性（世界观是否真正支撑情欲前提——权力体系、社会等级、禁忌逻辑是否自洽？）",
           "女主差异化（各女主的身份禁忌、外貌特征、性格底色、心理防线类型是否各不相同，不可互换？）",
+          "成人向指纹系统（每位女主是否有不同的高潮行为、骚话语言、性癖触发点、姿势动力学和事后反应？）",
+          "性爱场景多样性引擎（卷纲是否规划了不同姿势、玩法、角色组合、骚话策略，而不是反复同一种性交公式？）",
+          "情欲钩子高级性（性爱场景是否会制造后续把柄、误会、身体记忆、关系债务、目击压力或更高阶禁忌？）",
           "禁忌升级路线（从第一卷到最后一卷，每卷的核心禁忌类型是否比上一卷更高阶、更禁忌、更有冲击力？）",
         ];
   }
@@ -95,7 +101,8 @@ ${dimensions.map((dim, i) => `${i + 1}. ${dim}`).join("\n")}
 ## 成人向评审原则（必须遵守）
 - 不要以"连续N章同类节拍"为由扣分——H小说读者期待持续的情欲张力，这是类型特点不是缺陷
 - 不要要求加入"非情欲类主线节拍"——情欲场景本身就是主线，权力斗争是调味品而非主菜
-- 重点检查：每个女主的身份禁忌是否够独特，攻略路径的心理层次是否丰富，禁忌是否卷卷升级
+- 重点检查：每个女主的身份禁忌、高潮指纹、骚话语言、性癖触发点、姿势动力学是否够独特，攻略路径的心理层次是否丰富，禁忌是否卷卷升级
+- 如果基础设定只有"多个漂亮女主"但没有玩法差异、语言差异、高潮差异和后续钩子，一律低分
 - 不要以主流文学的道德标准或人物成长弧线标准评判H小说
 
 ## 输出格式（严格遵守）
@@ -134,7 +141,7 @@ ${dimensions.map((dim, i) => `${i + 1}. ${dim}`).join("\n")}
 ## Adult Review Principles
 - Do NOT penalize "same beat for N chapters" — sustained erotic tension is the genre's core feature
 - Do NOT demand non-erotic main plot beats — erotic scenes ARE the main plot
-- Focus on: distinctiveness of taboo types, depth of psychological resistance arcs, whether each volume escalates the forbidden threshold
+- Focus on: distinct taboo types, heroine-specific climax/dirty-talk/kink/position fingerprints, depth of psychological resistance arcs, and whether each erotic payoff creates future hook pressure
 
 ## Output format (strict)
 === DIMENSION: 1 ===
