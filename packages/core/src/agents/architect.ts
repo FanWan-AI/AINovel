@@ -74,7 +74,7 @@ export class ArchitectAgent extends BaseAgent {
 - **女性角色设定原则**：外貌出色、有鲜明吸引力，每人有独特的身体感度特征、高潮行为特征、失控语言路径、性癖偏好和姿势/玩法禁区，在主角面前有明显心理防线、身体防线和突破弧线`
       : "";
     const adultConcisenessBlock = book.platform === "adult"
-      ? `\n\n## 成人向输出长度护栏（防止截断，绝对遵守）\n- 必须先完整输出 book_rules、current_state、pending_hooks 三个短 section，再输出 story_bible 和 volume_outline。\n- 女主数量可以超过15位，但单个女主档案必须控制在 180-260 字；禁止为每位女主写长篇小传。\n- 前5位女主写完整玩法档案；第6位及以后使用压缩格式：身份禁忌 / 心理弱点 / 敏感点 / 玩法偏好 / 高潮指纹 / 后续钩子，各1句。\n- volume_outline 的 H 场景节点每章一行，不要在卷纲里重复女主完整档案。\n- 无论内容多长，五个 === SECTION === 块必须全部出现，尤其不能漏 book_rules、current_state、pending_hooks。`
+      ? `\n\n## 成人向输出长度护栏（防止截断，最高优先级，覆盖上方所有详细模板）\n- 本次是“建书基础设定”，不是正文创作；严禁展开长篇性爱过程、逐格高潮、逐章正文片段。\n- 必须严格按顺序输出五个 section：book_rules、current_state、pending_hooks、story_bible、volume_outline；任何 section 不得省略。\n- 总输出控制在 9000-11000 个中文字符以内。宁可压缩女主档案，也不能挤掉 volume_outline。\n- story_bible 中女主只写 10-15 位：前3位每人最多220字；第4位以后每人一行表格，字段为：姓名 / 身份禁忌 / 心理弱点 / 敏感点 / 玩法差异 / 高潮指纹 / 后续钩子。\n- 不要为任何女主写“攻略路径摘要”的长段落；只保留 1 句路线钩子。\n- volume_outline 必须出现，且用 50 行以内完成：每5章一组，每组写章节范围、核心推进、代表性情欲节点、回收钩子。\n- 不要重复用户原始要求，不要输出解释性前言，不要在末尾询问用户。`
       : "";
 
     const storyBiblePrompt = resolvedLanguage === "en"
@@ -934,7 +934,9 @@ ${trimmed}\n`;
     const extract = (name: string): string => {
       const section = parsedSections.get(this.normalizeSectionName(name));
       if (!section) {
-        throw new Error(`Architect output missing required section: ${name}`);
+        const seen = [...parsedSections.keys()].join(", ") || "(none)";
+        const tail = content.slice(Math.max(0, content.length - 500)).replace(/\s+/g, " ").trim();
+        throw new Error(`Architect output missing required section: ${name}. Seen sections: ${seen}. Output tail: ${tail}`);
       }
       if (name !== "pending_hooks") {
         return section;

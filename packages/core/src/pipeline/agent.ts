@@ -405,16 +405,36 @@ export async function runAgentLoop(
     // Execute tool calls
     for (const toolCall of result.toolCalls) {
       let toolResult: string;
+      let parsedArgs: Record<string, unknown> = {};
       try {
-        const args = JSON.parse(toolCall.arguments) as Record<string, unknown>;
-        options?.onToolCall?.(toolCall.name, args);
-        toolResult = await executeTool(pipeline, state, config, toolCall.name, args);
+        parsedArgs = JSON.parse(toolCall.arguments) as Record<string, unknown>;
+        options?.onToolCall?.(toolCall.name, parsedArgs);
+        toolResult = await executeTool(pipeline, state, config, toolCall.name, parsedArgs);
       } catch (e) {
         toolResult = JSON.stringify({ error: String(e) });
       }
 
       options?.onToolResult?.(toolCall.name, toolResult);
       messages.push({ role: "tool" as const, toolCallId: toolCall.id, content: toolResult });
+
+      if (toolCall.name === "create_book") {
+        try {
+          const parsed = JSON.parse(toolResult) as { error?: unknown; bookId?: unknown; title?: unknown; status?: unknown };
+          if (parsed.error) {
+            return `创建书籍失败：${String(parsed.error)}`;
+          }
+          const title = typeof parsed.title === "string"
+            ? parsed.title
+            : typeof parsedArgs.title === "string"
+              ? parsedArgs.title
+              : typeof parsed.bookId === "string"
+                ? parsed.bookId
+                : "新书";
+          return `创建书籍成功：${title}`;
+        } catch {
+          return toolResult;
+        }
+      }
     }
   }
 
