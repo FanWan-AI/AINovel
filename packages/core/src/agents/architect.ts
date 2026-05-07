@@ -76,6 +76,9 @@ export class ArchitectAgent extends BaseAgent {
     const adultConcisenessBlock = book.platform === "adult"
       ? `\n\n## 成人向输出长度护栏（防止截断，最高优先级，覆盖上方所有详细模板）\n- 本次是“建书基础设定”，不是正文创作；严禁展开长篇性爱过程、逐格高潮、逐章正文片段。\n- 必须严格按顺序输出五个 section：book_rules、current_state、pending_hooks、story_bible、volume_outline；任何 section 不得省略。\n- 总输出控制在 9000-11000 个中文字符以内。宁可压缩女主档案，也不能挤掉 volume_outline。\n- story_bible 中女主只写 10-15 位：前3位每人最多220字；第4位以后每人一行表格，字段为：姓名 / 身份禁忌 / 心理弱点 / 敏感点 / 玩法差异 / 高潮指纹 / 后续钩子。\n- 不要为任何女主写“攻略路径摘要”的长段落；只保留 1 句路线钩子。\n- volume_outline 必须出现，且用 50 行以内完成：每5章一组，每组写章节范围、核心推进、代表性情欲节点、回收钩子。\n- 不要重复用户原始要求，不要输出解释性前言，不要在末尾询问用户。`
       : "";
+    const adultSafetyBlock = book.platform === "adult"
+      ? `\n\n## 角色年龄硬约束（最高优先级）\n- 全书普通出场角色按16+基线处理，不生成低于16岁的角色。\n- 所有进入成人关系线、恋爱线、身体关系线或情欲节点的角色必须年满18岁。\n- 禁止把16-17岁角色、未满18岁学生、未成年表象角色写入成人节点；“小妹妹/妹妹感/学生感”若进入成人线，必须改写为18岁以上的成年角色，例如18岁大一、成年义妹、合法成年人。\n- current_state、story_bible、volume_outline、character_matrix 中不得出现“17岁/高三/未成年表象”等与成人节点绑定的设定。`
+      : "";
 
     const storyBiblePrompt = resolvedLanguage === "en"
       ? `Use structured second-level headings:
@@ -391,7 +394,7 @@ ${storyBiblePrompt}
 === SECTION: volume_outline ===
 ${volumeOutlinePrompt}`;
 
-    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}${adultBlock}${adultConcisenessBlock}
+    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}${adultBlock}${adultConcisenessBlock}${adultSafetyBlock}
 
 要求：
 - 平台：${book.platform}
@@ -439,7 +442,7 @@ ${finalRequirementsPrompt}`;
     language: "zh" | "en",
   ): Promise<ArchitectOutput> {
     const dedicatedOutline = await this.generateDedicatedAdultVolumeOutline(book, gp, foundation, language);
-    return { ...foundation, volumeOutline: dedicatedOutline.cleaned };
+    return this.normalizeAdultFoundationSafety({ ...foundation, volumeOutline: dedicatedOutline.cleaned });
   }
 
   private async generateDedicatedAdultVolumeOutline(
@@ -510,6 +513,8 @@ Rules:
 - No scene prose. No paragraph longer than 35 words.
 - Use ONLY these established character names unless the story bible explicitly says a role is unnamed: ${castLine}
 - Hook payoff chapters must obey the hook table. If a later chapter continues a hook, call it "follow-up", not "payoff".
+- Use exact hook IDs from the hook table only. Never write pseudo hook labels such as "hook_pending" or "hook_H002".
+- General cast baseline is 16+, but every adult/romantic/body-relationship character must be 18+. Never place 16-17-year-old or minor-coded students in adult nodes.
 - Must explicitly mention Chapter ${book.targetChapters}.
 - Last line exactly: END_VOLUME_OUTLINE
 
@@ -535,6 +540,8 @@ ${compactHooks}`;
 - 禁止写场景正文，禁止长段描写，禁止单个项目超过45字。
 - 只能使用已在story_bible中出现的角色名，不要临时发明新女主或把职业换成新人名。规范角色名单：${castLine}
 - 伏笔回收章必须服从 pending_hooks；如果后文继续推进，只能写“后续推进/最终反转”，不要写“回收”。
+- 只能使用 pending_hooks 中真实存在的 H 编号；禁止写 hook_pending、hook_H002 之类伪标签。
+- 普通角色按16+基线处理；所有进入成人/恋爱/身体关系节点的角色必须年满18岁；不得把16-17岁、未成年人、未成年学生写入成人节点。
 - 必须明确写到第${book.targetChapters}章。
 - 最后一行必须精确输出：END_VOLUME_OUTLINE
 
@@ -598,22 +605,48 @@ ${compactHooks}`;
 
   private extractCharacterNames(storyBible: string): string[] {
     const names = new Set<string>();
+    const isLikelyCharacterName = (name: string): boolean => {
+      if (!name || name.length < 2 || name.length > 12) return false;
+      return !/姓名|角色|---|禁忌|类型|核心来源|涉及女主|爆发章节|升级方向|NTR|公共场景|强迫|双胞胎同框|玩法|敏感点|心理弱点|后续钩子/u.test(name);
+    };
     for (const match of storyBible.matchAll(/^#{2,4}\s*([^\s—\-|]{2,8})\s*[—\-]/gmu)) {
-      names.add(match[1]!.trim());
+      const name = match[1]!.trim();
+      if (isLikelyCharacterName(name)) {
+        names.add(name);
+      }
     }
     for (const match of storyBible.matchAll(/^\*\*([^*\s—\-|]{2,8})\s*[—\-][^*]*\*\*/gmu)) {
       const name = match[1]!.trim();
-      if (!/情欲|性格|限制|第[一二三四五六七八九十]|核心/.test(name)) {
+      if (isLikelyCharacterName(name) && !/情欲|性格|限制|第[一二三四五六七八九十]|核心/u.test(name)) {
         names.add(name);
       }
     }
     for (const match of storyBible.matchAll(/^\|\s*([^\s|]{2,8})\s*\|/gmu)) {
       const name = match[1]!.trim();
-      if (!/姓名|角色|---/.test(name)) {
+      if (isLikelyCharacterName(name)) {
         names.add(name);
       }
     }
     return [...names].slice(0, 12);
+  }
+
+  private normalizeAdultFoundationSafety(output: ArchitectOutput): ArchitectOutput {
+    const normalizeText = (content: string): string => content
+      .replace(/17岁\/高三/g, "18岁/大一")
+      .replace(/17岁，高三/g, "18岁，大一")
+      .replace(/17岁高三/g, "18岁大一")
+      .replace(/17岁/g, "18岁")
+      .replace(/未成年表象/g, "成年但年幼感")
+      .replace(/未成年人/g, "成年人")
+      .replace(/未成年学生/g, "成年学生");
+
+    return {
+      storyBible: normalizeText(output.storyBible),
+      volumeOutline: normalizeText(output.volumeOutline),
+      bookRules: normalizeText(output.bookRules),
+      currentState: normalizeText(output.currentState),
+      pendingHooks: normalizeText(output.pendingHooks),
+    };
   }
 
   private compactForPrompt(content: string, maxChars: number): string {
@@ -641,7 +674,8 @@ ${compactHooks}`;
     const hasEnoughStructure = (content.match(/第[^。\n]{0,12}卷|第\d+\s*[-—~至到]\s*\d+\s*章|Chapter\s+\d+/giu) ?? []).length >= 5;
     const hasEndMarker = /\bEND_VOLUME_OUTLINE\b/u.test(content);
     const hasNoUnknownHookRefs = pendingHooks ? this.findUnknownHookRefs(content, pendingHooks).length === 0 : true;
-    return reachesTargetChapter && hasEnoughStructure && hasEndMarker && hasNoUnknownHookRefs;
+    const hasNoPseudoHookRefs = !/\bhook[_-][a-z0-9_-]+/iu.test(content);
+    return reachesTargetChapter && hasEnoughStructure && hasEndMarker && hasNoUnknownHookRefs && hasNoPseudoHookRefs;
   }
 
   private findUnknownHookRefs(content: string, pendingHooks: string): string[] {
