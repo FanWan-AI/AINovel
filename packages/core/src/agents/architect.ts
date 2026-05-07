@@ -451,9 +451,10 @@ ${finalRequirementsPrompt}`;
     const targetChapters = book.targetChapters;
     const compactStoryBible = this.compactForPrompt(foundation.storyBible, 5000);
     const compactHooks = this.compactForPrompt(foundation.pendingHooks, 1800);
+    const canonicalCharacters = this.extractCharacterNames(foundation.storyBible);
     const prompts = [
-      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, language, 3200),
-      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, language, 1800),
+      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, canonicalCharacters, language, 3200),
+      this.buildCompactAdultVolumeOutlinePrompt(book, gp, compactStoryBible, compactHooks, canonicalCharacters, language, 1800),
     ];
 
     for (let attempt = 0; attempt < prompts.length; attempt++) {
@@ -462,7 +463,7 @@ ${finalRequirementsPrompt}`;
         { role: "user", content: prompts[attempt]! },
       ], { maxTokens: attempt === 0 ? 6000 : 4000, temperature: attempt === 0 ? 0.35 : 0.2 });
 
-      if (this.isVolumeOutlineComplete(response.content, targetChapters)) {
+      if (this.isVolumeOutlineComplete(response.content, targetChapters, foundation.pendingHooks)) {
         return {
           raw: response.content,
           cleaned: this.cleanDedicatedVolumeOutline(response.content),
@@ -470,7 +471,9 @@ ${finalRequirementsPrompt}`;
       }
 
       const tail = response.content.slice(Math.max(0, response.content.length - 300)).replace(/\s+/g, " ").trim();
-      this.log?.warn(`[architect] adult volume outline attempt ${attempt + 1} incomplete; retrying/falling back. Tail: ${tail}`);
+      const unknownHooks = this.findUnknownHookRefs(response.content, foundation.pendingHooks);
+      const unknownHookNote = unknownHooks.length > 0 ? ` Unknown hooks: ${unknownHooks.join(", ")}.` : "";
+      this.log?.warn(`[architect] adult volume outline attempt ${attempt + 1} incomplete/inconsistent; retrying/falling back.${unknownHookNote} Tail: ${tail}`);
     }
 
     const fallback = this.buildFallbackAdultVolumeOutline(book, foundation, language);
@@ -485,9 +488,11 @@ ${finalRequirementsPrompt}`;
     gp: GenreProfile,
     compactStoryBible: string,
     compactHooks: string,
+    canonicalCharacters: ReadonlyArray<string>,
     language: "zh" | "en",
     maxWords: number,
   ): string {
+    const castLine = canonicalCharacters.length > 0 ? canonicalCharacters.join(language === "en" ? ", " : "、") : "(no extracted cast)";
     if (language === "en") {
       return `Generate ONLY volume_outline.md for "${book.title}".
 Target: Chapter 1 to Chapter ${book.targetChapters}. Maximum ${maxWords} words.
@@ -503,6 +508,8 @@ Rules:
 - 5-8 volumes total.
 - Each volume has at most 6 bullets.
 - No scene prose. No paragraph longer than 35 words.
+- Use ONLY these established character names unless the story bible explicitly says a role is unnamed: ${castLine}
+- Hook payoff chapters must obey the hook table. If a later chapter continues a hook, call it "follow-up", not "payoff".
 - Must explicitly mention Chapter ${book.targetChapters}.
 - Last line exactly: END_VOLUME_OUTLINE
 
@@ -526,6 +533,8 @@ ${compactHooks}`;
 - 总共5-8卷。
 - 每卷最多6个项目符号。
 - 禁止写场景正文，禁止长段描写，禁止单个项目超过45字。
+- 只能使用已在story_bible中出现的角色名，不要临时发明新女主或把职业换成新人名。规范角色名单：${castLine}
+- 伏笔回收章必须服从 pending_hooks；如果后文继续推进，只能写“后续推进/最终反转”，不要写“回收”。
 - 必须明确写到第${book.targetChapters}章。
 - 最后一行必须精确输出：END_VOLUME_OUTLINE
 
@@ -592,6 +601,12 @@ ${compactHooks}`;
     for (const match of storyBible.matchAll(/^#{2,4}\s*([^\s—\-|]{2,8})\s*[—\-]/gmu)) {
       names.add(match[1]!.trim());
     }
+    for (const match of storyBible.matchAll(/^\*\*([^*\s—\-|]{2,8})\s*[—\-][^*]*\*\*/gmu)) {
+      const name = match[1]!.trim();
+      if (!/情欲|性格|限制|第[一二三四五六七八九十]|核心/.test(name)) {
+        names.add(name);
+      }
+    }
     for (const match of storyBible.matchAll(/^\|\s*([^\s|]{2,8})\s*\|/gmu)) {
       const name = match[1]!.trim();
       if (!/姓名|角色|---/.test(name)) {
@@ -618,14 +633,96 @@ ${compactHooks}`;
       .trim();
   }
 
-  private isVolumeOutlineComplete(content: string, targetChapters: number): boolean {
+  private isVolumeOutlineComplete(content: string, targetChapters: number, pendingHooks?: string): boolean {
     const normalized = content.replace(/\s+/g, " ");
     const reachesTargetChapter = new RegExp(`第\\s*${targetChapters}\\s*章`, "u").test(normalized)
       || new RegExp(`${Math.max(1, targetChapters - 4)}\\s*[-—~至到]\\s*${targetChapters}\\s*章`, "u").test(normalized)
       || new RegExp(`Chapter\\s*${targetChapters}\\b`, "iu").test(normalized);
     const hasEnoughStructure = (content.match(/第[^。\n]{0,12}卷|第\d+\s*[-—~至到]\s*\d+\s*章|Chapter\s+\d+/giu) ?? []).length >= 5;
     const hasEndMarker = /\bEND_VOLUME_OUTLINE\b/u.test(content);
-    return reachesTargetChapter && hasEnoughStructure && hasEndMarker;
+    const hasNoUnknownHookRefs = pendingHooks ? this.findUnknownHookRefs(content, pendingHooks).length === 0 : true;
+    return reachesTargetChapter && hasEnoughStructure && hasEndMarker && hasNoUnknownHookRefs;
+  }
+
+  private findUnknownHookRefs(content: string, pendingHooks: string): string[] {
+    const knownHooks = new Set([...pendingHooks.matchAll(/\bH[A-Z]*\d{2,}\b/giu)].map((match) => match[0]!.toUpperCase()));
+    if (knownHooks.size === 0) {
+      return [];
+    }
+    const referencedHooks = new Set([...content.matchAll(/\bH[A-Z]*\d{2,}\b/giu)].map((match) => match[0]!.toUpperCase()));
+    return [...referencedHooks].filter((hookId) => !knownHooks.has(hookId));
+  }
+
+  private buildInitialCurrentFocus(output: ArchitectOutput, language: "zh" | "en"): string {
+    const firstVolume = output.volumeOutline.split(/\n(?=##\s+)/u)[0]?.trim() ?? "";
+    const currentGoal = this.extractMarkdownTableValue(output.currentState, language === "en" ? "Current Goal" : "当前目标");
+    if (language === "en") {
+      return `# Current Focus
+
+## Immediate Priority
+
+${currentGoal || "Follow the opening volume and establish the first major relationship, conflict hook, and scene pressure."}
+
+## Next 1-3 Chapters
+
+${firstVolume || "Use volume_outline.md as the source of truth for the opening arc."}
+`;
+    }
+    return `# 当前聚焦
+
+## 当前重点
+
+${currentGoal || "按照开篇卷纲建立第一位核心角色、第一条冲突钩子和第一组场景压力。"}
+
+## 接下来1-3章
+
+${firstVolume || "以 volume_outline.md 的第一卷为准推进。"}
+`;
+  }
+
+  private buildInitialCharacterMatrix(
+    output: ArchitectOutput,
+    isAdultOutput: boolean,
+    language: "zh" | "en",
+  ): string {
+    const names = this.extractCharacterNames(output.storyBible);
+    if (language === "en") {
+      const profileRows = names.map((name) => `| ${name} | See story_bible | See story_bible | See story_bible | See story_bible | TBD | See story_bible | Follow volume_outline |`).join("\n");
+      const adultRows = isAdultOutput
+        ? `\n### Adult Character Fingerprints\n| Character | Kinks / Play Preferences | Position Dynamics | Dirty-Talk Lexicon | Climax Fingerprint Changes | Body-Memory Triggers | Next Upgrade |\n| --- | --- | --- | --- | --- | --- | --- |\n${names.map((name) => `| ${name} | See story_bible | See story_bible | See story_bible | See story_bible | See story_bible | Follow volume_outline |`).join("\n")}\n`
+        : "";
+      return `# Character Matrix\n\n### Character Profiles\n| Character | Core Tags | Contrast Detail | Speech Style | Personality Core | Relationship to Protagonist | Core Motivation | Current Goal |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${profileRows}\n\n### Encounter Log\n| Character A | Character B | First Meeting Chapter | Latest Interaction Chapter | Relationship Type | Relationship Change |\n| --- | --- | --- | --- | --- | --- |\n\n### Information Boundaries\n| Character | Known Information | Unknown Information | Source Chapter |\n| --- | --- | --- | --- |\n${adultRows}`;
+    }
+
+    const profileRows = names.map((name) => `| ${name} | 见story_bible | 见story_bible | 见story_bible | 见story_bible | 待推进 | 见story_bible | 按volume_outline推进 |`).join("\n");
+    const adultRows = isAdultOutput
+      ? `\n### 成人向角色指纹\n| 角色 | 性癖/玩法偏好 | 姿势偏好与禁区 | 专属骚话/回应词库 | 高潮指纹变化 | 身体记忆/新开关 | 下一次可升级方向 |\n|------|----------------|----------------|--------------------|--------------|----------------|------------------|\n${names.map((name) => `| ${name} | 见story_bible | 见story_bible | 见story_bible | 见story_bible | 见story_bible | 按volume_outline升级 |`).join("\n")}\n`
+      : "";
+    return `# 角色交互矩阵
+
+### 角色档案
+| 角色 | 核心标签 | 反差细节 | 说话风格 | 性格底色 | 与主角关系 | 核心动机 | 当前目标 |
+|------|----------|----------|----------|----------|------------|----------|----------|
+${profileRows}
+
+### 相遇记录
+| 角色A | 角色B | 首次相遇章 | 最近交互章 | 关系性质 | 关系变化 |
+|-------|-------|------------|------------|----------|----------|
+
+### 信息边界
+| 角色 | 已知信息 | 未知信息 | 信息来源章 |
+|------|----------|----------|------------|
+${adultRows}`;
+  }
+
+  private extractMarkdownTableValue(markdown: string, fieldName: string): string | undefined {
+    for (const line of markdown.split("\n")) {
+      const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+      if (cells.length >= 2 && cells[0] === fieldName) {
+        return cells[1];
+      }
+    }
+    return undefined;
   }
 
   async writeFoundationFiles(
@@ -637,6 +734,8 @@ ${compactHooks}`;
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
     const isAdultOutput = /成人|adult|H小说|情欲|sex|erotic/iu.test(`${output.bookRules}\n${output.storyBible}\n${output.volumeOutline}`);
+    const initialCurrentFocus = this.buildInitialCurrentFocus(output, language);
+    const initialCharacterMatrix = this.buildInitialCharacterMatrix(output, isAdultOutput, language);
 
     const writes: Array<Promise<void>> = [
       writeFile(join(storyDir, "story_bible.md"), output.storyBible, "utf-8"),
@@ -644,6 +743,7 @@ ${compactHooks}`;
       writeFile(join(storyDir, "book_rules.md"), output.bookRules, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), output.currentState, "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), output.pendingHooks, "utf-8"),
+      writeFile(join(storyDir, "current_focus.md"), initialCurrentFocus, "utf-8"),
     ];
 
     if (numericalSystem) {
@@ -676,9 +776,7 @@ ${compactHooks}`;
       ),
       writeFile(
         join(storyDir, "character_matrix.md"),
-        language === "en"
-          ? `# Character Matrix\n\n### Character Profiles\n| Character | Core Tags | Contrast Detail | Speech Style | Personality Core | Relationship to Protagonist | Core Motivation | Current Goal |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n\n### Encounter Log\n| Character A | Character B | First Meeting Chapter | Latest Interaction Chapter | Relationship Type | Relationship Change |\n| --- | --- | --- | --- | --- | --- |\n\n### Information Boundaries\n| Character | Known Information | Unknown Information | Source Chapter |\n| --- | --- | --- | --- |\n${isAdultOutput ? "\n### Adult Character Fingerprints\n| Character | Kinks / Play Preferences | Position Dynamics | Dirty-Talk Lexicon | Climax Fingerprint Changes | Body-Memory Triggers | Next Upgrade |\n| --- | --- | --- | --- | --- | --- | --- |\n" : ""}`
-          : `# 角色交互矩阵\n\n### 角色档案\n| 角色 | 核心标签 | 反差细节 | 说话风格 | 性格底色 | 与主角关系 | 核心动机 | 当前目标 |\n|------|----------|----------|----------|----------|------------|----------|----------|\n\n### 相遇记录\n| 角色A | 角色B | 首次相遇章 | 最近交互章 | 关系性质 | 关系变化 |\n|-------|-------|------------|------------|----------|----------|\n\n### 信息边界\n| 角色 | 已知信息 | 未知信息 | 信息来源章 |\n|------|----------|----------|------------|\n${isAdultOutput ? "\n### 成人向角色指纹\n| 角色 | 性癖/玩法偏好 | 姿势偏好与禁区 | 专属骚话/回应词库 | 高潮指纹变化 | 身体记忆/新开关 | 下一次可升级方向 |\n|------|----------------|----------------|--------------------|--------------|----------------|------------------|\n" : ""}`,
+        initialCharacterMatrix,
         "utf-8",
       ),
     );
