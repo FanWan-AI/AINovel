@@ -407,7 +407,108 @@ ${finalRequirementsPrompt}`;
       { role: "user", content: userMessage },
     ], { maxTokens: 16384, temperature: 0.8 });
 
-    return this.parseSections(response.content);
+    const foundation = this.parseSections(response.content);
+    if (book.platform === "adult") {
+      return this.withDedicatedAdultVolumeOutline(book, gp, foundation, resolvedLanguage);
+    }
+    return foundation;
+  }
+
+  private async withDedicatedAdultVolumeOutline(
+    book: BookConfig,
+    gp: GenreProfile,
+    foundation: ArchitectOutput,
+    language: "zh" | "en",
+  ): Promise<ArchitectOutput> {
+    const dedicatedOutline = await this.generateDedicatedAdultVolumeOutline(book, gp, foundation, language);
+    if (!this.isVolumeOutlineComplete(dedicatedOutline.raw, book.targetChapters)) {
+      this.log?.warn(
+        `[architect] Dedicated volume outline did not clearly cover chapter ${book.targetChapters}; keeping original outline.`,
+      );
+      return foundation;
+    }
+    return { ...foundation, volumeOutline: dedicatedOutline.cleaned };
+  }
+
+  private async generateDedicatedAdultVolumeOutline(
+    book: BookConfig,
+    gp: GenreProfile,
+    foundation: ArchitectOutput,
+    language: "zh" | "en",
+  ): Promise<{ readonly raw: string; readonly cleaned: string }> {
+    const targetChapters = book.targetChapters;
+    const compactStoryBible = this.compactForPrompt(foundation.storyBible, 9000);
+    const compactHooks = this.compactForPrompt(foundation.pendingHooks, 2500);
+    const prompt = language === "en"
+      ? `Generate ONLY volume_outline.md for the adult novel "${book.title}".
+Target: ${targetChapters} chapters, ${book.chapterWordCount} words/chapter.
+Use the existing story bible and hooks below.
+
+Hard requirements:
+- Do not output story_bible, book_rules, current_state, or pending_hooks.
+- Cover the full range from Chapter 1 to Chapter ${targetChapters}.
+- Use 5-8 volumes. Every volume must include: chapter range, core conflict, key turn, taboo escalation, scene-node list, edge-control/payoff list, and closing hook.
+- Keep it complete and concise. Do not write prose scenes.
+- End with the exact marker: END_VOLUME_OUTLINE
+
+Story bible:
+${compactStoryBible}
+
+Pending hooks:
+${compactHooks}`
+      : `只生成《${book.title}》的 volume_outline.md，不要生成其他文件。
+目标：${targetChapters}章，每章${book.chapterWordCount}字，题材：${gp.name}。
+
+硬性要求：
+- 只输出卷纲正文，不要输出 story_bible / book_rules / current_state / pending_hooks。
+- 必须覆盖第1章到第${targetChapters}章，不得停在中途。
+- 用5-8个卷或阶段组织；每卷必须包含：章节范围、核心冲突、关键转折、禁忌升级、代表性情欲节点列表、边缘控制/兑现节点、卷尾钩子。
+- 这是建书大纲，不是正文；情欲节点只写结构功能，不展开长篇场景。
+- 每个节点要保留“角色差异、玩法差异、关系后果”，避免只列姿势。
+- 最后一行必须输出精确标记：END_VOLUME_OUTLINE
+
+已有 story_bible：
+${compactStoryBible}
+
+已有 pending_hooks：
+${compactHooks}`;
+
+    const response = await this.chat([
+      { role: "system", content: "你是网络小说卷纲架构师，擅长把长篇设定压缩成完整、可执行、不中途截断的章节规划。" },
+      { role: "user", content: prompt },
+    ], { maxTokens: 12000, temperature: 0.45 });
+
+    return {
+      raw: response.content,
+      cleaned: this.cleanDedicatedVolumeOutline(response.content),
+    };
+  }
+
+  private compactForPrompt(content: string, maxChars: number): string {
+    const normalized = content.trim();
+    if (normalized.length <= maxChars) {
+      return normalized;
+    }
+    const head = normalized.slice(0, Math.floor(maxChars * 0.7)).trimEnd();
+    const tail = normalized.slice(-Math.floor(maxChars * 0.25)).trimStart();
+    return `${head}\n\n...[中间内容已压缩]...\n\n${tail}`;
+  }
+
+  private cleanDedicatedVolumeOutline(content: string): string {
+    return content
+      .replace(/^\s*===\s*SECTION\s*[：:]\s*volume_outline\s*===\s*/iu, "")
+      .replace(/\bEND_VOLUME_OUTLINE\b[\s\S]*$/u, "")
+      .trim();
+  }
+
+  private isVolumeOutlineComplete(content: string, targetChapters: number): boolean {
+    const normalized = content.replace(/\s+/g, " ");
+    const reachesTargetChapter = new RegExp(`第\\s*${targetChapters}\\s*章`, "u").test(normalized)
+      || new RegExp(`${Math.max(1, targetChapters - 4)}\\s*[-—~至到]\\s*${targetChapters}\\s*章`, "u").test(normalized)
+      || new RegExp(`Chapter\\s*${targetChapters}\\b`, "iu").test(normalized);
+    const hasEnoughStructure = (content.match(/第[^。\n]{0,12}卷|第\d+\s*[-—~至到]\s*\d+\s*章|Chapter\s+\d+/giu) ?? []).length >= 5;
+    const hasEndMarker = /\bEND_VOLUME_OUTLINE\b/u.test(content);
+    return reachesTargetChapter && hasEnoughStructure && hasEndMarker;
   }
 
   async writeFoundationFiles(
